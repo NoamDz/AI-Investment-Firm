@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from enum import StrEnum
-from typing import Literal, Union
+from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, Field
 
@@ -68,7 +68,10 @@ class HoldPayload(BaseModel):
 
 class EscalatePayload(BaseModel):
     kind: Literal["escalate"] = "escalate"
-    proposed: BuyPayload | SellPayload
+    proposed: Annotated[
+        Union[BuyPayload, SellPayload],
+        Field(discriminator="kind"),
+    ]
     reason: str
 
 
@@ -77,7 +80,10 @@ class RefusePayload(BaseModel):
     reason: str
 
 
-TypedPayload = Union[BuyPayload, SellPayload, HoldPayload, EscalatePayload, RefusePayload]
+TypedPayload = Annotated[
+    Union[BuyPayload, SellPayload, HoldPayload, EscalatePayload, RefusePayload],
+    Field(discriminator="kind"),
+]
 
 
 class Decision(BaseModel):
@@ -91,5 +97,5 @@ class Decision(BaseModel):
     falsification_condition: str = Field(min_length=1)
     escalation_reason: str | None = None
     failure_mode: FailureMode | None = None
-    metadata: dict = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     nonce: str = Field(min_length=1)
