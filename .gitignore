@@ -10,6 +10,7 @@ data/firm.db-wal
 data/firm.db-shm
 data/backups/
 data/qdrant/
+data/reports/
 .env
 .env.local
 *.egg-info/
