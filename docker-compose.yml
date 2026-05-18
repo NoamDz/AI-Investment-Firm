@@ -1,0 +1,11 @@
+services:
+  firm:
+    build: .
+    environment:
+      FIRM_BROKER: FAKE
+      FIRM_HMAC_SECRET: "change-me-32-bytes-of-secret-data-x"
+      FIRM_DB_PATH: /data/firm.db
+      FIRM_REPORTS_ROOT: /data/reports
+      FIRM_REPLAY_AT: "2024-03-13T14:30:00+00:00"
+    volumes:
+      - ./data:/data
