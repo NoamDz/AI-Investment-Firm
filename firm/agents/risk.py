@@ -116,7 +116,8 @@ def evaluate_risk(input: RiskInput) -> Decision:
         if cash_pct < p.limits.min_cash_pct:
             return _decision_from_breach(input, f"cash buffer {cash_pct:.3f} < {p.limits.min_cash_pct}")
 
-    # Sector concentration
+    # Sector concentration. Plan 1: single quote_price applied to all sector positions.
+    # Per-ticker pricing arrives with the multi-quote bus in Plan 2.
     sector = input.sector_map.get(ticker, "unknown")
     sector_value = sum(
         input.positions.get(t, Decimal("0")) * input.quote_price
@@ -128,10 +129,13 @@ def evaluate_risk(input: RiskInput) -> Decision:
     if sector_pct > p.limits.max_sector_pct:
         return _decision_from_breach(input, f"sector {sector} {sector_pct:.3f} > {p.limits.max_sector_pct}")
 
-    # HITL threshold
-    if trade_pct > p.hitl.trade_threshold_pct or (
-        p.hitl.escalate_new_ticker and cur_shares == Decimal("0") and proposal.action == ActionEnum.BUY
-    ):
-        return _escalate(input, "trade exceeds HITL threshold or new ticker")
+    # max_gross_exposure: deferred — Plan 1 has no shorts, so gross == net.
+    # Re-enable when Plan 2 introduces short positions.
+
+    # HITL threshold — emit distinct reasons so audit trail is unambiguous
+    if trade_pct > p.hitl.trade_threshold_pct:
+        return _escalate(input, f"trade size {trade_pct:.3f} > HITL threshold {p.hitl.trade_threshold_pct}")
+    if p.hitl.escalate_new_ticker and cur_shares == Decimal("0") and proposal.action == ActionEnum.BUY:
+        return _escalate(input, f"new ticker {ticker} (no existing position)")
 
     return _pass(input)
