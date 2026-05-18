@@ -11,6 +11,12 @@ from firm.db.connection import get_conn
 
 
 def _persist_decisions_from_state(state: dict, db_path: Path, clock: Clock) -> None:
+    """Persist all top-level Decision values in `state` to the decisions table.
+
+    Plan 1 assumption: WorkingState stores Decisions as scalar top-level values
+    (research_decision, pm_decision, risk_decision). If Plan 2/3 introduces
+    nested Decisions (e.g., inside metadata or lists), revisit this scan.
+    """
     decisions: list[Decision] = [v for v in state.values() if isinstance(v, Decision)]
     if not decisions:
         return

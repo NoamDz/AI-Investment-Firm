@@ -42,7 +42,12 @@ def build_graph(
     g.add_edge("pm", "risk")
 
     def route_after_risk(state: WorkingState) -> str:
-        return "hitl" if state["risk_decision"].action == ActionEnum.ESCALATE else "execution"
+        decision = state.get("risk_decision")
+        if decision is None:
+            # Risk node did not produce a decision (e.g., crashed mid-run). Skip HITL and
+            # let execution short-circuit on the missing/non-actionable decision.
+            return "execution"
+        return "hitl" if decision.action == ActionEnum.ESCALATE else "execution"
 
     g.add_conditional_edges("risk", route_after_risk, {"hitl": "hitl", "execution": "execution"})
     g.add_edge("hitl", "execution")
