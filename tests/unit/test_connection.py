@@ -1,4 +1,5 @@
 from pathlib import Path
+import sqlite3 as _sqlite3  # alias to avoid colliding with any other local import
 from firm.db.connection import get_conn
 
 
@@ -16,3 +17,20 @@ def test_connection_row_factory_returns_dicts(tmp_path: Path):
     row = conn.execute("SELECT * FROM t").fetchone()
     assert row["a"] == 1
     assert row["b"] == "hello"
+
+
+def test_connection_creates_missing_parent_dirs(tmp_path: Path):
+    nested = tmp_path / "a" / "b" / "c" / "test.db"
+    conn = get_conn(nested)
+    assert nested.exists()
+    conn.execute("CREATE TABLE t (x INTEGER)")
+
+
+def test_foreign_keys_are_per_connection(tmp_path: Path):
+    """foreign_keys=ON does NOT persist across close/reopen.
+    Documents the invariant that every caller must use get_conn."""
+    conn = get_conn(tmp_path / "test.db")
+    conn.close()
+    raw = _sqlite3.connect(str(tmp_path / "test.db"))
+    assert raw.execute("PRAGMA foreign_keys").fetchone()[0] == 0
+    raw.close()

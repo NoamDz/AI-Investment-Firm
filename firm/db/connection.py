@@ -15,7 +15,9 @@ def get_conn(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode = WAL")
+    mode = conn.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+    if mode != "wal":
+        raise RuntimeError(f"SQLite failed to switch to WAL mode (got {mode!r})")
     conn.execute("PRAGMA synchronous = FULL")
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
