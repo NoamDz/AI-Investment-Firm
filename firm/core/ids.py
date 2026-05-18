@@ -12,6 +12,10 @@ def ulid_new() -> str:
 
 
 def sign_nonce(secret: bytes, *, decision_id: str, timestamp: int) -> str:
+    if not secret:
+        raise ValueError("secret must be non-empty")
+    if ":" in decision_id:
+        raise ValueError(f"decision_id must not contain ':'; got {decision_id!r}")
     msg = f"{decision_id}:{timestamp}".encode()
     return hmac.new(secret, msg, hashlib.sha256).hexdigest()
 
