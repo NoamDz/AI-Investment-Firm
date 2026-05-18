@@ -32,7 +32,7 @@ def test_submit_is_idempotent_on_same_key():
 def test_buy_reduces_cash_by_price_plus_commission():
     b = FakeBroker(initial_cash=Decimal("100000"))
     b.submit({"kind": "buy", "ticker": "AAPL", "shares": "10"}, "key-1")
-    quote = b.get_quote("AAPL")
+    b.get_quote("AAPL")
     # FakeBroker uses a fixed price function; assert cash dropped by reasonable amount
     assert Decimal("100000") - b.get_cash() > Decimal("0")
     assert b.get_cash() < Decimal("100000")
@@ -72,7 +72,7 @@ def test_avg_cost_is_weighted_average_across_two_buys():
     """
     b = FakeBroker(initial_cash=Decimal("1000000"))
     r1 = b.submit({"kind": "buy", "ticker": "AAPL", "shares": "10"}, "k1")
-    r2 = b.submit({"kind": "buy", "ticker": "AAPL", "shares": "5"}, "k2")
+    b.submit({"kind": "buy", "ticker": "AAPL", "shares": "5"}, "k2")
     pos = [p for p in b.list_positions() if p.ticker == "AAPL"][0]
     assert pos.shares == Decimal("15")
     # Both buys are at the same fill_price (same ticker, FakeBroker is deterministic),

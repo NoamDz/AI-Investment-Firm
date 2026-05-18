@@ -4,13 +4,15 @@ from __future__ import annotations
 import json
 from contextlib import closing
 from pathlib import Path
+from typing import Any, Callable
 
 from firm.core.clock import Clock
 from firm.core.models import Decision
 from firm.db.connection import get_conn
+from firm.orchestrator.state import WorkingState
 
 
-def _persist_decisions_from_state(state: dict, db_path: Path, clock: Clock) -> None:
+def _persist_decisions_from_state(state: WorkingState | dict[str, Any], db_path: Path, clock: Clock) -> None:
     """Persist all top-level Decision values in `state` to the decisions table.
 
     Plan 1 assumption: WorkingState stores Decisions as scalar top-level values
@@ -35,8 +37,10 @@ def _persist_decisions_from_state(state: dict, db_path: Path, clock: Clock) -> N
             )
 
 
-def make_reporter(*, reports_root: Path, clock: Clock, db_path: Path | None = None):
-    def reporter(state: dict) -> dict:
+def make_reporter(
+    *, reports_root: Path, clock: Clock, db_path: Path | None = None
+) -> Callable[[WorkingState], dict[str, Any]]:
+    def reporter(state: WorkingState) -> dict[str, Any]:
         now = clock.now()
         date_dir = reports_root / now.strftime("%Y-%m-%d")
         date_dir.mkdir(parents=True, exist_ok=True)

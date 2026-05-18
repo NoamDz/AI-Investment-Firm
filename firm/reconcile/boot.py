@@ -6,6 +6,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from firm.audit.log import AuditLog
 from firm.broker.protocol import Broker
@@ -16,7 +17,7 @@ from firm.db.connection import get_conn
 @dataclass
 class ReconcileResult:
     status: str  # 'ok' or 'mismatch'
-    diff: dict
+    diff: dict[str, Any]
 
 
 def _local_positions(db_path: Path) -> dict[str, Decimal]:
@@ -36,13 +37,13 @@ def reconcile_on_boot(db_path: Path, broker: Broker, clock: Clock) -> ReconcileR
     local_positions = _local_positions(db_path)
     local_cash = _local_cash(db_path)
 
-    diff: dict = {}
+    diff: dict[str, Any] = {}
     pos_diff = {}
     for t in set(broker_positions) | set(local_positions):
         b = broker_positions.get(t, Decimal("0"))
-        l = local_positions.get(t, Decimal("0"))
-        if b != l:
-            pos_diff[t] = {"broker": str(b), "local": str(l)}
+        local = local_positions.get(t, Decimal("0"))
+        if b != local:
+            pos_diff[t] = {"broker": str(b), "local": str(local)}
     if pos_diff:
         diff["positions"] = pos_diff
     if broker_cash != local_cash:

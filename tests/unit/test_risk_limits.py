@@ -95,6 +95,6 @@ def test_hitl_threshold_escalates_instead_of_passing():
 
 def test_every_limit_has_at_least_one_triggering_fixture():
     """CI invariant: each enumerated limit row must be triggered by a test above."""
-    import inspect, sys
+    import sys
     triggered = {n for n in dir(sys.modules[__name__]) if n.startswith("test_blocks_")}
     assert len(triggered) >= 7

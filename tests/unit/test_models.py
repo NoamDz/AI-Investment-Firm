@@ -1,7 +1,7 @@
 from decimal import Decimal
 from firm.core.models import (
-    ActionEnum, FailureMode, Citation, Claim,
-    BuyPayload, SellPayload, HoldPayload, Decision,
+    ActionEnum, FailureMode, Claim,
+    BuyPayload, HoldPayload, Decision,
 )
 
 

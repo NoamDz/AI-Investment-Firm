@@ -6,16 +6,20 @@ The function signature stays stable across plans.
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Any, Callable
 
 from firm.broker.protocol import Broker
 from firm.core.clock import Clock
 from firm.core.config import UniverseConfig
 from firm.core.ids import ulid_new
 from firm.core.models import ActionEnum, BuyPayload, Decision
+from firm.orchestrator.state import WorkingState
 
 
-def make_research(*, clock: Clock, broker: Broker, universe: UniverseConfig):
-    def research(state: dict) -> dict:
+def make_research(
+    *, clock: Clock, broker: Broker, universe: UniverseConfig
+) -> Callable[[WorkingState], dict[str, Any]]:
+    def research(state: WorkingState) -> dict[str, Any]:
         # Deterministic ticker selection: cheapest in universe by FakeBroker's price function
         prices = {t: broker.get_quote(t).price for t in universe.tickers}
         chosen = min(prices, key=lambda t: prices[t])

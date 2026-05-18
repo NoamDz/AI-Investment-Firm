@@ -3,15 +3,17 @@ from __future__ import annotations
 
 from contextlib import closing
 from pathlib import Path
+from typing import Any, Callable
 
 from firm.audit.log import AuditLog
 from firm.core.clock import Clock
 from firm.core.models import ActionEnum, Decision
 from firm.db.connection import get_conn
+from firm.orchestrator.state import WorkingState
 
 
-def make_hitl(*, db_path: Path, clock: Clock):
-    def hitl(state: dict) -> dict:
+def make_hitl(*, db_path: Path, clock: Clock) -> Callable[[WorkingState], dict[str, Any]]:
+    def hitl(state: WorkingState) -> dict[str, Any]:
         risk: Decision = state["risk_decision"]
         if risk.action != ActionEnum.ESCALATE:
             return {"hitl_required": False, "hitl_approved": True}

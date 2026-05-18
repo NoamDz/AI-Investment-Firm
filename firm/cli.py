@@ -7,6 +7,7 @@ from contextlib import closing
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -24,7 +25,13 @@ from firm.core.config import load_policy, load_universe
 from firm.db.connection import get_conn
 from firm.db.migrations import init_db
 from firm.orchestrator.graph import build_graph
+from firm.orchestrator.state import WorkingState
 from firm.reconcile.boot import reconcile_on_boot
+
+try:
+    from langchain_core.runnables import RunnableConfig
+except ImportError:
+    RunnableConfig = dict  # type: ignore[assignment,misc]
 
 
 def _seed_db_from_broker(db_path: Path, broker: Broker, clock: Clock) -> None:
@@ -46,7 +53,7 @@ def _seed_db_from_broker(db_path: Path, broker: Broker, clock: Clock) -> None:
             )
 
 
-def _resolve_clock():
+def _resolve_clock() -> Clock:
     replay = os.environ.get("FIRM_REPLAY_AT")
     if replay:
         return ReplayClock(datetime.fromisoformat(replay))
@@ -62,13 +69,13 @@ def _reports_root() -> Path:
 
 
 @click.group()
-def cli():
+def cli() -> None:
     pass
 
 
 @cli.command()
 @click.option("--once/--loop", default=True, help="Single heartbeat (default) or loop (loop is Plan 3+).")
-def run(once: bool):
+def run(once: bool) -> None:
     """Run one heartbeat of the firm end-to-end."""
     db = _db_path()
     init_db(db)
@@ -88,7 +95,7 @@ def run(once: bool):
     research = make_research(clock=clock, broker=broker, universe=universe)
     pm = make_pm()
 
-    def risk_node(state: dict) -> dict:
+    def risk_node(state: WorkingState) -> dict[str, Any]:
         proposal = state["pm_decision"]
         ticker = proposal.payload.ticker if hasattr(proposal.payload, "ticker") else "AAPL"
         quote = broker.get_quote(ticker)
@@ -111,7 +118,7 @@ def run(once: bool):
         risk_node=risk_node, hitl_node=hitl, execution_node=execution, reporter_node=reporter,
     )
 
-    config = {"configurable": {"thread_id": clock.now().isoformat()}}
+    config: RunnableConfig = {"configurable": {"thread_id": clock.now().isoformat()}}
     final = graph.invoke({}, config=config)
     click.echo(f"Heartbeat complete. Report: {final.get('report_path')}")
 
@@ -119,7 +126,7 @@ def run(once: bool):
 @cli.command()
 @click.argument("decision_id")
 @click.option("--approver", default="cli-user")
-def ack(decision_id: str, approver: str):
+def ack(decision_id: str, approver: str) -> None:
     """Approve a queued HITL decision (Plan 1 stand-in for Slack)."""
     mark_approved(db_path=_db_path(), decision_id=decision_id, approver=approver, clock=_resolve_clock())
     click.echo(f"approved: {decision_id}")
@@ -128,14 +135,14 @@ def ack(decision_id: str, approver: str):
 @cli.command()
 @click.argument("decision_id")
 @click.option("--approver", default="cli-user")
-def reject(decision_id: str, approver: str):
+def reject(decision_id: str, approver: str) -> None:
     """Reject a queued HITL decision."""
     mark_rejected(db_path=_db_path(), decision_id=decision_id, approver=approver, clock=_resolve_clock())
     click.echo(f"rejected: {decision_id}")
 
 
 @cli.command()
-def reconcile():
+def reconcile() -> None:
     """Run boot reconciliation against the broker and print the result."""
     db = _db_path()
     init_db(db)
@@ -148,7 +155,7 @@ def reconcile():
         click.echo(f"diff: {result.diff}")
 
 
-def main():
+def main() -> None:
     cli()
 
 

@@ -5,7 +5,7 @@ import os
 from decimal import Decimal
 from typing import Any
 
-from firm.broker.protocol import OrderResult, Position, Quote
+from firm.broker.protocol import Broker, OrderResult, Position, Quote
 
 
 class AlpacaBroker:
@@ -29,17 +29,27 @@ class AlpacaBroker:
         self._data = StockHistoricalDataClient(api_key, secret)
 
     def list_positions(self) -> list[Position]:
+        from alpaca.trading.models import Position as AlpacaPosition
+
+        raw = self._trading.get_all_positions()
+        if isinstance(raw, dict):
+            raise RuntimeError(f"Alpaca get_all_positions returned an error dict: {raw}")
         return [
             Position(
                 ticker=p.symbol,
                 shares=Decimal(str(p.qty)),
                 avg_cost=Decimal(str(p.avg_entry_price)),
             )
-            for p in self._trading.get_all_positions()
+            for p in raw
+            if isinstance(p, AlpacaPosition)
         ]
 
     def get_cash(self) -> Decimal:
+        from alpaca.trading.models import TradeAccount
+
         acct = self._trading.get_account()
+        if not isinstance(acct, TradeAccount):
+            raise RuntimeError(f"Alpaca get_account returned an error dict: {acct}")
         return Decimal(str(acct.cash))
 
     def get_quote(self, ticker: str) -> Quote:
@@ -50,8 +60,10 @@ class AlpacaBroker:
         return Quote(ticker=ticker, price=price, timestamp=q.timestamp.isoformat())
 
     def submit(self, decision_payload: dict[str, Any], idempotency_key: str) -> OrderResult:
+        from alpaca.trading.models import Order as AlpacaOrder
         from alpaca.trading.requests import MarketOrderRequest
         from alpaca.trading.enums import OrderSide, TimeInForce
+
         side = OrderSide.BUY if decision_payload["kind"] == "buy" else OrderSide.SELL
         req = MarketOrderRequest(
             symbol=decision_payload["ticker"],
@@ -61,9 +73,11 @@ class AlpacaBroker:
             client_order_id=idempotency_key,  # Alpaca's idempotency mechanism
         )
         order = self._trading.submit_order(req)
+        if not isinstance(order, AlpacaOrder):
+            raise RuntimeError(f"Alpaca submit_order returned an error dict: {order}")
         return OrderResult(
             order_id=str(order.id),
-            ticker=order.symbol,
+            ticker=str(order.symbol),
             filled_shares=Decimal(str(order.filled_qty or 0)),
             avg_fill_price=Decimal(str(order.filled_avg_price or 0)),
             commission=Decimal("0"),  # Alpaca paper has no commission
@@ -73,7 +87,7 @@ class AlpacaBroker:
         )
 
 
-def make_broker():
+def make_broker() -> Broker:
     """Factory: select broker by FIRM_BROKER env var. Default FakeBroker."""
     kind = os.environ.get("FIRM_BROKER", "FAKE").upper()
     if kind == "ALPACA":

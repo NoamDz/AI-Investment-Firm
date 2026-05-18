@@ -1,7 +1,7 @@
 """LangGraph shared state. See spec §3.1, §4.1."""
 from __future__ import annotations
 
-from typing import Annotated, TypedDict
+from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import add_messages
 
@@ -20,6 +20,6 @@ class WorkingState(TypedDict, total=False):
     risk_decision: Decision
     hitl_required: bool
     hitl_approved: bool | None
-    execution_result: dict             # OrderResult-as-dict
+    execution_result: dict[str, Any]   # OrderResult-as-dict
     report_path: str
     notes: Annotated[list[str], add_messages]

@@ -16,5 +16,5 @@ def test_reporter_writes_jsonl(tmp_path: Path):
     out = reporter(state)
     p = Path(out["report_path"])
     assert p.exists()
-    lines = [json.loads(l) for l in p.read_text().splitlines()]
-    assert any(l.get("execution_result") for l in lines)
+    lines = [json.loads(line) for line in p.read_text().splitlines()]
+    assert any(line.get("execution_result") for line in lines)

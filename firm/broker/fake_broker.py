@@ -5,6 +5,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Any
 
 from firm.broker.protocol import OrderResult, Position, Quote
 
@@ -37,7 +38,7 @@ class FakeBroker:
             timestamp=datetime.now(tz=timezone.utc).isoformat(),
         )
 
-    def submit(self, decision_payload: dict, idempotency_key: str) -> OrderResult:
+    def submit(self, decision_payload: dict[str, Any], idempotency_key: str) -> OrderResult:
         payload_hash = hashlib.sha256(
             json.dumps(decision_payload, sort_keys=True, default=str).encode()
         ).hexdigest()

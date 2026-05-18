@@ -4,12 +4,15 @@ Plan 2 swaps this for vote-of-3 self-consistency over LLM rationales.
 """
 from __future__ import annotations
 
+from typing import Any, Callable
+
 from firm.core.ids import ulid_new
 from firm.core.models import Decision
+from firm.orchestrator.state import WorkingState
 
 
-def make_pm():
-    def pm(state: dict) -> dict:
+def make_pm() -> Callable[[WorkingState], dict[str, Any]]:
+    def pm(state: WorkingState) -> dict[str, Any]:
         research: Decision = state["research_decision"]
         decision = Decision(
             id=ulid_new(), decision_id_chain=[research.id],

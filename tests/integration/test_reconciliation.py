@@ -1,4 +1,3 @@
-import json
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -7,7 +6,7 @@ from firm.broker.fake_broker import FakeBroker
 from firm.core.clock import ReplayClock
 from firm.db.connection import get_conn
 from firm.db.migrations import init_db
-from firm.reconcile.boot import ReconcileResult, reconcile_on_boot
+from firm.reconcile.boot import reconcile_on_boot
 
 
 def _seed_local_position(db: Path, ticker: str, shares: str, avg_cost: str, clock):
