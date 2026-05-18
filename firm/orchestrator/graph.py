@@ -1,0 +1,54 @@
+"""LangGraph topology. See spec §3.1."""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Callable
+
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.graph import END, StateGraph
+
+from firm.orchestrator.state import WorkingState
+
+
+def build_graph(
+    *,
+    db_path: Path,
+    monitor_node: Callable,
+    research_node: Callable,
+    pm_node: Callable,
+    risk_node: Callable,
+    hitl_node: Callable,
+    execution_node: Callable,
+    reporter_node: Callable,
+):
+    """Compose the firm's workflow.
+
+    Edges: monitor → research → pm → risk → (hitl|execution) → reporter
+    Conditional after risk: if hitl_required → hitl → execution; else → execution.
+    """
+    g = StateGraph(WorkingState)
+    g.add_node("monitor", monitor_node)
+    g.add_node("research", research_node)
+    g.add_node("pm", pm_node)
+    g.add_node("risk", risk_node)
+    g.add_node("hitl", hitl_node)
+    g.add_node("execution", execution_node)
+    g.add_node("reporter", reporter_node)
+
+    g.set_entry_point("monitor")
+    g.add_edge("monitor", "research")
+    g.add_edge("research", "pm")
+    g.add_edge("pm", "risk")
+
+    def route_after_risk(state: WorkingState) -> str:
+        return "hitl" if state.get("hitl_required") else "execution"
+
+    g.add_conditional_edges("risk", route_after_risk, {"hitl": "hitl", "execution": "execution"})
+    g.add_edge("hitl", "execution")
+    g.add_edge("execution", "reporter")
+    g.add_edge("reporter", END)
+
+    import sqlite3
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    saver = SqliteSaver(conn)
+    return g.compile(checkpointer=saver, interrupt_before=["hitl"])
