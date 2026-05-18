@@ -104,7 +104,7 @@ def run(once: bool):
 
     hitl = make_hitl(db_path=db, clock=clock)
     execution = make_execution(db_path=db, broker=broker, clock=clock)
-    reporter = make_reporter(reports_root=_reports_root(), clock=clock)
+    reporter = make_reporter(reports_root=_reports_root(), clock=clock, db_path=db)
 
     graph = build_graph(
         db_path=db, monitor_node=monitor, research_node=research, pm_node=pm,

@@ -7,6 +7,7 @@ from typing import Callable
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, StateGraph
 
+from firm.core.models import ActionEnum
 from firm.orchestrator.state import WorkingState
 
 
@@ -41,7 +42,7 @@ def build_graph(
     g.add_edge("pm", "risk")
 
     def route_after_risk(state: WorkingState) -> str:
-        return "hitl" if state.get("hitl_required") else "execution"
+        return "hitl" if state["risk_decision"].action == ActionEnum.ESCALATE else "execution"
 
     g.add_conditional_edges("risk", route_after_risk, {"hitl": "hitl", "execution": "execution"})
     g.add_edge("hitl", "execution")

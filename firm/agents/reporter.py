@@ -2,12 +2,34 @@
 from __future__ import annotations
 
 import json
+from contextlib import closing
 from pathlib import Path
 
 from firm.core.clock import Clock
+from firm.core.models import Decision
+from firm.db.connection import get_conn
 
 
-def make_reporter(*, reports_root: Path, clock: Clock):
+def _persist_decisions_from_state(state: dict, db_path: Path, clock: Clock) -> None:
+    decisions: list[Decision] = [v for v in state.values() if isinstance(v, Decision)]
+    if not decisions:
+        return
+    with closing(get_conn(db_path)) as conn:
+        for d in decisions:
+            conn.execute(
+                "INSERT OR IGNORE INTO decisions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    d.id, json.dumps(d.decision_id_chain), d.action.value,
+                    d.payload.model_dump_json(), d.rationale, d.confidence,
+                    json.dumps([c.model_dump(mode="json") for c in d.citations]),
+                    d.falsification_condition, d.escalation_reason,
+                    d.failure_mode.value if d.failure_mode else None,
+                    json.dumps(d.metadata), d.nonce, clock.now().isoformat(),
+                ),
+            )
+
+
+def make_reporter(*, reports_root: Path, clock: Clock, db_path: Path | None = None):
     def reporter(state: dict) -> dict:
         now = clock.now()
         date_dir = reports_root / now.strftime("%Y-%m-%d")
@@ -15,5 +37,7 @@ def make_reporter(*, reports_root: Path, clock: Clock):
         path = date_dir / "decisions.jsonl"
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps({"ts": now.isoformat(), **state}, default=str) + "\n")
+        if db_path is not None:
+            _persist_decisions_from_state(state, db_path, clock)
         return {"report_path": str(path)}
     return reporter
