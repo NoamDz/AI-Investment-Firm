@@ -1,0 +1,95 @@
+"""Core typed contracts emitted by every agent. See design spec §3.4, §3.5, §7.2."""
+from __future__ import annotations
+
+from decimal import Decimal
+from enum import StrEnum
+from typing import Literal, Union
+
+from pydantic import BaseModel, Field
+
+
+class ActionEnum(StrEnum):
+    BUY = "BUY"
+    SELL = "SELL"
+    HOLD = "HOLD"
+    ESCALATE = "ESCALATE"
+    REFUSE = "REFUSE"
+
+
+class FailureMode(StrEnum):
+    UNCITED_CLAIM = "uncited_claim"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+    PROMPT_INJECTION_DETECTED = "prompt_injection_detected"
+    RISK_LIMIT_BREACHED = "risk_limit_breached"
+    HITL_TIMEOUT = "hitl_timeout"
+    SCHEMA_VALIDATION_FAILED = "schema_validation_failed"
+    LLM_UNAVAILABLE = "llm_unavailable"
+    STALE_DATA = "stale_data"
+    UNGROUNDED_CLAIM = "ungrounded_claim"
+    TOOL_PERMISSION_DENIED = "tool_permission_denied"
+    UNAPPROVED_HIGH_RISK = "unapproved_high_risk"
+    BROKER_UNAVAILABLE = "broker_unavailable"
+    UNKNOWN = "unknown"
+
+
+class Citation(BaseModel):
+    source_id: str
+    chunk_id: str
+    span: tuple[int, int]
+
+
+class Claim(BaseModel):
+    text: str
+    value: Decimal | None = None
+    unit: str | None = None
+    source_chunk_id: str | None = None
+    source_span: tuple[int, int] | None = None
+    tool_call_id: str | None = None
+
+
+class BuyPayload(BaseModel):
+    kind: Literal["buy"] = "buy"
+    ticker: str
+    shares: Decimal
+    limit_price: Decimal | None = None
+
+
+class SellPayload(BaseModel):
+    kind: Literal["sell"] = "sell"
+    ticker: str
+    shares: Decimal
+    limit_price: Decimal | None = None
+
+
+class HoldPayload(BaseModel):
+    kind: Literal["hold"] = "hold"
+    reason: str
+
+
+class EscalatePayload(BaseModel):
+    kind: Literal["escalate"] = "escalate"
+    proposed: BuyPayload | SellPayload
+    reason: str
+
+
+class RefusePayload(BaseModel):
+    kind: Literal["refuse"] = "refuse"
+    reason: str
+
+
+TypedPayload = Union[BuyPayload, SellPayload, HoldPayload, EscalatePayload, RefusePayload]
+
+
+class Decision(BaseModel):
+    id: str
+    decision_id_chain: list[str] = Field(default_factory=list)
+    action: ActionEnum
+    payload: TypedPayload
+    rationale: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+    citations: list[Citation] = Field(default_factory=list)
+    falsification_condition: str = Field(min_length=1)
+    escalation_reason: str | None = None
+    failure_mode: FailureMode | None = None
+    metadata: dict = Field(default_factory=dict)
+    nonce: str = Field(min_length=1)
