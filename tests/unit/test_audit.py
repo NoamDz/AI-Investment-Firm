@@ -20,4 +20,5 @@ def test_audit_append_and_read(tmp_path: Path):
     assert len(rows) == 2
     assert rows[0]["event"] == "reconcile.boot"
     assert json.loads(rows[0]["detail"]) == {"status": "ok", "diff": None}
+    assert rows[0]["ts"] == "2024-03-13T14:30:00+00:00"
     assert rows[1]["event"] == "hitl.ack"

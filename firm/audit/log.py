@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -15,12 +16,12 @@ class AuditLog:
         self._clock = clock
 
     def append(self, event: str, detail: dict[str, Any]) -> None:
-        conn = get_conn(self._db_path)
-        conn.execute(
-            "INSERT INTO audit_log (ts, event, detail) VALUES (?, ?, ?)",
-            (self._clock.now().isoformat(), event, json.dumps(detail, default=str)),
-        )
+        with closing(get_conn(self._db_path)) as conn:
+            conn.execute(
+                "INSERT INTO audit_log (ts, event, detail) VALUES (?, ?, ?)",
+                (self._clock.now().isoformat(), event, json.dumps(detail, default=str)),
+            )
 
     def read_all(self) -> list[dict[str, Any]]:
-        conn = get_conn(self._db_path)
-        return [dict(r) for r in conn.execute("SELECT * FROM audit_log ORDER BY id")]
+        with closing(get_conn(self._db_path)) as conn:
+            return [dict(r) for r in conn.execute("SELECT * FROM audit_log ORDER BY id")]
