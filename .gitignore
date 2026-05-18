@@ -1,5 +1,5 @@
 __pycache__/
-*.pyc
+*.py[cod]
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -11,6 +11,14 @@ data/firm.db-shm
 data/backups/
 data/qdrant/
 .env
+.env.local
 *.egg-info/
 dist/
 build/
+.coverage
+htmlcov/
+.idea/
+.vscode/
+.DS_Store
+logs/
+artifacts/
