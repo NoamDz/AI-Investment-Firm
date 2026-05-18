@@ -1,5 +1,5 @@
 # GnuWin32 Make defaults to cmd.exe; force bash so recipes use POSIX syntax.
-SHELL := /usr/bin/bash
+SHELL := bash
 
 .PHONY: install test demo demo-docker reconcile clean
 

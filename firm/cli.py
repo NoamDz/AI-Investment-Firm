@@ -58,7 +58,7 @@ def _db_path() -> Path:
 
 
 def _reports_root() -> Path:
-    return Path(os.environ.get("FIRM_REPORTS_ROOT", "reports"))
+    return Path(os.environ.get("FIRM_REPORTS_ROOT", "data/reports"))
 
 
 @click.group()
