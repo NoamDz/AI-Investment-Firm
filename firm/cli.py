@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+from contextlib import closing
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -28,19 +29,19 @@ from firm.reconcile.boot import reconcile_on_boot
 
 def _seed_db_from_broker(db_path: Path, broker: Broker, clock: Clock) -> None:
     """On first boot (empty cash table), sync local DB state from broker."""
-    with __import__("contextlib").closing(get_conn(db_path)) as conn:
+    with closing(get_conn(db_path)) as conn:
         row = conn.execute("SELECT amount FROM cash WHERE id=1").fetchone()
         if row is not None:
             return  # already seeded
         # First run: initialise local state from broker (broker is source of truth)
         now = clock.now().isoformat()
         conn.execute(
-            "INSERT OR REPLACE INTO cash (id, amount, updated_at) VALUES (1, ?, ?)",
+            "INSERT INTO cash (id, amount, updated_at) VALUES (1, ?, ?)",
             (str(broker.get_cash()), now),
         )
         for pos in broker.list_positions():
             conn.execute(
-                "INSERT OR REPLACE INTO positions (ticker, shares, avg_cost, updated_at) VALUES (?, ?, ?, ?)",
+                "INSERT INTO positions (ticker, shares, avg_cost, updated_at) VALUES (?, ?, ?, ?)",
                 (pos.ticker, str(pos.shares), str(pos.avg_cost), now),
             )
 
@@ -80,7 +81,7 @@ def run(once: bool):
     recon = reconcile_on_boot(db, broker, clock)
     if recon.status == "mismatch":
         click.echo(f"BOOT RECONCILIATION MISMATCH: {recon.diff}", err=True)
-        click.echo("Run `firm ack-reconcile` to acknowledge and resync.", err=True)
+        click.echo("Resolve the mismatch and re-run.", err=True)
         sys.exit(1)
 
     monitor = make_monitor(clock)
@@ -92,10 +93,11 @@ def run(once: bool):
         ticker = proposal.payload.ticker if hasattr(proposal.payload, "ticker") else "AAPL"
         quote = broker.get_quote(ticker)
         positions = {p.ticker: p.shares for p in broker.list_positions()}
+        # TODO(Plan 2): wire live quote_age_seconds / trades_today / daily_pnl_pct; stubs disable those checks
         decision = evaluate_risk(RiskInput(
             proposal=proposal, quote_price=quote.price, quote_age_seconds=0,
             cash=broker.get_cash(), positions=positions, sector_map=universe.sector_map,
-            trades_today=0, nav=broker.get_cash() + sum(p.shares * broker.get_quote(p.ticker).price for p in broker.list_positions()),
+            trades_today=0, nav=broker.get_cash() + sum((p.shares * broker.get_quote(p.ticker).price for p in broker.list_positions()), Decimal("0")),
             daily_pnl_pct=0.0, policy=policy,
         ))
         return {"risk_decision": decision}
@@ -138,7 +140,9 @@ def reconcile():
     db = _db_path()
     init_db(db)
     clock = _resolve_clock()
-    result = reconcile_on_boot(db, make_broker(), clock)
+    broker = make_broker()
+    _seed_db_from_broker(db, broker, clock)
+    result = reconcile_on_boot(db, broker, clock)
     click.echo(f"status: {result.status}")
     if result.diff:
         click.echo(f"diff: {result.diff}")
