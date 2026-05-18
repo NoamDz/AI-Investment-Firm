@@ -7,6 +7,11 @@ from firm.db.connection import get_conn
 
 
 def init_db(db_path: Path) -> None:
+    """Apply schema.sql idempotently.
+
+    Uses executescript, which commits any open transaction before running.
+    Do not call inside an open transaction.
+    """
     schema_sql = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
     conn = get_conn(db_path)
     conn.executescript(schema_sql)

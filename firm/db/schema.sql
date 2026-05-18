@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS outbox (
     FOREIGN KEY (decision_id) REFERENCES decisions(id)
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox(status);
+CREATE INDEX IF NOT EXISTS idx_outbox_decision_id ON outbox(decision_id);
 
 -- Local view of broker positions. Source of truth is the broker (§5.7).
 CREATE TABLE IF NOT EXISTS positions (
@@ -54,6 +55,7 @@ CREATE TABLE IF NOT EXISTS hitl_queue (
     decided_at      TEXT,
     FOREIGN KEY (decision_id) REFERENCES decisions(id)
 );
+CREATE INDEX IF NOT EXISTS idx_hitl_queue_status ON hitl_queue(status);
 
 -- Boot-time and EOD reconciliation results. See spec §5.7.
 CREATE TABLE IF NOT EXISTS reconciliations (
