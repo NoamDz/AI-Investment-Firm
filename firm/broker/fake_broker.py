@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -20,7 +21,8 @@ class FakeBroker:
     def __init__(self, initial_cash: Decimal = Decimal("100000")) -> None:
         self._cash: Decimal = initial_cash
         self._positions: dict[str, Position] = {}
-        self._order_cache: dict[str, OrderResult] = {}  # idempotency_key → result
+        # idempotency_key → (payload_hash, result)
+        self._order_cache: dict[str, tuple[str, OrderResult]] = {}
 
     def list_positions(self) -> list[Position]:
         return [p for p in self._positions.values() if p.shares != Decimal("0")]
@@ -36,8 +38,16 @@ class FakeBroker:
         )
 
     def submit(self, decision_payload: dict, idempotency_key: str) -> OrderResult:
+        payload_hash = hashlib.sha256(
+            json.dumps(decision_payload, sort_keys=True, default=str).encode()
+        ).hexdigest()
         if idempotency_key in self._order_cache:
-            return self._order_cache[idempotency_key]
+            cached_hash, cached_result = self._order_cache[idempotency_key]
+            if cached_hash != payload_hash:
+                raise ValueError(
+                    f"idempotency key {idempotency_key!r} reused with a different payload"
+                )
+            return cached_result
 
         ticker = decision_payload["ticker"]
         shares = Decimal(str(decision_payload["shares"]))
@@ -77,5 +87,5 @@ class FakeBroker:
             submitted_at=now,
             filled_at=now,
         )
-        self._order_cache[idempotency_key] = result
+        self._order_cache[idempotency_key] = (payload_hash, result)
         return result

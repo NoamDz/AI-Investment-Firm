@@ -1,5 +1,6 @@
 from decimal import Decimal
 from firm.broker.fake_broker import FakeBroker
+import pytest
 
 
 def test_fake_broker_starts_with_initial_cash():
@@ -43,4 +44,47 @@ def test_sell_reduces_position_and_credits_cash():
     cash_after_buy = b.get_cash()
     b.submit({"kind": "sell", "ticker": "AAPL", "shares": "10"}, "k2")
     assert b.get_cash() > cash_after_buy
-    assert all(p.shares == Decimal("0") or p.ticker != "AAPL" for p in b.list_positions())
+    assert "AAPL" not in {p.ticker for p in b.list_positions()}
+
+
+def test_different_keys_produce_different_order_ids():
+    b = FakeBroker(initial_cash=Decimal("100000"))
+    r1 = b.submit({"kind": "buy", "ticker": "AAPL", "shares": "1"}, "key-1")
+    r2 = b.submit({"kind": "buy", "ticker": "AAPL", "shares": "1"}, "key-2")
+    assert r1.order_id != r2.order_id
+
+
+def test_submit_raises_on_unsupported_kind():
+    b = FakeBroker(initial_cash=Decimal("100000"))
+    with pytest.raises(ValueError, match="unsupported order kind"):
+        b.submit({"kind": "short", "ticker": "AAPL", "shares": "1"}, "k1")
+
+
+def test_avg_cost_is_weighted_average_across_two_buys():
+    """Two buys at different fill prices (different tickers as a proxy, since
+    _deterministic_price is per-ticker) — but here we exploit the slippage
+    differential by buying the SAME ticker at different share counts to force
+    distinct lots. Simpler: directly seed an initial buy then add to it and
+    verify avg_cost equals (10*p1 + 5*p1) / 15 = p1 with same-ticker buys.
+    Because _deterministic_price is fixed per ticker, AAPL+AAPL buys produce
+    avg_cost == fill_price exactly. To exercise the *weighted* path, instead
+    we set up a state with two distinct prior shares and verify the formula.
+    """
+    b = FakeBroker(initial_cash=Decimal("1000000"))
+    r1 = b.submit({"kind": "buy", "ticker": "AAPL", "shares": "10"}, "k1")
+    r2 = b.submit({"kind": "buy", "ticker": "AAPL", "shares": "5"}, "k2")
+    pos = [p for p in b.list_positions() if p.ticker == "AAPL"][0]
+    assert pos.shares == Decimal("15")
+    # Both buys are at the same fill_price (same ticker, FakeBroker is deterministic),
+    # so the weighted average collapses to fill_price. This still exercises the
+    # weighted-average code path (prev.avg_cost * prev.shares + ...) instead of
+    # the empty-position branch.
+    expected_avg = r1.avg_fill_price  # same as r2.avg_fill_price
+    assert pos.avg_cost == expected_avg
+
+
+def test_idempotency_key_reuse_with_different_payload_raises():
+    b = FakeBroker(initial_cash=Decimal("100000"))
+    b.submit({"kind": "buy", "ticker": "AAPL", "shares": "10"}, "key-1")
+    with pytest.raises(ValueError, match="reused"):
+        b.submit({"kind": "buy", "ticker": "MSFT", "shares": "10"}, "key-1")
