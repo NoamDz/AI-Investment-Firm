@@ -27,6 +27,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Sequence
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +55,14 @@ from firm.rag.source import FilingDoc  # noqa: E402
 # ---------------------------------------------------------------------------
 
 _FIXTURE_CLOCK = ReplayClock(datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc))
+
+# Chunk parameters used in BOTH the fixture rag.yaml (the subprocess reads this
+# config) AND in _seed_llm_cache's chunk_document call (the prompts the cache
+# is keyed on depend on the chunks produced).  Keeping them in one place
+# guarantees the two ends stay synchronized; otherwise a YAML edit alone would
+# silently invalidate the cache hashes and the subprocess would cache-miss.
+_FIXTURE_CHUNK_TARGET_TOKENS = 64
+_FIXTURE_CHUNK_OVERLAP_TOKENS = 8
 
 _FIXTURE_ROWS: list[dict[str, object]] = [
     {
@@ -105,7 +114,7 @@ class _CapturingClient:
         *,
         model: str,
         system: str | None,
-        messages: list[dict[str, object]],
+        messages: Sequence[dict[str, object]],
         max_tokens: int,
         temperature: float = 0.0,
     ) -> CompletionResponse:
@@ -150,14 +159,18 @@ def _seed_llm_cache(db_path: Path, model: str) -> None:
     """
     capturing_client: _CapturingClient = _CapturingClient()
     augmenter = ContextualAugmenter(
-        client=capturing_client,  # type: ignore[arg-type]
+        client=capturing_client,
         model=model,
     )
     cache = LlmCache(db_path=db_path, clock=_FIXTURE_CLOCK)
 
     for row in _FIXTURE_ROWS:
         doc = _row_to_filing_doc(row)
-        chunks = chunk_document(doc, target_tokens=64, overlap_tokens=8)
+        chunks = chunk_document(
+            doc,
+            target_tokens=_FIXTURE_CHUNK_TARGET_TOKENS,
+            overlap_tokens=_FIXTURE_CHUNK_OVERLAP_TOKENS,
+        )
         if not chunks:
             # Safety fallback: synthesize one chunk so augment() fires.
             chunks = [
@@ -229,8 +242,8 @@ def test_cli_ingest_runs_against_fixture_corpus_and_writes_collection(
             "    max_docs: 2",
             "",
             "chunk:",
-            "  target_tokens: 64",
-            "  overlap_tokens: 8",
+            f"  target_tokens: {_FIXTURE_CHUNK_TARGET_TOKENS}",
+            f"  overlap_tokens: {_FIXTURE_CHUNK_OVERLAP_TOKENS}",
             "",
             "embedding:",
             "  dense_model: nomic-ai/nomic-embed-text-v1.5",
