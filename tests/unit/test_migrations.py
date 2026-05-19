@@ -25,6 +25,8 @@ def test_init_db_creates_all_tables(tmp_path: Path):
         "hitl_queue",
         "reconciliations",
         "audit_log",
+        "llm_cache",
+        "ingest_runs",
     }
 
 
@@ -47,4 +49,21 @@ def test_fk_constraints_enforced(tmp_path: Path):
         conn.execute(
             "INSERT INTO outbox (key, decision_id, payload, status, created_at, updated_at) "
             "VALUES ('k1', 'nonexistent', '{}', 'pending', 'ts', 'ts')"
+        )
+
+
+def test_llm_cache_unique_on_prompt_hash_and_model(tmp_path: Path):
+    """Inserting two llm_cache rows with the same (prompt_hash, model) must raise IntegrityError.
+    The PRIMARY KEY (prompt_hash, model) enforces this uniqueness."""
+    db = tmp_path / "test.db"
+    init_db(db)
+    conn = get_conn(db)
+    conn.execute(
+        "INSERT INTO llm_cache (prompt_hash, model, response_json, created_at) "
+        "VALUES ('hash1', 'sonnet', '{\"text\": \"ok\"}', '2026-05-19T00:00:00Z')"
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO llm_cache (prompt_hash, model, response_json, created_at) "
+            "VALUES ('hash1', 'sonnet', '{\"text\": \"duplicate\"}', '2026-05-19T00:00:01Z')"
         )

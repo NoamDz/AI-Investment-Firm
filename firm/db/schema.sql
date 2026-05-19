@@ -77,3 +77,28 @@ CREATE TABLE IF NOT EXISTS audit_log (
     detail          TEXT NOT NULL            -- JSON
 );
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
+
+-- Deterministic LLM response cache keyed by (prompt_hash, model). See Plan 2 §T15.
+CREATE TABLE IF NOT EXISTS llm_cache (
+    prompt_hash    TEXT NOT NULL,
+    model          TEXT NOT NULL,
+    response_json  TEXT NOT NULL,
+    input_tokens   INTEGER,
+    output_tokens  INTEGER,
+    created_at     TEXT NOT NULL,
+    PRIMARY KEY (prompt_hash, model)
+);
+CREATE INDEX IF NOT EXISTS idx_llm_cache_created ON llm_cache(created_at);
+
+-- RAG corpus ingest job tracking (started/finished, doc counts, status). See Plan 2 §T11.
+CREATE TABLE IF NOT EXISTS ingest_runs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at      TEXT NOT NULL,
+    finished_at     TEXT,
+    corpus          TEXT NOT NULL,
+    docs_total      INTEGER NOT NULL DEFAULT 0,
+    docs_completed  INTEGER NOT NULL DEFAULT 0,
+    chunks_written  INTEGER NOT NULL DEFAULT 0,
+    status          TEXT NOT NULL CHECK (status IN ('running','completed','failed')),
+    error           TEXT
+);
