@@ -5,7 +5,8 @@ from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import add_messages
 
-from firm.core.models import Decision
+from firm.core.models import Claim, Decision
+from firm.rag.chunk import Chunk
 
 
 class WorkingState(TypedDict, total=False):
@@ -18,6 +19,10 @@ class WorkingState(TypedDict, total=False):
     research_decision: Decision
     pm_decision: Decision
     risk_decision: Decision
+    # Plan 2 §T19: research agent surfaces retrieved chunks + extracted claims
+    # on the working state so downstream nodes (sufficiency, PM) can read them.
+    retrieved_chunks: list[Chunk]
+    claims: list[Claim]
     hitl_required: bool
     hitl_approved: bool | None
     execution_result: dict[str, Any]   # OrderResult-as-dict
