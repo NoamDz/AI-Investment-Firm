@@ -56,6 +56,10 @@ class _StubExtractor:
         self.last_query: str | None = None
         self.last_chunks: list[Chunk] | None = None
         self.last_as_of: datetime | None = None
+        # Plan 2 §T24: the CitedClaimExtractor Protocol requires this
+        # attribute. The base stub never invokes tools; subclasses
+        # (e.g. _StubExtractorWithToolIds) override per call.
+        self.last_tool_call_ids: list[str] = []
 
     def extract(
         self,

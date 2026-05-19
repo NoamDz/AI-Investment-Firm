@@ -33,6 +33,7 @@ validator since ``tool_call_id is not None``.
 """
 from __future__ import annotations
 
+import copy
 import logging
 from datetime import datetime
 from decimal import Decimal
@@ -80,7 +81,14 @@ class CitedClaimExtractor(Protocol):
     carries provenance (``source_chunk_id``, ``source_span``) and for
     accounting any text the LLM produced without a citation so the caller
     can react.
+
+    The ``last_tool_call_ids`` attribute is part of the Protocol contract
+    (Plan 2 §T24): implementations must surface the tool-use block ids
+    executed during the most recent ``extract`` call so the research agent
+    can write them to working state.
     """
+
+    last_tool_call_ids: list[str]
 
     def extract(
         self,
@@ -132,7 +140,12 @@ class AnthropicCitationsExtractor:
                 {
                     "name": t.tool_def.name,
                     "description": t.tool_def.description,
-                    "input_schema": dict(t.tool_def.input_schema),
+                    # deepcopy: ``input_schema`` is a MappingProxyType wrapping
+                    # nested dicts/lists. A shallow dict(...) copy would still
+                    # share nested ``properties``/``required``/``enum`` refs,
+                    # so a downstream mutation could leak back into the tool's
+                    # immutable schema.
+                    "input_schema": copy.deepcopy(dict(t.tool_def.input_schema)),
                 }
                 for t in tools
             ]

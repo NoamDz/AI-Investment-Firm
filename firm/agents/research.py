@@ -197,10 +197,10 @@ def _make_grounded_research(
         # Step 3: extract cited claims.
         claims = extractor.extract(query=question, chunks=chunks, as_of=now)
         claims_dump: list[dict[str, Any]] = [c.model_dump() for c in claims]
-        # Surface tool_call_ids from the extractor if available (T24).
-        tool_call_ids: list[str] = list(
-            getattr(extractor, "last_tool_call_ids", [])
-        )
+        # Surface tool_call_ids from the extractor (T24). The Protocol
+        # guarantees the attribute exists; copy defensively so downstream
+        # mutation cannot leak back into the extractor's state.
+        tool_call_ids: list[str] = list(extractor.last_tool_call_ids)
 
         # Step 4: oldest-filing-age metadata (shared across branches).
         metadata: dict[str, Any] = {"agent": "research", "ticker": ticker}
