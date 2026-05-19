@@ -1,6 +1,10 @@
+from datetime import datetime, timezone
 from decimal import Decimal
-from firm.broker.fake_broker import FakeBroker
+
 import pytest
+
+from firm.broker.fake_broker import FakeBroker
+from firm.core.clock import ReplayClock
 
 
 def test_fake_broker_starts_with_initial_cash():
@@ -88,3 +92,28 @@ def test_idempotency_key_reuse_with_different_payload_raises():
     b.submit({"kind": "buy", "ticker": "AAPL", "shares": "10"}, "key-1")
     with pytest.raises(ValueError, match="reused"):
         b.submit({"kind": "buy", "ticker": "MSFT", "shares": "10"}, "key-1")
+
+
+def test_fake_broker_uses_clock_for_submitted_at_and_filled_at():
+    """FakeBroker with a ReplayClock must stamp orders with the replay time (I2 fix)."""
+    replay_ts = datetime(2024, 3, 13, 14, 30, tzinfo=timezone.utc)
+    clock = ReplayClock(replay_ts)
+    b = FakeBroker(initial_cash=Decimal("100000"), clock=clock)
+    result = b.submit({"kind": "buy", "ticker": "AAPL", "shares": "10"}, "key-clock")
+    assert result.submitted_at == replay_ts.isoformat(), (
+        f"submitted_at should be replay time {replay_ts.isoformat()!r}, got {result.submitted_at!r}"
+    )
+    assert result.filled_at == replay_ts.isoformat(), (
+        f"filled_at should be replay time {replay_ts.isoformat()!r}, got {result.filled_at!r}"
+    )
+
+
+def test_fake_broker_get_quote_uses_clock_for_timestamp():
+    """FakeBroker.get_quote timestamp must reflect the injected clock (I2 fix)."""
+    replay_ts = datetime(2024, 3, 13, 14, 30, tzinfo=timezone.utc)
+    clock = ReplayClock(replay_ts)
+    b = FakeBroker(initial_cash=Decimal("100000"), clock=clock)
+    quote = b.get_quote("AAPL")
+    assert quote.timestamp == replay_ts.isoformat(), (
+        f"quote.timestamp should be replay time {replay_ts.isoformat()!r}, got {quote.timestamp!r}"
+    )

@@ -80,7 +80,7 @@ def run(once: bool) -> None:
     db = _db_path()
     init_db(db)
     clock = _resolve_clock()
-    broker = make_broker()
+    broker = make_broker(clock=clock)
     policy = load_policy(Path("config/policy.yaml"))
     universe = load_universe(Path("config/universe.yaml"))
 
@@ -147,7 +147,7 @@ def reconcile() -> None:
     db = _db_path()
     init_db(db)
     clock = _resolve_clock()
-    broker = make_broker()
+    broker = make_broker(clock=clock)
     _seed_db_from_broker(db, broker, clock)
     result = reconcile_on_boot(db, broker, clock)
     click.echo(f"status: {result.status}")

@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
 from firm.broker.protocol import OrderResult, Position, Quote
+from firm.core.clock import Clock, WallClock
 
 
 def _deterministic_price(ticker: str) -> Decimal:
@@ -19,8 +19,9 @@ def _deterministic_price(ticker: str) -> Decimal:
 class FakeBroker:
     COMMISSION = Decimal("0.005")  # 0.5% per trade
 
-    def __init__(self, initial_cash: Decimal = Decimal("100000")) -> None:
+    def __init__(self, initial_cash: Decimal = Decimal("100000"), clock: Clock | None = None) -> None:
         self._cash: Decimal = initial_cash
+        self._clock: Clock = clock if clock is not None else WallClock()
         self._positions: dict[str, Position] = {}
         # idempotency_key → (payload_hash, result)
         self._order_cache: dict[str, tuple[str, OrderResult]] = {}
@@ -35,7 +36,7 @@ class FakeBroker:
         return Quote(
             ticker=ticker,
             price=_deterministic_price(ticker),
-            timestamp=datetime.now(tz=timezone.utc).isoformat(),
+            timestamp=self._clock.now().isoformat(),
         )
 
     def submit(self, decision_payload: dict[str, Any], idempotency_key: str) -> OrderResult:
@@ -77,7 +78,7 @@ class FakeBroker:
         else:
             raise ValueError(f"unsupported order kind: {kind}")
 
-        now = datetime.now(tz=timezone.utc).isoformat()
+        now = self._clock.now().isoformat()
         result = OrderResult(
             order_id=hashlib.sha256(idempotency_key.encode()).hexdigest()[:16],
             ticker=ticker,

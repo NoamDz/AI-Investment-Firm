@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any
 
 from firm.broker.protocol import Broker, OrderResult, Position, Quote
+from firm.core.clock import Clock
 
 
 class AlpacaBroker:
@@ -87,10 +88,15 @@ class AlpacaBroker:
         )
 
 
-def make_broker() -> Broker:
-    """Factory: select broker by FIRM_BROKER env var. Default FakeBroker."""
+def make_broker(clock: Clock | None = None) -> Broker:
+    """Factory: select broker by FIRM_BROKER env var. Default FakeBroker.
+
+    Args:
+        clock: Clock to inject into FakeBroker for deterministic timestamps.
+               Ignored for AlpacaBroker (real-broker timestamps are authoritative).
+    """
     kind = os.environ.get("FIRM_BROKER", "FAKE").upper()
     if kind == "ALPACA":
         return AlpacaBroker()
     from firm.broker.fake_broker import FakeBroker
-    return FakeBroker()
+    return FakeBroker(clock=clock)
