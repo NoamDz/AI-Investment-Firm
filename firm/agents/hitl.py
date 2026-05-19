@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from firm.audit.log import AuditLog
+from firm.agents.reporter import _persist_decisions_from_state
 from firm.core.clock import Clock
 from firm.core.models import ActionEnum, Decision
 from firm.db.connection import get_conn
@@ -17,6 +18,9 @@ def make_hitl(*, db_path: Path, clock: Clock) -> Callable[[WorkingState], dict[s
         risk: Decision = state["risk_decision"]
         if risk.action != ActionEnum.ESCALATE:
             return {"hitl_required": False, "hitl_approved": True}
+
+        # Persist the risk decision before writing to hitl_queue (hitl_queue has FK → decisions).
+        _persist_decisions_from_state({"risk_decision": risk}, db_path, clock)
 
         with closing(get_conn(db_path)) as conn:
             cur = conn.execute(
