@@ -1,0 +1,20 @@
+{
+  "docs": [
+    {
+      "doc_id": "aapl-10k-2024q3",
+      "ticker": "AAPL",
+      "filing_type": "10-K",
+      "published_at": "2024-10-30T00:00:00+00:00",
+      "title": "Apple Inc. Form 10-K (FY2024)",
+      "html": "<html><body><p>Apple Inc. ($AAPL) Annual Report on Form 10-K for fiscal year 2024. BRK.B investors note the 10-K filing covers operations through September 2024.</p><table><thead><tr><th>Metric</th><th>Q3 2024</th><th>Q2 2024</th></tr></thead><tbody><tr><td>Total revenue</td><td>18,120</td><td>17,540</td></tr><tr><td>Net income</td><td>4,210</td><td>4,050</td></tr></tbody></table><p>All figures in $ millions. Forward-Looking Statements: certain statements herein are forward-looking.</p><table><thead><tr><th>Segment</th><th>Q3 2024</th></tr></thead><tbody><tr><td>Services revenue</td><td>6,200</td></tr></tbody></table></body></html>"
+    },
+    {
+      "doc_id": "nvda-10q-2024q3",
+      "ticker": "NVDA",
+      "filing_type": "10-Q",
+      "published_at": "2024-11-20T00:00:00+00:00",
+      "title": "NVIDIA Corporation Form 10-Q (Q3 FY2025)",
+      "html": "<html><body><p>NVIDIA Corporation ($NVDA) Quarterly Report on Form 10-Q. Table of Contents</p><table><thead><tr><th>Metric</th><th>Q3 2024</th><th>Q3 2023</th></tr></thead><tbody><tr><td>Total revenue</td><td>35,082</td><td>18,120</td></tr><tr><td>Gross profit</td><td>23,189</td><td>11,280</td></tr></tbody></table><p>All amounts in $ millions. The 8-K filings submitted during the period are incorporated herein.</p></body></html>"
+    }
+  ]
+}
