@@ -721,3 +721,57 @@ def test_research_refuses_on_judge_response_error(
     # present).
     assert "sufficiency_result" in out
     assert "claim_assessments" in out["sufficiency_result"]
+
+
+# ---------------------------------------------------------------------------
+# T24 test — tool_call_ids surfaced on working state
+# ---------------------------------------------------------------------------
+
+
+class _StubExtractorWithToolIds(_StubExtractor):
+    """Extractor stub that also exposes ``last_tool_call_ids`` after extract()."""
+
+    def __init__(self, claims: list[Claim], tool_call_ids: list[str]) -> None:
+        super().__init__(claims)
+        self._tool_call_ids = tool_call_ids
+        self.last_tool_call_ids: list[str] = []
+
+    def extract(
+        self,
+        *,
+        query: str,
+        chunks: list[Chunk],
+        as_of: datetime,
+    ) -> list[Claim]:
+        result = super().extract(query=query, chunks=chunks, as_of=as_of)
+        self.last_tool_call_ids = list(self._tool_call_ids)
+        return result
+
+
+def test_research_records_tool_call_ids_in_state(
+    universe: UniverseConfig, broker: FakeBroker, clock: ReplayClock
+) -> None:
+    """After extract(), the research agent must surface tool_call_ids on the state dict."""
+    chunk = _make_chunk("doc-a::0001", text="Apple revenue grew 8% YoY.")
+    retriever = _StubRetriever([_wrap(chunk)])
+    grounded_claim = Claim(
+        text="Apple revenue grew 8% YoY.",
+        source_chunk_id=chunk.id,
+        source_span=(0, 26),
+    )
+    extractor = _StubExtractorWithToolIds([grounded_claim], tool_call_ids=["toolu_xyz"])
+    judge = _StubJudge(_all_supported(num_claims=1))
+
+    research = make_research(
+        clock=clock,
+        broker=broker,
+        universe=universe,
+        retriever=retriever,  # type: ignore[arg-type]
+        extractor=extractor,
+        judge=judge,  # type: ignore[arg-type]
+        nonce_secret=b"x" * 32,
+    )
+    out = research({"heartbeat_at": clock.now().isoformat()})
+
+    assert "tool_call_ids" in out
+    assert out["tool_call_ids"] == ["toolu_xyz"]

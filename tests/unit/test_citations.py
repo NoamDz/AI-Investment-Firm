@@ -13,11 +13,14 @@ response dicts in the exact shape produced by the Anthropic Citations API.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from decimal import Decimal
+from types import MappingProxyType
+from typing import Any, ClassVar
 
 from firm.llm.citations import AnthropicCitationsExtractor
 from firm.llm.prompts import RESEARCH_SYSTEM
 from firm.rag.chunk import Chunk
+from firm.tools.fundamentals import ToolDef
 
 
 class _StubClient:
@@ -312,3 +315,183 @@ def test_extractor_resets_uncited_count_per_call() -> None:
         as_of=datetime(2024, 6, 1, tzinfo=timezone.utc),
     )
     assert extractor.last_uncited_count == 0
+
+
+# ---------------------------------------------------------------------------
+# T24 tests — tool dispatch
+# ---------------------------------------------------------------------------
+
+
+class _StubTool:
+    """Minimal tool stub satisfying the Tool Protocol for citations tests."""
+
+    tool_def: ClassVar[ToolDef] = ToolDef(
+        name="fundamentals.get_ratio",
+        description="Return a pre-computed fundamental ratio.",
+        input_schema=MappingProxyType(
+            {
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string"},
+                    "ratio_name": {"type": "string"},
+                    "as_of": {"type": "string"},
+                },
+                "required": ["ticker", "ratio_name", "as_of"],
+            }
+        ),
+    )
+
+    def __init__(self, return_value: Decimal) -> None:
+        self._return_value = return_value
+        self.last_kwargs: dict[str, object] | None = None
+
+    def run(self, **kwargs: object) -> Decimal:
+        self.last_kwargs = kwargs
+        return self._return_value
+
+
+class _TwoTurnStubClient:
+    """Stub client that returns different canned responses for each successive call."""
+
+    def __init__(self, responses: list[dict[str, object]]) -> None:
+        self._responses = responses
+        self._call_index = 0
+        self.all_kwargs: list[dict[str, object]] = []
+
+    def messages_create(self, **kwargs: object) -> dict[str, object]:
+        self.all_kwargs.append(kwargs)
+        response = self._responses[self._call_index]
+        self._call_index += 1
+        return response
+
+
+def test_extractor_passes_tools_when_provided() -> None:
+    """Tool definitions appear in the first Anthropic request payload.
+
+    When NO tools are configured, ``tools`` kwarg must be None.
+    """
+    chunks = [_chunk(0, "AAPL-10K-2023", "Total net sales were $383.285 billion")]
+    stub_tool = _StubTool(Decimal("28.5"))
+
+    # --- With tools ---
+    single_response: dict[str, Any] = {
+        "content": [
+            {
+                "type": "text",
+                "text": "Revenue was $383B.",
+                "citations": [
+                    {
+                        "type": "char_location",
+                        "cited_text": "Total net sales were $383.285 billion",
+                        "document_index": 0,
+                        "document_title": "AAPL-10K-2023",
+                        "start_char_index": 0,
+                        "end_char_index": 37,
+                    }
+                ],
+            }
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+    stub_with_tools = _StubClient(single_response)
+    extractor_with = AnthropicCitationsExtractor(
+        client=stub_with_tools,
+        model="claude-sonnet-4-6",
+        tools=[stub_tool],
+    )
+    extractor_with.extract(
+        query="What is the PE ratio?",
+        chunks=chunks,
+        as_of=datetime(2024, 6, 1, tzinfo=timezone.utc),
+    )
+    assert stub_with_tools.last_kwargs is not None
+    tools_arg = stub_with_tools.last_kwargs.get("tools")
+    assert isinstance(tools_arg, list)
+    assert len(tools_arg) == 1
+    tool_payload = tools_arg[0]
+    assert isinstance(tool_payload, dict)
+    assert tool_payload["name"] == "fundamentals.get_ratio"
+    assert "description" in tool_payload
+    assert "input_schema" in tool_payload
+    # input_schema must be a plain dict (not MappingProxyType) for JSON serialisation.
+    assert isinstance(tool_payload["input_schema"], dict)
+
+    # --- Without tools ---
+    stub_no_tools = _StubClient(single_response)
+    extractor_without = AnthropicCitationsExtractor(
+        client=stub_no_tools,
+        model="claude-sonnet-4-6",
+    )
+    extractor_without.extract(
+        query="What is the PE ratio?",
+        chunks=chunks,
+        as_of=datetime(2024, 6, 1, tzinfo=timezone.utc),
+    )
+    assert stub_no_tools.last_kwargs is not None
+    assert stub_no_tools.last_kwargs.get("tools") is None
+
+
+def test_extractor_attaches_tool_call_id_to_claim() -> None:
+    """When Sonnet returns a tool_use block, the extractor executes the tool,
+    sends a second request with tool_result, and emits a Claim with
+    tool_call_id set.
+    """
+    chunks = [_chunk(0, "AAPL-10K-2023", "Total net sales were $383.285 billion")]
+    stub_tool = _StubTool(Decimal("28.5"))
+
+    first_response: dict[str, Any] = {
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "toolu_abc",
+                "name": "fundamentals.get_ratio",
+                "input": {
+                    "ticker": "AAPL",
+                    "ratio_name": "pe_ratio",
+                    "as_of": "2024-11-01",
+                },
+            }
+        ],
+        "usage": {"input_tokens": 20, "output_tokens": 10},
+    }
+    second_response: dict[str, Any] = {
+        "content": [
+            {
+                "type": "text",
+                "text": "Revenue was $383B.",
+                "citations": [
+                    {
+                        "type": "char_location",
+                        "cited_text": "Total net sales were $383.285 billion",
+                        "document_index": 0,
+                        "document_title": "AAPL-10K-2023",
+                        "start_char_index": 0,
+                        "end_char_index": 37,
+                    }
+                ],
+            }
+        ],
+        "usage": {"input_tokens": 30, "output_tokens": 15},
+    }
+
+    client = _TwoTurnStubClient([first_response, second_response])
+    extractor = AnthropicCitationsExtractor(
+        client=client,
+        model="claude-sonnet-4-6",
+        tools=[stub_tool],
+    )
+    claims = extractor.extract(
+        query="What is Apple's PE ratio?",
+        chunks=chunks,
+        as_of=datetime(2024, 6, 1, tzinfo=timezone.utc),
+    )
+
+    # One claim from the tool call, one from the text citation.
+    tool_claims = [c for c in claims if c.tool_call_id == "toolu_abc"]
+    cited_claims = [c for c in claims if c.source_chunk_id is not None]
+
+    assert len(tool_claims) == 1
+    assert tool_claims[0].value == Decimal("28.5")
+    assert tool_claims[0].source_chunk_id is None
+    assert len(cited_claims) >= 1
+    assert extractor.last_tool_call_ids == ["toolu_abc"]

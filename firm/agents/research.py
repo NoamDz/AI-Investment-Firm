@@ -191,11 +191,16 @@ def _make_grounded_research(
                 "retrieved_chunks": chunks_dump,
                 "claims": [],
                 "sufficiency_result": copy.deepcopy(_EMPTY_RETRIEVAL_SUFFICIENCY),
+                "tool_call_ids": [],
             }
 
         # Step 3: extract cited claims.
         claims = extractor.extract(query=question, chunks=chunks, as_of=now)
         claims_dump: list[dict[str, Any]] = [c.model_dump() for c in claims]
+        # Surface tool_call_ids from the extractor if available (T24).
+        tool_call_ids: list[str] = list(
+            getattr(extractor, "last_tool_call_ids", [])
+        )
 
         # Step 4: oldest-filing-age metadata (shared across branches).
         metadata: dict[str, Any] = {"agent": "research", "ticker": ticker}
@@ -232,6 +237,7 @@ def _make_grounded_research(
                 "retrieved_chunks": chunks_dump,
                 "claims": claims_dump,
                 "sufficiency_result": copy.deepcopy(_LLM_UNAVAILABLE_SUFFICIENCY),
+                "tool_call_ids": tool_call_ids,
             }
 
         sufficiency_dump: dict[str, Any] = sufficiency.model_dump(mode="json")
@@ -263,6 +269,7 @@ def _make_grounded_research(
                 "retrieved_chunks": chunks_dump,
                 "claims": claims_dump,
                 "sufficiency_result": sufficiency_dump,
+                "tool_call_ids": tool_call_ids,
             }
 
         if status == "partial":
@@ -300,6 +307,7 @@ def _make_grounded_research(
                 "retrieved_chunks": chunks_dump,
                 "claims": claims_dump,
                 "sufficiency_result": sufficiency_dump,
+                "tool_call_ids": tool_call_ids,
             }
 
         # status == "ok" → proceed with the original BUY / HOLD decision.
@@ -340,6 +348,7 @@ def _make_grounded_research(
             "retrieved_chunks": chunks_dump,
             "claims": claims_dump,
             "sufficiency_result": sufficiency_dump,
+            "tool_call_ids": tool_call_ids,
         }
 
     return research

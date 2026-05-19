@@ -26,6 +26,10 @@ class WorkingState(TypedDict, total=False):
     retrieved_chunks: list[dict[str, Any]]
     claims: list[dict[str, Any]]
     sufficiency_result: dict[str, Any]
+    # Plan 2 §T24: tool_call_ids lists the Anthropic tool-use block ids that
+    # were executed during this heartbeat's extractor call.  Empty list when
+    # no tools were invoked.
+    tool_call_ids: list[str]
     pm_votes: list[dict[str, Any]]
     hitl_required: bool
     hitl_approved: bool | None

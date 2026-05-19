@@ -214,5 +214,13 @@ class FundamentalsTool:
 
         return best
 
+    def run(self, **kwargs: Any) -> Decimal:
+        """Generic dispatch shim — delegates to :meth:`get_ratio`.
+
+        Allows the extractor to call tools uniformly via ``tool.run(**block["input"])``
+        without knowing whether the tool is a ``FundamentalsTool`` or ``RiskMetricsTool``.
+        """
+        return self.get_ratio(**kwargs)
+
 
 __all__ = ["FundamentalsTool", "ToolDef"]

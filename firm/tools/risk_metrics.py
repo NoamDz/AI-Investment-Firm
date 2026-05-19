@@ -14,7 +14,7 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from types import MappingProxyType
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import pyarrow.parquet as pq  # type: ignore[import-untyped]
 
@@ -192,6 +192,14 @@ class RiskMetricsTool:
             )
 
         return best
+
+    def run(self, **kwargs: Any) -> Decimal:
+        """Generic dispatch shim — delegates to :meth:`get_metric`.
+
+        Allows the extractor to call tools uniformly via ``tool.run(**block["input"])``
+        without knowing whether the tool is a ``FundamentalsTool`` or ``RiskMetricsTool``.
+        """
+        return self.get_metric(**kwargs)
 
 
 __all__ = ["RiskMetricsTool", "ToolDef"]

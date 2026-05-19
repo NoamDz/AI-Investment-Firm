@@ -106,6 +106,7 @@ class SufficiencyJudge:
             model=self._model,
             system=SUFFICIENCY_SYSTEM,
             messages=messages,
+            tools=None,
             max_tokens=self._max_tokens,
             temperature=0.0,
         )
