@@ -12,6 +12,14 @@ dependencies = [
     "click>=8.1",
     "structlog>=24.1",
     "alpaca-py>=0.30",  # optional broker; only imported when ALPACA selected
+    "anthropic>=0.39",
+    "qdrant-client>=1.11",
+    "sentence-transformers>=3.0",
+    "datasets>=2.20",
+    "rank-bm25>=0.2.2",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+    "tiktoken>=0.7",
 ]
 
 [project.optional-dependencies]

@@ -58,3 +58,72 @@ def load_policy(path: Path) -> PolicyConfig:
 
 def load_universe(path: Path) -> UniverseConfig:
     return UniverseConfig.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
+
+
+class FinanceBenchCorpusConfig(BaseModel):
+    split: str
+    max_docs: int | None = None
+
+
+class CorpusConfig(BaseModel):
+    financebench: FinanceBenchCorpusConfig
+
+
+class ChunkConfig(BaseModel):
+    target_tokens: int = Field(gt=0)
+    overlap_tokens: int = Field(ge=0)
+
+
+class EmbeddingConfig(BaseModel):
+    dense_model: str = Field(min_length=1)
+    dense_dim: int = Field(gt=0)
+    sparse: str
+
+
+class RetrievalConfig(BaseModel):
+    top_k_retrieve: int = Field(gt=0)
+    top_k_rerank: int = Field(gt=0)
+
+
+class RerankConfig(BaseModel):
+    model: str = Field(min_length=1)
+    score_floor: float = Field(ge=0.0, le=1.0)
+
+
+class ContextualConfig(BaseModel):
+    summary_model: str = Field(min_length=1)
+
+
+class QdrantConfig(BaseModel):
+    collection: str = Field(min_length=1)
+    url_env: str = Field(min_length=1)
+
+
+class RagConfig(BaseModel):
+    corpus: CorpusConfig
+    chunk: ChunkConfig
+    embedding: EmbeddingConfig
+    retrieval: RetrievalConfig
+    rerank: RerankConfig
+    contextual: ContextualConfig
+    qdrant: QdrantConfig
+
+
+class LlmCallConfig(BaseModel):
+    model: str = Field(min_length=1)
+    max_tokens: int = Field(gt=0)
+    temperature: float = Field(ge=0.0, le=2.0)
+
+
+class LlmConfig(BaseModel):
+    research: LlmCallConfig
+    judge: LlmCallConfig
+    pm: LlmCallConfig
+
+
+def load_rag_config(path: Path) -> RagConfig:
+    return RagConfig.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
+
+
+def load_llm_config(path: Path) -> LlmConfig:
+    return LlmConfig.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))

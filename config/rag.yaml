@@ -1,0 +1,28 @@
+corpus:
+  financebench:
+    split: train
+    max_docs: null
+
+chunk:
+  target_tokens: 512
+  overlap_tokens: 64
+
+embedding:
+  dense_model: nomic-ai/nomic-embed-text-v1.5
+  dense_dim: 768
+  sparse: bm25
+
+retrieval:
+  top_k_retrieve: 50
+  top_k_rerank: 8
+
+rerank:
+  model: BAAI/bge-reranker-v2-m3
+  score_floor: 0.3
+
+contextual:
+  summary_model: claude-haiku-4-5
+
+qdrant:
+  collection: firm_chunks
+  url_env: QDRANT_URL
