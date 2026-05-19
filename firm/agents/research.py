@@ -26,6 +26,7 @@ LangGraph workflow.  Two paths are supported for backwards compatibility:
 """
 from __future__ import annotations
 
+import copy
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Callable
@@ -189,7 +190,7 @@ def _make_grounded_research(
                 "research_decision": refuse_decision,
                 "retrieved_chunks": chunks_dump,
                 "claims": [],
-                "sufficiency_result": dict(_EMPTY_RETRIEVAL_SUFFICIENCY),
+                "sufficiency_result": copy.deepcopy(_EMPTY_RETRIEVAL_SUFFICIENCY),
             }
 
         # Step 3: extract cited claims.
@@ -230,7 +231,7 @@ def _make_grounded_research(
                 "research_decision": llm_unavailable_decision,
                 "retrieved_chunks": chunks_dump,
                 "claims": claims_dump,
-                "sufficiency_result": dict(_LLM_UNAVAILABLE_SUFFICIENCY),
+                "sufficiency_result": copy.deepcopy(_LLM_UNAVAILABLE_SUFFICIENCY),
             }
 
         sufficiency_dump: dict[str, Any] = sufficiency.model_dump(mode="json")
@@ -269,6 +270,9 @@ def _make_grounded_research(
             # needs the action they would be approving).  Use the same default
             # BUY(10 shares) shape as the happy path so the proposed action is
             # consistent across both branches.
+            # TODO(T27): partial-evidence ESCALATE currently proposes the same default
+            # BUY shape as the happy path; when PM voters wire real sizing, this branch
+            # should either skip the proposed payload or compute a reduced size.
             escalate_decision = Decision(
                 id=decision_id,
                 decision_id_chain=[],

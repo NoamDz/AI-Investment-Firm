@@ -217,6 +217,40 @@ def test_research_refuses_when_retriever_returns_empty(
     assert "claim_assessments" in out["sufficiency_result"]
 
 
+def test_grounded_research_empty_retrieval_sentinel_is_isolated_per_call(
+    universe: UniverseConfig, broker: FakeBroker, clock: ReplayClock
+) -> None:
+    """Mutating claim_assessments from one heartbeat must not contaminate the next.
+
+    Guards against the shallow-copy footgun where two calls share the same
+    underlying ``[]`` object inside the sentinel dict.
+    """
+    retriever = _StubRetriever([])
+    extractor = _StubExtractor([])
+    judge = _StubJudge(_all_supported(num_claims=0))
+
+    research = make_research(
+        clock=clock,
+        broker=broker,
+        universe=universe,
+        retriever=retriever,  # type: ignore[arg-type]  # stub is structurally compatible
+        extractor=extractor,
+        judge=judge,  # type: ignore[arg-type]  # stub is structurally compatible
+        nonce_secret=b"x" * 32,
+    )
+
+    # First heartbeat — empty retrieval → sentinel returned.
+    out1 = research({"heartbeat_at": clock.now().isoformat()})
+    # Simulate a downstream consumer mutating the returned list.
+    out1["sufficiency_result"]["claim_assessments"].append("contamination")
+
+    # Second heartbeat — must return a fresh sentinel, NOT the poisoned one.
+    out2 = research({"heartbeat_at": clock.now().isoformat()})
+    assert out2["sufficiency_result"]["claim_assessments"] == [], (
+        "sentinel claim_assessments was shared between calls; deepcopy fix missing"
+    )
+
+
 def test_research_uses_pit_filter_with_replay_clock(
     universe: UniverseConfig, broker: FakeBroker, clock: ReplayClock
 ) -> None:
