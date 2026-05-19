@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from pydantic import ValidationError
 
 from firm.agents.pm import PmLens, PmVote, PmVoteSchemaError, PmVoter
 from firm.core.models import ActionEnum, Claim
@@ -194,3 +195,21 @@ def test_voter_strips_markdown_fences() -> None:
 
     assert result.vote == ActionEnum.SELL
     assert result.confidence == pytest.approx(0.7)
+
+
+def test_pm_vote_re_instantiation_runs_validator() -> None:
+    """Regression: filtering cited_claim_ids must not bypass the BUY/HOLD/SELL validator.
+
+    model_copy(update=...) silently bypasses validators; model_validate({**dump, ...})
+    does not. This guards against a future maintainer regressing the path.
+    """
+    base = PmVote(
+        lens=PmLens.QUALITY,
+        vote=ActionEnum.BUY,
+        confidence=0.7,
+        rationale="ok",
+        cited_claim_ids=["c1"],
+    )
+    # The path used inside vote(): if we dump+validate with a bad vote we MUST get a ValidationError.
+    with pytest.raises(ValidationError):
+        PmVote.model_validate({**base.model_dump(), "vote": ActionEnum.ESCALATE})

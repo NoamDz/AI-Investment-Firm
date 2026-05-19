@@ -223,8 +223,17 @@ class PmVoter:
 
         # Server-side filter: keep only ids that were actually provided.
         filtered_ids = [cid for cid in vote_obj.cited_claim_ids if cid in valid_id_set]
-        # Re-assign via model_copy to stay immutable-friendly.
-        vote_obj = vote_obj.model_copy(update={"cited_claim_ids": filtered_ids})
+        # Re-instantiate via model_validate so all validators (e.g. the
+        # BUY/HOLD/SELL invariant) re-run; model_copy(update=...) would
+        # silently bypass them.
+        try:
+            vote_obj = PmVote.model_validate(
+                {**vote_obj.model_dump(), "cited_claim_ids": filtered_ids}
+            )
+        except (ValidationError, KeyError, ValueError) as exc:
+            raise PmVoteSchemaError(
+                f"PM voter JSON failed schema validation: {exc!s}"
+            ) from exc
 
         return vote_obj
 
