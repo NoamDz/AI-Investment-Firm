@@ -260,6 +260,119 @@ def test_ingest_rolls_back_on_failure(tmp_path: Path) -> None:
     assert _qdrant_point_count(client, rag_config.qdrant.collection) == 0
 
 
+def test_ingest_records_partial_progress_before_failure(tmp_path: Path) -> None:
+    """When doc-1 succeeds and doc-2 raises, the ingest_runs row must show the
+    partial counters from doc-1 — even though final status is 'failed' — so a
+    crashed run is observable from the DB alone."""
+    from firm.rag.ingest import run_ingest
+
+    db_path = tmp_path / "firm.db"
+    init_db(db_path)
+
+    client = QdrantClient(":memory:")
+    store = VectorStore(client)
+    rag_config = _make_rag_config()
+    store.create_collection(rag_config.qdrant.collection, dense_dim=rag_config.embedding.dense_dim)
+
+    docs = [_make_doc("doc-partial-001", "AAPL"), _make_doc("doc-partial-002", "MSFT")]
+    source = FakeSource(docs)
+    augmenter = FakeAugmenter()
+    # SECOND embed call raises — doc-1 fully succeeds first, doc-2 then fails.
+    embedder = FakeEmbedder(raise_on_call=2)
+    sparse = FakeSparse()
+    clock = ReplayClock(datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc))
+
+    result = run_ingest(
+        source=source,
+        store=store,
+        embedder=embedder,
+        sparse=sparse,
+        augmenter=augmenter,
+        db_path=db_path,
+        clock=clock,
+        rag_config=rag_config,
+    )
+
+    assert result.status == "failed"
+    assert result.docs_completed == 1
+    assert result.chunks_written > 0
+    doc1_chunk_count = result.chunks_written
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM ingest_runs ORDER BY id DESC LIMIT 1").fetchone()
+    conn.close()
+
+    # The DB row must reflect doc-1's contribution even though the run failed.
+    assert row["status"] == "failed"
+    assert row["docs_completed"] == 1
+    assert row["chunks_written"] == doc1_chunk_count
+    assert row["chunks_written"] > 0
+    assert row["error"] is not None and "simulated embedder failure" in row["error"]
+
+
+def test_ingest_bumps_db_row_per_doc(tmp_path: Path) -> None:
+    """Verify chunks_written/docs_completed are written to SQLite DURING the run
+    (not just at the end). We peek the DB row from inside the fake augmenter's
+    second call — before doc-2 has been embedded — and assert doc-1's counters
+    are already visible."""
+    from firm.rag.ingest import run_ingest
+
+    db_path = tmp_path / "firm.db"
+    init_db(db_path)
+
+    client = QdrantClient(":memory:")
+    store = VectorStore(client)
+    rag_config = _make_rag_config()
+    store.create_collection(rag_config.qdrant.collection, dense_dim=rag_config.embedding.dense_dim)
+
+    captured: dict[str, int | None] = {"docs_completed": None, "chunks_written": None}
+
+    class PeekingAugmenter(FakeAugmenter):
+        def augment(self, doc: FilingDoc, chunks: list[Chunk]) -> list[Chunk]:
+            self.calls += 1
+            # On the SECOND doc, peek the DB row before this doc lands.
+            if self.calls == 2:
+                conn = sqlite3.connect(str(db_path))
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT docs_completed, chunks_written FROM ingest_runs "
+                    "ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                conn.close()
+                captured["docs_completed"] = int(row["docs_completed"])
+                captured["chunks_written"] = int(row["chunks_written"])
+            for chunk in chunks:
+                chunk.doc_summary = "<summary>"
+            return chunks
+
+    docs = [_make_doc("doc-bump-001", "AAPL"), _make_doc("doc-bump-002", "MSFT")]
+    source = FakeSource(docs)
+    augmenter = PeekingAugmenter()
+    embedder = FakeEmbedder()
+    sparse = FakeSparse()
+    clock = ReplayClock(datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc))
+
+    result = run_ingest(
+        source=source,
+        store=store,
+        embedder=embedder,
+        sparse=sparse,
+        augmenter=augmenter,
+        db_path=db_path,
+        clock=clock,
+        rag_config=rag_config,
+    )
+
+    assert result.status == "completed"
+    assert captured["docs_completed"] == 1, (
+        "DB row must show doc-1 completed before doc-2 starts"
+    )
+    assert captured["chunks_written"] is not None and captured["chunks_written"] > 0
+    # The final value must be strictly greater than the mid-run snapshot.
+    assert result.chunks_written > captured["chunks_written"]
+
+
 def test_ingest_is_resumable(tmp_path: Path) -> None:
     from firm.rag.ingest import run_ingest
 

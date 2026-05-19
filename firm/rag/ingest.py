@@ -145,6 +145,16 @@ class IngestPipeline:
 
                 docs_completed += 1
                 chunks_written += len(chunks)
+
+                # Bump the DB row after each successful per-doc batch so a crash
+                # mid-run still leaves observable partial progress (the final
+                # UPDATE at run end overwrites finished_at + status, but the
+                # interim counters survive if we never reach it).
+                self._bump_run_progress(
+                    run_id=run_id,
+                    docs_completed=docs_completed,
+                    chunks_written=chunks_written,
+                )
         except Exception as exc:  # noqa: BLE001 — surface any failure on the run row.
             finished_at = self._clock.now()
             error_msg = str(exc) or exc.__class__.__name__
@@ -207,6 +217,22 @@ class IngestPipeline:
             if row_id is None:
                 raise RuntimeError("ingest_runs INSERT did not yield a rowid")
             return int(row_id)
+        finally:
+            conn.close()
+
+    def _bump_run_progress(
+        self,
+        *,
+        run_id: int,
+        docs_completed: int,
+        chunks_written: int,
+    ) -> None:
+        conn = get_conn(self._db_path)
+        try:
+            conn.execute(
+                "UPDATE ingest_runs SET docs_completed=?, chunks_written=? WHERE id=?",
+                (docs_completed, chunks_written, run_id),
+            )
         finally:
             conn.close()
 
