@@ -60,6 +60,7 @@ class RetrievedChunk(BaseModel):
     score: float
     rank_dense: int | None
     rank_sparse: int | None
+    rerank_score: float | None = None
 
 
 # ---------------------------------------------------------------------------
