@@ -2,9 +2,13 @@
 
 Fixture mode (FIRM_FUNDAMENTALS_FIXTURE=1):
     Reads tests/fixtures/financebench_two_docs.json and writes a deterministic
-    parquet to tests/fixtures/fundamentals_fixture.parquet.  The fixture values
-    are hard-coded so unit tests get a stable, reproducible parquet without
-    depending on real ratio extraction from filing tables.
+    parquet. The fixture values are hard-coded so unit tests get a stable,
+    reproducible parquet without depending on real ratio extraction from
+    filing tables.
+
+    Output path: by default tests/fixtures/fundamentals_fixture.parquet, but
+    can be overridden via the FIRM_FUNDAMENTALS_OUT env var so pytest session
+    fixtures can write into a tmp dir (pytest-xdist safe).
 
 Real corpus mode (default):
     # TODO(plan-3): extract real ratios from filing tables
@@ -14,6 +18,10 @@ Usage
 -----
     # fixture mode (used by tests):
     FIRM_FUNDAMENTALS_FIXTURE=1 python scripts/precompute_fundamentals.py
+
+    # fixture mode with custom output path:
+    FIRM_FUNDAMENTALS_FIXTURE=1 FIRM_FUNDAMENTALS_OUT=/tmp/x.parquet \
+        python scripts/precompute_fundamentals.py
 
     # real corpus (not yet implemented):
     python scripts/precompute_fundamentals.py
@@ -64,8 +72,8 @@ _FIXTURE_ROWS: list[tuple[str, str, date, Decimal]] = [
 ]
 
 
-def _write_fixture_parquet() -> None:
-    """Write the deterministic fixture parquet to tests/fixtures/."""
+def _write_fixture_parquet(out_path: Path) -> None:
+    """Write the deterministic fixture parquet to ``out_path``."""
     tickers: list[str] = []
     ratio_names: list[str] = []
     as_of_dates: list[date] = []
@@ -96,9 +104,9 @@ def _write_fixture_parquet() -> None:
         schema=schema,
     )
 
-    _FIXTURE_PARQUET.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(table, str(_FIXTURE_PARQUET))
-    print(f"Written {len(_FIXTURE_ROWS)} rows to {_FIXTURE_PARQUET}")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, str(out_path))
+    print(f"Written {len(_FIXTURE_ROWS)} rows to {out_path}")
 
 
 def _write_real_parquet() -> None:
@@ -115,6 +123,8 @@ def _write_real_parquet() -> None:
 
 if __name__ == "__main__":
     if os.environ.get("FIRM_FUNDAMENTALS_FIXTURE") == "1":
-        _write_fixture_parquet()
+        out_override = os.environ.get("FIRM_FUNDAMENTALS_OUT")
+        out_path = Path(out_override) if out_override else _FIXTURE_PARQUET
+        _write_fixture_parquet(out_path)
     else:
         _write_real_parquet()

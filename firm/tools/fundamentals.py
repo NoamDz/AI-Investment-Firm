@@ -18,10 +18,12 @@ stale or wrong value.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, ClassVar
 
 import pyarrow.parquet as pq  # type: ignore[import-untyped]
@@ -45,7 +47,7 @@ class ToolDef:
 
     name: str
     description: str
-    input_schema: dict[str, Any]
+    input_schema: Mapping[str, Any]
 
 
 class FundamentalsTool:
@@ -70,33 +72,35 @@ class FundamentalsTool:
             "Supported ratios: pe_ratio, gross_margin, revenue_yoy_growth, "
             "debt_to_equity, current_ratio. Raises if no data is available."
         ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "ticker": {
-                    "type": "string",
-                    "description": "Exchange ticker symbol, e.g. AAPL or NVDA.",
+        input_schema=MappingProxyType(
+            {
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Exchange ticker symbol, e.g. AAPL or NVDA.",
+                    },
+                    "ratio_name": {
+                        "type": "string",
+                        "enum": list(_SUPPORTED_RATIOS),
+                        "description": (
+                            "Name of the fundamental ratio to retrieve. "
+                            "One of: pe_ratio, gross_margin, revenue_yoy_growth, "
+                            "debt_to_equity, current_ratio."
+                        ),
+                    },
+                    "as_of": {
+                        "type": "string",
+                        "format": "date",
+                        "description": (
+                            "ISO 8601 date YYYY-MM-DD; PIT lookup uses the latest "
+                            "filing on or before this date."
+                        ),
+                    },
                 },
-                "ratio_name": {
-                    "type": "string",
-                    "enum": _SUPPORTED_RATIOS,
-                    "description": (
-                        "Name of the fundamental ratio to retrieve. "
-                        "One of: pe_ratio, gross_margin, revenue_yoy_growth, "
-                        "debt_to_equity, current_ratio."
-                    ),
-                },
-                "as_of": {
-                    "type": "string",
-                    "format": "date",
-                    "description": (
-                        "ISO 8601 date YYYY-MM-DD; PIT lookup uses the latest "
-                        "filing on or before this date."
-                    ),
-                },
-            },
-            "required": ["ticker", "ratio_name", "as_of"],
-        },
+                "required": ["ticker", "ratio_name", "as_of"],
+            }
+        ),
     )
 
     def __init__(self, parquet_path: Path) -> None:
@@ -126,8 +130,14 @@ class FundamentalsTool:
             else:
                 # fallback: parse string
                 as_of_date = date.fromisoformat(str(as_of_val))
+            # Fail-fast if the parquet column type drifts away from string;
+            # see scripts/precompute_fundamentals.py: value is stored as str(Decimal)
+            # specifically so we can avoid float-precision loss on read.
+            assert isinstance(value_val, str), (
+                f"value column must be string, got {type(value_val)}"
+            )
             # Preserve precision by going through str representation
-            decimal_value = Decimal(str(value_val))
+            decimal_value = Decimal(value_val)
             if key not in index:
                 index[key] = []
             index[key].append((as_of_date, decimal_value))
