@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+from sentence_transformers import SentenceTransformer
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -59,23 +60,18 @@ def test_dense_embedder_returns_768_dim_unit_vectors(stub_dense_model: MagicMock
     np.testing.assert_allclose(norms, np.ones(2), atol=1e-5)
 
 
-def test_dense_embedder_is_deterministic(stub_dense_model: MagicMock) -> None:
+def test_dense_embedder_is_deterministic() -> None:
     """Identical inputs must produce bit-identical outputs to 1e-6 tolerance."""
     from firm.rag.embed import NomicEmbedder
 
-    # Two separate embedders sharing the same stub (same underlying encode side_effect
-    # seed is reset per-fixture call, so use the same instance).
-    embedder = NomicEmbedder(model=stub_dense_model)
-    texts = ["$AAPL earnings beat consensus estimates."]
+    fixed_output = np.random.RandomState(42).randn(1, 768).astype(np.float32)
+    fixed_output /= np.linalg.norm(fixed_output, axis=1, keepdims=True)  # pre-normalize so defensive renorm is no-op
+    stub = MagicMock(spec=SentenceTransformer)
+    stub.encode.return_value = fixed_output
+    embedder = NomicEmbedder(model=stub)
 
-    # Call encode twice; the stub returns the same deterministic array because
-    # sentence-transformers is deterministic for the same model weights + input.
-    # We reset the side_effect to a fresh seeded RNG to simulate determinism.
-    stub_dense_model.encode.side_effect = _make_stub_encode(seed=42)
-    first = embedder.embed(texts)
-    stub_dense_model.encode.side_effect = _make_stub_encode(seed=42)
-    second = embedder.embed(texts)
-
+    first = embedder.embed(["hello"])
+    second = embedder.embed(["hello"])
     np.testing.assert_allclose(first, second, atol=1e-6)
 
 
@@ -136,6 +132,15 @@ def test_sparse_transform_unknown_token_is_ignored() -> None:
     # "xyzzy" was never in the corpus; its id would not exist in vocab.
     result = sparse.transform("xyzzy randomtoken999")
     assert result == {}
+
+
+def test_bm25_fit_rejects_empty_corpus() -> None:
+    """BM25Sparse.fit() must raise ValueError when passed an empty corpus."""
+    from firm.rag.embed import BM25Sparse
+
+    sparse = BM25Sparse()
+    with pytest.raises(ValueError, match="non-empty corpus"):
+        sparse.fit([])
 
 
 # ---------------------------------------------------------------------------

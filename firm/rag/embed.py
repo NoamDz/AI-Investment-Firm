@@ -95,6 +95,8 @@ class BM25Sparse:
         from rank_bm25 import BM25Okapi  # type: ignore[import-untyped]
 
         tokenised: list[list[str]] = [ticker_aware_tokens(doc) for doc in corpus]
+        if not tokenised:
+            raise ValueError("BM25Sparse.fit() requires a non-empty corpus")
 
         self._bm25 = BM25Okapi(tokenised)
 
