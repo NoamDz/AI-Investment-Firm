@@ -99,9 +99,10 @@ def test_upsert_then_search_returns_chunk_id() -> None:
     )
 
     assert len(results) > 0, "search returned no results"
-    chunk_ids = {r["chunk_id"] for r in results}
-    all_ids = {c.id for c in chunks}
-    assert chunk_ids & all_ids, f"no returned chunk_id matched upserted ids; got {chunk_ids}"
+    # Query [1,0,0,0] is identical to chunk-1's dense vec — it must rank #1 by cosine.
+    assert results[0]["chunk_id"] == "aapl-10k::0001", (
+        f"expected aapl-10k::0001 as top hit by cosine similarity; got {results[0]['chunk_id']}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -139,3 +140,27 @@ def test_payload_filter_published_at_excludes_future() -> None:
     returned_ids = {r["chunk_id"] for r in results}
     assert "doc::0001" in returned_ids, "past chunk should be returned"
     assert "doc::0002" not in returned_ids, "future chunk must be excluded by PIT filter"
+
+
+# ---------------------------------------------------------------------------
+# Length-mismatch guard
+# ---------------------------------------------------------------------------
+
+
+def test_upsert_rejects_length_mismatch() -> None:
+    from firm.rag.qdrant_store import VectorStore
+
+    client = _make_client()
+    store = VectorStore(client)
+    utc = timezone.utc
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        store.create_collection("mismatch", dense_dim=4)
+
+    chunks = [_make_chunk("doc::0001", "AAPL", datetime(2023, 1, 1, tzinfo=utc))]
+    dense_vecs: list[list[float]] = []  # length 0, not 1
+    sparse_vecs: list[dict[int, float]] = [{}]
+
+    with pytest.raises(ValueError, match="length mismatch"):
+        store.upsert("mismatch", chunks, dense_vecs, sparse_vecs)

@@ -66,8 +66,12 @@ class VectorStore:
         dense_vecs: Sequence[Sequence[float]],
         sparse_vecs: Sequence[dict[int, float]],
     ) -> None:
+        if not (len(chunks) == len(dense_vecs) == len(sparse_vecs)):
+            raise ValueError("chunks/dense_vecs/sparse_vecs length mismatch")
+        if not chunks:
+            return
         points: list[models.PointStruct] = []
-        for chunk, dvec, svec in zip(chunks, dense_vecs, sparse_vecs):
+        for chunk, dvec, svec in zip(chunks, dense_vecs, sparse_vecs, strict=True):
             point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, chunk.id))
             indices = list(svec.keys())
             values = list(svec.values())
