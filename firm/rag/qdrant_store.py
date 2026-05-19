@@ -99,6 +99,28 @@ class VectorStore:
             )
         self._client.upsert(collection_name=name, points=points)
 
+    def doc_exists(self, name: str, doc_id: str) -> bool:
+        """Return True iff any point in *name* has payload ``doc_id == doc_id``.
+
+        Used by the ingest pipeline (T11) to skip docs that are already indexed,
+        enabling a second ``make ingest`` to resume without re-embedding.
+        """
+        points, _ = self._client.scroll(
+            collection_name=name,
+            scroll_filter=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="doc_id",
+                        match=models.MatchValue(value=doc_id),
+                    )
+                ]
+            ),
+            limit=1,
+            with_payload=False,
+            with_vectors=False,
+        )
+        return len(points) > 0
+
     def _pit_filter(self, published_before: datetime) -> models.Filter:
         return models.Filter(
             must=[

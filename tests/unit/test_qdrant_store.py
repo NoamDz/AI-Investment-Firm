@@ -164,3 +164,41 @@ def test_upsert_rejects_length_mismatch() -> None:
 
     with pytest.raises(ValueError, match="length mismatch"):
         store.upsert("mismatch", chunks, dense_vecs, sparse_vecs)
+
+
+# ---------------------------------------------------------------------------
+# doc_exists — used by the ingest pipeline for resumability
+# ---------------------------------------------------------------------------
+
+
+def test_doc_exists() -> None:
+    from firm.rag.qdrant_store import VectorStore
+
+    client = _make_client()
+    store = VectorStore(client)
+    utc = timezone.utc
+    published = datetime(2023, 6, 1, tzinfo=utc)
+
+    chunk = Chunk(
+        id="doc-a::0001",
+        doc_id="doc-a",
+        ticker="AAPL",
+        published_at=published,
+        section="body",
+        text="text-a",
+        char_span=(0, 6),
+        token_count=2,
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        store.create_collection("exists_col", dense_dim=4)
+
+    # Before any upsert: no document exists.
+    assert store.doc_exists("exists_col", "doc-a") is False
+
+    store.upsert("exists_col", [chunk], [[1.0, 0.0, 0.0, 0.0]], [{0: 1.0}])
+
+    # After upsert: known doc_id resolves True, unknown stays False.
+    assert store.doc_exists("exists_col", "doc-a") is True
+    assert store.doc_exists("exists_col", "doc-missing") is False
