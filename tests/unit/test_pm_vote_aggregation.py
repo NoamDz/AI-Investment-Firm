@@ -4,8 +4,10 @@ aggregate_votes is a deterministic pure-Python helper that combines three
 single-lens PmVote objects (one per PmLens) into a committee decision.
 T27 will wire this into make_pm().
 
-The 7 tests below cover the 6 locked spec rules plus the rationale-carry
-guarantee. Each test is a single-case test as required by the spec.
+The 10 tests below cover the 6 locked spec rules, the three "consistent
+extension" 2-1 dispatch branches reachable by parallel (2 SELL + 1 HOLD,
+2 HOLD + 1 BUY, 2 HOLD + 1 SELL), and the rationale-carry guarantee.
+Each test is a single-case test as required by the spec.
 """
 from __future__ import annotations
 
@@ -105,6 +107,60 @@ def test_one_buy_two_sell_yields_sell() -> None:
     assert action is ActionEnum.SELL
     # Mean of the two SELL confidences (0.8) discounted by 0.8 = 0.64.
     assert abs(confidence - 0.8 * 0.8) < 1e-9
+    assert failure is None
+
+
+def test_two_sell_one_hold_yields_sell_with_mild_reservation() -> None:
+    """Consistent extension (not in the original 6 locked rules but reachable by
+    parallel): 2 SELL + 1 HOLD → SELL with the same mild-reservation discount as
+    the 2 BUY + 1 HOLD branch. Confirms the (0, 1, 2) dispatch averages the
+    SELL-subset only and applies the 0.8 discount.
+    """
+    votes = [
+        _vote(PmLens.QUALITY, ActionEnum.SELL, confidence=0.7),
+        _vote(PmLens.VALUATION, ActionEnum.SELL, confidence=0.5),
+        _vote(PmLens.CATALYST, ActionEnum.HOLD, confidence=0.95),
+    ]
+    action, confidence, _rationale, failure = aggregate_votes(votes)
+    assert action is ActionEnum.SELL
+    # Mean of the two SELL confidences ((0.7 + 0.5)/2 = 0.6) discounted by 0.8.
+    assert abs(confidence - ((0.7 + 0.5) / 2) * 0.8) < 1e-9
+    assert failure is None
+
+
+def test_two_hold_one_buy_yields_hold_with_mild_reservation() -> None:
+    """Consistent extension (not in the original 6 locked rules but reachable by
+    parallel): 2 HOLD + 1 BUY → HOLD with the mild-reservation discount.
+    Confirms the (1, 2, 0) dispatch averages the HOLD-subset only and applies
+    the 0.8 discount.
+    """
+    votes = [
+        _vote(PmLens.QUALITY, ActionEnum.HOLD, confidence=0.6),
+        _vote(PmLens.VALUATION, ActionEnum.HOLD, confidence=0.4),
+        _vote(PmLens.CATALYST, ActionEnum.BUY, confidence=0.9),
+    ]
+    action, confidence, _rationale, failure = aggregate_votes(votes)
+    assert action is ActionEnum.HOLD
+    # Mean of the two HOLD confidences ((0.6 + 0.4)/2 = 0.5) discounted by 0.8.
+    assert abs(confidence - ((0.6 + 0.4) / 2) * 0.8) < 1e-9
+    assert failure is None
+
+
+def test_two_hold_one_sell_yields_hold_with_mild_reservation() -> None:
+    """Consistent extension (not in the original 6 locked rules but reachable by
+    parallel): 2 HOLD + 1 SELL → HOLD with the mild-reservation discount.
+    Confirms the (0, 2, 1) dispatch averages the HOLD-subset only and applies
+    the 0.8 discount (i.e. it does NOT mix in the dissenting SELL voter).
+    """
+    votes = [
+        _vote(PmLens.QUALITY, ActionEnum.HOLD, confidence=0.75),
+        _vote(PmLens.VALUATION, ActionEnum.SELL, confidence=0.95),
+        _vote(PmLens.CATALYST, ActionEnum.HOLD, confidence=0.55),
+    ]
+    action, confidence, _rationale, failure = aggregate_votes(votes)
+    assert action is ActionEnum.HOLD
+    # Mean of the two HOLD confidences ((0.75 + 0.55)/2 = 0.65) discounted by 0.8.
+    assert abs(confidence - ((0.75 + 0.55) / 2) * 0.8) < 1e-9
     assert failure is None
 
 
