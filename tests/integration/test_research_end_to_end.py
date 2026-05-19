@@ -27,6 +27,11 @@ from firm.broker.fake_broker import FakeBroker  # noqa: E402
 from firm.core.clock import ReplayClock  # noqa: E402
 from firm.core.config import load_universe  # noqa: E402
 from firm.core.models import Claim  # noqa: E402
+from firm.grounding.schema import (  # noqa: E402
+    ClaimAssessment,
+    ClaimSupport,
+    SufficiencyResult,
+)
 from firm.rag.chunk import Chunk  # noqa: E402
 from firm.rag.qdrant_store import VectorStore  # noqa: E402
 from firm.rag.rerank import BgeReranker  # noqa: E402
@@ -70,6 +75,29 @@ class _OneClaimExtractor:
                 source_span=(0, min(50, len(chunk.text))),
             )
         ]
+
+
+class _AllSupportedJudge:
+    """Stub sufficiency judge that labels every claim as SUPPORTED.
+
+    Keeps the integration test network-free (no real Haiku call) while
+    exercising the grounded path's branch-on-sufficiency wiring.
+    """
+
+    def assess(
+        self, *, question: str, claims: list[Claim]
+    ) -> SufficiencyResult:
+        return SufficiencyResult(
+            claim_assessments=[
+                ClaimAssessment(
+                    claim_id=f"c{i + 1}",
+                    support=ClaimSupport.SUPPORTED,
+                    reasoning="integration stub",
+                )
+                for i in range(len(claims))
+            ],
+            overall_reasoning="integration stub: all supported",
+        )
 
 
 def test_research_end_to_end_produces_decision_with_citation() -> None:
@@ -123,6 +151,7 @@ def test_research_end_to_end_produces_decision_with_citation() -> None:
         hybrid=hybrid, reranker=reranker, k_final=4
     )
     extractor = _OneClaimExtractor()
+    judge = _AllSupportedJudge()
 
     broker = FakeBroker(initial_cash=Decimal("100000"))
     universe = load_universe(Path("config/universe.yaml"))
@@ -134,6 +163,7 @@ def test_research_end_to_end_produces_decision_with_citation() -> None:
         universe=universe,
         retriever=retriever,
         extractor=extractor,
+        judge=judge,  # type: ignore[arg-type]  # stub is structurally compatible
         nonce_secret=b"x" * 32,
     )
     out = research({"heartbeat_at": clock.now().isoformat()})
@@ -143,11 +173,15 @@ def test_research_end_to_end_produces_decision_with_citation() -> None:
     # The cited chunk must correspond to one of the seeded chunks.
     cited_chunk_ids = {c.chunk_id for c in decision.citations}
     assert cited_chunk_ids.issubset({chunk_a.id, chunk_b.id})
-    # The retrieved_chunks slot should carry the underlying Chunks (not RetrievedChunks).
-    retrieved: list[Chunk] = out["retrieved_chunks"]
+    # The retrieved_chunks slot carries chunks serialized to dicts (T21).
+    retrieved: list[dict[str, object]] = out["retrieved_chunks"]
     assert len(retrieved) >= 1
-    assert all(isinstance(c, Chunk) for c in retrieved)
+    assert all(isinstance(c, dict) for c in retrieved)
+    assert all("id" in c and "doc_id" in c and "text" in c for c in retrieved)
     # oldest_filing_age_days should be present and equal to the days from
     # the *oldest* seeded chunk's published_at to clock.now() (chunk_b is older).
     expected_age = (clock.now().date() - chunk_b.published_at.date()).days
     assert decision.metadata["oldest_filing_age_days"] == expected_age
+    # The sufficiency gate result must be surfaced for downstream PM/risk.
+    assert "sufficiency_result" in out
+    assert "claim_assessments" in out["sufficiency_result"]

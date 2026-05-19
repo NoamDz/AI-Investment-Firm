@@ -1,18 +1,28 @@
-"""Research agent — grounded LLM-backed implementation (Plan 2 §T19).
+"""Research agent — grounded LLM-backed implementation (Plan 2 §T19, §T21).
 
 The factory function ``make_research`` returns a node callable for the
 LangGraph workflow.  Two paths are supported for backwards compatibility:
 
-* **Grounded path** (Plan 2): when both ``retriever`` and ``extractor`` are
-  provided, the heartbeat issues a deterministic research question, runs
-  ``retriever.retrieve(...)`` with ``as_of=clock.now()``, extracts cited
-  Claims, and emits a Decision whose ``citations`` are mapped per-claim
-  exactly as the spec specifies.  Empty retrieval → REFUSE / INSUFFICIENT_EVIDENCE.
+* **Grounded path** (Plan 2): when ``retriever``, ``extractor``, and
+  ``judge`` are all provided, the heartbeat issues a deterministic
+  research question, runs ``retriever.retrieve(...)`` with
+  ``as_of=clock.now()``, extracts cited Claims, then runs the
+  :class:`SufficiencyJudge` to label each claim. Branching on the
+  aggregate sufficiency status:
 
-* **Legacy stub path** (Plan 1): when either collaborator is absent, fall
-  back to the deterministic stub that picks the cheapest ticker.  This keeps
-  ``test_research.py`` and the unmigrated CLI working until T29 wires the
-  real stack.
+  * ``ok``         → BUY (or HOLD when no claims survived extraction).
+  * ``partial``    → ESCALATE with ``escalation_reason='sufficiency:partial'``.
+  * ``insufficient`` → REFUSE with ``failure_mode=INSUFFICIENT_EVIDENCE``.
+
+  If the judge raises :class:`JudgeResponseError`, the agent emits a
+  REFUSE Decision with ``failure_mode=LLM_UNAVAILABLE``. Every branch
+  surfaces a serialized ``sufficiency_result`` on the returned state so
+  downstream agents (PM, Risk, HITL reviewer) can introspect it.
+
+* **Legacy stub path** (Plan 1): when any of retriever / extractor /
+  judge is absent, fall back to the deterministic stub that picks the
+  cheapest ticker.  This keeps ``test_research.py`` and the unmigrated
+  CLI working until T29 wires the real stack.
 """
 from __future__ import annotations
 
@@ -30,14 +40,32 @@ from firm.core.models import (
     Citation,
     Claim,
     Decision,
+    EscalatePayload,
     FailureMode,
     HoldPayload,
     RefusePayload,
 )
+from firm.grounding.judge import JudgeResponseError, SufficiencyJudge
+from firm.grounding.schema import SufficiencyResult
 from firm.llm.citations import CitedClaimExtractor
 from firm.rag.chunk import Chunk
 from firm.rag.retrieve import GroundedRetriever
 from firm.orchestrator.state import WorkingState
+
+
+# Default placeholder used when the judge errored before producing a result
+# but we still owe downstream a uniform sufficiency_result shape.
+_LLM_UNAVAILABLE_SUFFICIENCY: dict[str, Any] = {
+    "claim_assessments": [],
+    "overall_reasoning": "sufficiency judge unavailable (LLM error)",
+}
+
+# Placeholder used when retrieval returned no chunks — the judge is skipped
+# (no claims to assess) but downstream still expects the key to be present.
+_EMPTY_RETRIEVAL_SUFFICIENCY: dict[str, Any] = {
+    "claim_assessments": [],
+    "overall_reasoning": "retrieval empty; judge skipped",
+}
 
 
 def _doc_id_of(chunk_id: str, chunks: list[Chunk]) -> str:
@@ -108,6 +136,7 @@ def _make_grounded_research(
     universe: UniverseConfig,
     retriever: GroundedRetriever,
     extractor: CitedClaimExtractor,
+    judge: SufficiencyJudge,
     nonce_secret: bytes | None,
 ) -> Callable[[WorkingState], dict[str, Any]]:
     """Build the grounded heartbeat node."""
@@ -119,6 +148,7 @@ def _make_grounded_research(
         raise ValueError(
             "nonce_secret is required for the grounded research path"
         )
+    nonce_key: bytes = nonce_secret  # narrow Optional for mypy --strict inside closure.
 
     def research(state: WorkingState) -> dict[str, Any]:  # noqa: ARG001 -- reads clock, not heartbeat
         # Step 1: deterministic ticker selection. Simplest stable rule.
@@ -129,10 +159,11 @@ def _make_grounded_research(
         # Step 2: retrieve. Empty → REFUSE / INSUFFICIENT_EVIDENCE.
         retrieved = retriever.retrieve(question, as_of=now)
         chunks: list[Chunk] = [rc.chunk for rc in retrieved]
+        chunks_dump: list[dict[str, Any]] = [c.model_dump() for c in chunks]
 
         decision_id = ulid_new()
         nonce = sign_nonce(
-            nonce_secret, decision_id=decision_id, timestamp=int(now.timestamp())
+            nonce_key, decision_id=decision_id, timestamp=int(now.timestamp())
         )
 
         if not chunks:
@@ -156,17 +187,118 @@ def _make_grounded_research(
             )
             return {
                 "research_decision": refuse_decision,
-                "retrieved_chunks": chunks,
+                "retrieved_chunks": chunks_dump,
                 "claims": [],
+                "sufficiency_result": dict(_EMPTY_RETRIEVAL_SUFFICIENCY),
             }
 
         # Step 3: extract cited claims.
         claims = extractor.extract(query=question, chunks=chunks, as_of=now)
+        claims_dump: list[dict[str, Any]] = [c.model_dump() for c in claims]
 
-        # Step 4: build Decision. Action follows simple claim-sentiment rule
-        # (Plan 2: PM owns the real action; research emits an opinion).
+        # Step 4: oldest-filing-age metadata (shared across branches).
+        metadata: dict[str, Any] = {"agent": "research", "ticker": ticker}
+        oldest_age = _compute_oldest_filing_age_days(chunks, now=now)
+        if oldest_age is not None:
+            metadata["oldest_filing_age_days"] = oldest_age
+
+        # Step 5: sufficiency gate. JudgeResponseError → REFUSE LLM_UNAVAILABLE.
+        # Catch ONLY JudgeResponseError; other exceptions propagate so a real
+        # bug (e.g. schema drift) is not silently masked.
+        try:
+            sufficiency: SufficiencyResult = judge.assess(
+                question=question, claims=claims
+            )
+        except JudgeResponseError as exc:
+            llm_unavailable_decision = Decision(
+                id=decision_id,
+                decision_id_chain=[],
+                action=ActionEnum.REFUSE,
+                payload=RefusePayload(reason="sufficiency:llm_unavailable"),
+                rationale=f"sufficiency judge unavailable: {exc!s}",
+                confidence=0.0,
+                citations=_build_citations(claims, chunks),
+                falsification_condition=(
+                    f"sufficiency judge succeeds for {ticker} at a later heartbeat"
+                ),
+                escalation_reason=None,
+                failure_mode=FailureMode.LLM_UNAVAILABLE,
+                metadata=metadata,
+                nonce=nonce,
+            )
+            return {
+                "research_decision": llm_unavailable_decision,
+                "retrieved_chunks": chunks_dump,
+                "claims": claims_dump,
+                "sufficiency_result": dict(_LLM_UNAVAILABLE_SUFFICIENCY),
+            }
+
+        sufficiency_dump: dict[str, Any] = sufficiency.model_dump(mode="json")
+        status = sufficiency.aggregate_status()
         citations = _build_citations(claims, chunks)
 
+        # Step 6: branch on aggregate sufficiency status.
+        if status == "insufficient":
+            insufficient_decision = Decision(
+                id=decision_id,
+                decision_id_chain=[],
+                action=ActionEnum.REFUSE,
+                payload=RefusePayload(reason="sufficiency:insufficient"),
+                rationale=(
+                    "sufficiency judge marked at least one claim UNSUPPORTED"
+                ),
+                confidence=0.0,
+                citations=citations,
+                falsification_condition=(
+                    f"{ticker} produces fully-supported claims at a later heartbeat"
+                ),
+                escalation_reason=None,
+                failure_mode=FailureMode.INSUFFICIENT_EVIDENCE,
+                metadata=metadata,
+                nonce=nonce,
+            )
+            return {
+                "research_decision": insufficient_decision,
+                "retrieved_chunks": chunks_dump,
+                "claims": claims_dump,
+                "sufficiency_result": sufficiency_dump,
+            }
+
+        if status == "partial":
+            # ESCALATE requires a proposed Buy/Sell payload (the HITL reviewer
+            # needs the action they would be approving).  Use the same default
+            # BUY(10 shares) shape as the happy path so the proposed action is
+            # consistent across both branches.
+            escalate_decision = Decision(
+                id=decision_id,
+                decision_id_chain=[],
+                action=ActionEnum.ESCALATE,
+                payload=EscalatePayload(
+                    proposed=BuyPayload(ticker=ticker, shares=Decimal("10")),
+                    reason="sufficiency:partial",
+                ),
+                rationale=(
+                    "sufficiency judge marked at least one claim PARTIAL; "
+                    "escalating to HITL review"
+                ),
+                confidence=0.4,
+                citations=citations,
+                falsification_condition=(
+                    f"{ticker} produces fully-supported claims at a later heartbeat"
+                ),
+                escalation_reason="sufficiency:partial",
+                failure_mode=None,
+                metadata=metadata,
+                nonce=nonce,
+            )
+            return {
+                "research_decision": escalate_decision,
+                "retrieved_chunks": chunks_dump,
+                "claims": claims_dump,
+                "sufficiency_result": sufficiency_dump,
+            }
+
+        # status == "ok" → proceed with the original BUY / HOLD decision.
         if claims:
             payload: BuyPayload | HoldPayload = BuyPayload(
                 ticker=ticker, shares=Decimal("10")
@@ -184,12 +316,6 @@ def _make_grounded_research(
                 f"{ticker} reports materially different fundamentals next quarter"
             )
 
-        # Step 5: surface oldest_filing_age_days in metadata for Risk.
-        metadata: dict[str, Any] = {"agent": "research", "ticker": ticker}
-        oldest_age = _compute_oldest_filing_age_days(chunks, now=now)
-        if oldest_age is not None:
-            metadata["oldest_filing_age_days"] = oldest_age
-
         decision = Decision(
             id=decision_id,
             decision_id_chain=[],
@@ -205,11 +331,11 @@ def _make_grounded_research(
             nonce=nonce,
         )
 
-        # Step 6: write retrieved_chunks + claims to state.
         return {
             "research_decision": decision,
-            "retrieved_chunks": chunks,
-            "claims": claims,
+            "retrieved_chunks": chunks_dump,
+            "claims": claims_dump,
+            "sufficiency_result": sufficiency_dump,
         }
 
     return research
@@ -255,25 +381,28 @@ def make_research(
     universe: UniverseConfig,
     retriever: GroundedRetriever | None = None,
     extractor: CitedClaimExtractor | None = None,
+    judge: SufficiencyJudge | None = None,
     nonce_secret: bytes | None = None,
 ) -> Callable[[WorkingState], dict[str, Any]]:
     """Build a research node callable.
 
-    When both ``retriever`` and ``extractor`` are provided, returns the
-    grounded heartbeat (Plan 2 §T19) and ``nonce_secret`` is REQUIRED —
-    leaving it ``None`` raises rather than letting the agent ship Decisions
-    signed with a zero key.  Otherwise returns the Plan 1 deterministic stub
-    (which uses a literal nonce and ignores ``nonce_secret`` entirely).  This
-    dual signature lets T29 swap in the real RAG stack while keeping existing
-    Plan 1 tests + CLI working today.
+    When ``retriever``, ``extractor``, AND ``judge`` are all provided,
+    returns the grounded heartbeat (Plan 2 §T19 + §T21) and
+    ``nonce_secret`` is REQUIRED — leaving it ``None`` raises rather
+    than letting the agent ship Decisions signed with a zero key.
+    Otherwise returns the Plan 1 deterministic stub (which uses a
+    literal nonce and ignores ``nonce_secret`` entirely).  This dual
+    signature lets T29 swap in the real RAG stack while keeping
+    existing Plan 1 tests + CLI working today.
     """
-    if retriever is not None and extractor is not None:
+    if retriever is not None and extractor is not None and judge is not None:
         return _make_grounded_research(
             clock=clock,
             broker=broker,
             universe=universe,
             retriever=retriever,
             extractor=extractor,
+            judge=judge,
             nonce_secret=nonce_secret,
         )
     return _make_legacy_stub_research(clock=clock, broker=broker, universe=universe)
