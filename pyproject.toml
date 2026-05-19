@@ -1,0 +1,39 @@
+[project]
+name = "ai-investment-firm"
+version = "0.1.0"
+description = "Multi-agent AI investment firm — Cato take-home"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7",
+    "langgraph>=0.2",
+    "langgraph-checkpoint-sqlite>=1.0",
+    "python-ulid>=2.2",
+    "pyyaml>=6.0",
+    "click>=8.1",
+    "structlog>=24.1",
+    "alpaca-py>=0.30",  # optional broker; only imported when ALPACA selected
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+firm = "firm.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 100
+
+[tool.mypy]
+strict = true
+
+[tool.setuptools.packages.find]
+include = ["firm*"]

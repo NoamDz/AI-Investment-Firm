@@ -1,0 +1,6 @@
+# See https://litestream.io. Activated in Plan 3 via the runbook.
+dbs:
+  - path: /data/firm.db
+    replicas:
+      - type: file
+        path: /data/backups/firm.db
