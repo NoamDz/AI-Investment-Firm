@@ -67,3 +67,19 @@ def test_llm_cache_unique_on_prompt_hash_and_model(tmp_path: Path):
             "INSERT INTO llm_cache (prompt_hash, model, response_json, created_at) "
             "VALUES ('hash1', 'sonnet', '{\"text\": \"duplicate\"}', '2026-05-19T00:00:01Z')"
         )
+
+
+def test_llm_cache_allows_same_hash_different_model(tmp_path: Path):
+    db = tmp_path / "test.db"
+    init_db(db)
+    conn = get_conn(db)
+    conn.execute(
+        "INSERT INTO llm_cache (prompt_hash, model, response_json, created_at) "
+        "VALUES ('hash1', 'sonnet', '{}', '2026-05-19T00:00:00Z')"
+    )
+    conn.execute(
+        "INSERT INTO llm_cache (prompt_hash, model, response_json, created_at) "
+        "VALUES ('hash1', 'haiku', '{}', '2026-05-19T00:00:01Z')"
+    )
+    rows = conn.execute("SELECT COUNT(*) FROM llm_cache").fetchone()[0]
+    assert rows == 2
