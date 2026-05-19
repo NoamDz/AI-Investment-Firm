@@ -171,6 +171,48 @@ def test_upsert_rejects_length_mismatch() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_upsert_stores_char_span_and_token_count_in_payload() -> None:
+    """T12 prerequisite: payload must carry char_span (list[int]) and token_count.
+
+    The retriever needs these fields to reconstruct a Chunk from a scroll result,
+    since the Chunk pydantic model declares them as required.
+    """
+    from firm.rag.qdrant_store import VectorStore
+
+    client = _make_client()
+    store = VectorStore(client)
+    utc = timezone.utc
+    published = datetime(2023, 6, 1, tzinfo=utc)
+
+    chunk = Chunk(
+        id="payload-doc::0001",
+        doc_id="payload-doc",
+        ticker="AAPL",
+        published_at=published,
+        section="body",
+        text="payload reconstruction test",
+        char_span=(13, 42),
+        token_count=7,
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        store.create_collection("payload_col", dense_dim=4)
+        store.upsert("payload_col", [chunk], [[1.0, 0.0, 0.0, 0.0]], [{0: 1.0}])
+
+    points, _ = client.scroll(
+        collection_name="payload_col",
+        limit=10,
+        with_payload=True,
+        with_vectors=False,
+    )
+    assert len(points) == 1
+    payload = points[0].payload
+    assert payload is not None
+    assert payload.get("char_span") == [13, 42], "char_span must be stored as list[int]"
+    assert payload.get("token_count") == 7
+
+
 def test_doc_exists() -> None:
     from firm.rag.qdrant_store import VectorStore
 

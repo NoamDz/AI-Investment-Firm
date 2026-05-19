@@ -83,6 +83,10 @@ class VectorStore:
                 "published_at": chunk.published_at.timestamp(),
                 "text": chunk.text,
                 "doc_summary": chunk.doc_summary,
+                # T12 reconstruction: Chunk requires char_span + token_count.
+                # JSON has no tuple type, so we round-trip char_span as list[int].
+                "char_span": [chunk.char_span[0], chunk.char_span[1]],
+                "token_count": chunk.token_count,
             }
             points.append(
                 models.PointStruct(
