@@ -226,12 +226,18 @@ mypy firm
 - `test_citation_accepts_anthropic_fields`: Citation now carries optional `cited_text`, `document_index`, `document_title` so the Anthropic response can be persisted without lossy mapping.
 - `test_claim_support_enum_values`: `SUPPORTED`, `PARTIAL`, `UNSUPPORTED`.
 - `test_sufficiency_result_aggregation_status`: helper `.aggregate_status()` returns `"ok"`/`"partial"`/`"insufficient"`.
+- `test_claim_rejects_numeric_without_provenance`: constructing `Claim(text="rev grew 12%", value=Decimal("0.12"), source_chunk_id=None, tool_call_id=None)` raises `ValidationError`. Spec §7.2 mandates schema-level enforcement of provenance.
+- `test_claim_accepts_chunk_provenance`: `Claim(text=..., value=Decimal("0.12"), source_chunk_id="aapl-10k::0003")` constructs cleanly.
+- `test_claim_accepts_tool_provenance`: `Claim(text=..., value=Decimal("0.12"), tool_call_id="toolu_01...")` constructs cleanly.
+- `test_claim_textonly_without_value_allowed_without_provenance`: text-only qualitative claim (`value is None`) does not require provenance.
 
 - [ ] **Step 1: Write failing tests** in `tests/unit/test_models.py` and a new `tests/unit/test_grounding_schema.py`.
 
 - [ ] **Step 2: Run — verify fail.**
 
-- [ ] **Step 3: Extend `firm/core/models.py`**: add optional fields on `Citation` (`cited_text: str | None`, `document_index: int | None`, `document_title: str | None`). Keep `source_id`, `chunk_id`, `span` for back-compat. Existing Plan 1 callers (Risk/Reporter/etc.) construct Citation with positional args — preserve those positions; new fields must be keyword-only with defaults.
+- [ ] **Step 3: Extend `firm/core/models.py`**:
+  - Add optional fields on `Citation` (`cited_text: str | None`, `document_index: int | None`, `document_title: str | None`). Keep `source_id`, `chunk_id`, `span` for back-compat. Existing Plan 1 callers (Risk/Reporter/etc.) construct Citation with positional args — preserve those positions; new fields must be keyword-only with defaults.
+  - Add a Pydantic `@model_validator(mode="after")` on `Claim` enforcing spec §7.2: if `value is not None` then at least one of `source_chunk_id` or `tool_call_id` must be set; otherwise raise `ValueError("numeric Claim requires source_chunk_id or tool_call_id")`. Text-only claims (`value is None`) remain unconstrained. This makes uncited numeric claims unconstructable rather than relying on runtime drop in the extractor (T18); the extractor's `UNCITED_CLAIM` counter still triggers when the LLM emits a claim the extractor rejects pre-construction.
 
 - [ ] **Step 4: Create `firm/grounding/schema.py`**:
   ```python
@@ -445,14 +451,14 @@ mypy firm/rag/financebench.py
 **Tests:**
 - `test_dense_embedder_returns_768_dim_unit_vectors`.
 - `test_dense_embedder_is_deterministic`: identical input → identical output to 1e-6.
-- `test_sparse_embedder_preserves_ticker_tokens`: vocabulary contains `$AAPL`, `BRK.B`.
+- `test_sparse_embedder_preserves_ticker_tokens`: fit BM25Sparse on a fixture corpus containing `"$AAPL announced ..."` and `"BRK.B subsidiary ..."`; assert the fitted vocabulary contains both `$AAPL` and `BRK.B` (verifies the `ticker_aware_tokens` wiring from Step 3, not rank-bm25's default tokenizer).
 - `test_batch_embed_handles_empty_input`.
 
 - [ ] **Step 1: Write tests. Mock the sentence-transformers model load** with a fixture that returns a tiny stub model (or use a pytest marker to skip in CI without local model cache).
 
 - [ ] **Step 2: Run — verify fail.**
 
-- [ ] **Step 3: Implement `firm/rag/embed.py`** with `class NomicEmbedder` (lazy-loads `SentenceTransformer("nomic-ai/nomic-embed-text-v1.5", trust_remote_code=True)`; exposes `embed(texts: list[str]) -> np.ndarray`) and `class BM25Sparse` (fits on a corpus iterator, exposes `transform(text: str) -> dict[int, float]` returning sparse token→weight for Qdrant's sparse vector format).
+- [ ] **Step 3: Implement `firm/rag/embed.py`** with `class NomicEmbedder` (lazy-loads `SentenceTransformer("nomic-ai/nomic-embed-text-v1.5", trust_remote_code=True)`; exposes `embed(texts: list[str]) -> np.ndarray`) and `class BM25Sparse` (fits on a corpus iterator, exposes `transform(text: str) -> dict[int, float]` returning sparse token→weight for Qdrant's sparse vector format). **BM25Sparse tokenizes via `firm.rag.preprocess.ticker_aware_tokens`** (do NOT use rank-bm25's default word splitter) so that ticker patterns (`$AAPL`, `BRK.B`, `10-K`) survive into the sparse index per spec §6.2. Both `.fit(corpus_iter)` and `.transform(text)` MUST route every string through `ticker_aware_tokens` before the BM25 hashing step.
 
 - [ ] **Step 4: Run — verify pass.**
 
@@ -858,6 +864,9 @@ mypy firm/llm/citations.py
 - `test_research_refuses_when_retriever_returns_empty`: emits `Decision(action=REFUSE, failure_mode=INSUFFICIENT_EVIDENCE)`.
 - `test_research_uses_pit_filter_with_replay_clock`: passes `clock.now()` as `as_of` into the retriever.
 - `test_research_falsification_condition_non_empty`.
+- `test_research_citation_fields_map_from_claim`: assert exactly the mapping in Step 3 #4 (`Citation.chunk_id == claim.source_chunk_id`, `Citation.span == claim.source_span`, `Citation.source_id == chunk.doc_id`, `Citation.cited_text == claim.text`).
+- `test_research_tool_only_claims_do_not_produce_citation`: a Claim with `tool_call_id` set and `source_chunk_id is None` does not appear in `Decision.citations`.
+- `test_research_surfaces_oldest_filing_age_days`: with two chunks dated 30 and 200 days before `clock.now()`, `research_decision.metadata["oldest_filing_age_days"] == 200`.
 - Integration: `test_research_end_to_end` wires real `GroundedRetriever` (with in-memory Qdrant seeded by T11's fixture) + cached Anthropic client → produces a Decision with ≥1 citation.
 
 - [ ] **Step 1: Write tests.**
@@ -868,8 +877,27 @@ mypy firm/llm/citations.py
   1. Choose a research question for the heartbeat. For Plan 2, the question is fixed per universe ticker rotation (deterministic): `"Summarize {ticker}'s latest reported financial trajectory and any near-term catalysts."`
   2. `chunks = retriever.retrieve(question, as_of=clock.now())`. If empty → emit a `REFUSE` Decision with `failure_mode=INSUFFICIENT_EVIDENCE` and return.
   3. `claims = extractor.extract(query=question, chunks=chunks, as_of=clock.now())`.
-  4. Build a `Decision(action=BUY|HOLD, ...)` whose `citations` are derived from `claims`, `rationale` is the concatenated claim text, and `falsification_condition` references the strongest claim. Plan 2 keeps action selection rule-based on claim sentiment (LLM does not output action; PM does).
-  5. Write `retrieved_chunks`, `claims` to state alongside `research_decision`.
+  4. Build a `Decision(action=BUY|HOLD, ...)`. `rationale` is the concatenated claim text; `falsification_condition` references the strongest claim. Plan 2 keeps action selection rule-based on claim sentiment (LLM does not output action; PM does).
+     **Claim → Citation field mapping (load-bearing — implement exactly this):** for each `claim` with `claim.source_chunk_id is not None`, emit
+     ```python
+     Citation(
+         source_id=_doc_id_of(claim.source_chunk_id, chunks),  # parse "{doc_id}::{idx}" from chunk_id, OR look up chunk.doc_id from the retrieved chunks list
+         chunk_id=claim.source_chunk_id,
+         span=claim.source_span or (0, 0),
+         cited_text=claim.text,
+         document_index=None,            # populated by extractor when Anthropic returned a document_index
+         document_title=None,            # ditto
+     )
+     ```
+     Tool-derived claims (`tool_call_id is not None`, `source_chunk_id is None`) do not produce a Citation — their provenance lives on `Claim.tool_call_id` and is surfaced in the rationale, not in `Decision.citations`. Helper `_doc_id_of(chunk_id, chunks)` is a one-liner: build a `{chunk.id: chunk.doc_id}` dict from the retrieved chunks and look up; if the chunk_id is unknown, raise rather than fabricate a source_id (defensive — this should never happen because the extractor only emits chunk_ids it received).
+  5. **Surface `oldest_filing_age_days` in `Decision.metadata`** so Risk can enforce the `stale_filing_days: 90` policy limit. Compute:
+     ```python
+     oldest_published = min((c.published_at for c in chunks), default=None)
+     if oldest_published is not None:
+         metadata["oldest_filing_age_days"] = max(0, (clock.now().date() - oldest_published.date()).days)
+     ```
+     This makes the staleness signal observable to the deterministic Risk agent without forcing Risk to know about RAG internals.
+  6. Write `retrieved_chunks`, `claims` to state alongside `research_decision`.
   - Use `ulid_new()` and HMAC-signed `nonce` (real, via `sign_nonce`).
 
 - [ ] **Step 4: Run — verify pass.**
@@ -1162,12 +1190,13 @@ mypy firm/agents/pm.py
 - `test_pm_state_carries_pm_votes_list`.
 - `test_pm_falls_through_when_research_action_is_refuse`: skips voting, passes Research's REFUSE down.
 - `test_pm_handles_escalate_research_input`.
+- `test_pm_propagates_oldest_filing_age_days`: PM Decision's `metadata["oldest_filing_age_days"]` equals the research Decision's.
 
 - [ ] **Step 1: Update tests.**
 
 - [ ] **Step 2: Run — verify fail.**
 
-- [ ] **Step 3: Rewrite `make_pm` factory** to accept `voter: PmVoter`. Plan 2 calls voters sequentially (one cached Anthropic client; concurrency is Plan 3). For each lens in `(QUALITY, VALUATION, CATALYST)` → vote → collect. Then `action, confidence, combined_rationale, fmode = aggregate_votes(votes)`. Build a `Decision` chaining `research.id`, copying `research.citations` and `research.falsification_condition`. Write `pm_votes` dicts to state.
+- [ ] **Step 3: Rewrite `make_pm` factory** to accept `voter: PmVoter`. Plan 2 calls voters sequentially (one cached Anthropic client; concurrency is Plan 3). For each lens in `(QUALITY, VALUATION, CATALYST)` → vote → collect. Then `action, confidence, combined_rationale, fmode = aggregate_votes(votes)`. Build a `Decision` chaining `research.id`, copying `research.citations` and `research.falsification_condition`, and **propagating staleness metadata**: `metadata["oldest_filing_age_days"] = research.metadata.get("oldest_filing_age_days")` (so Risk sees it on the PM proposal it receives). Write `pm_votes` dicts to state.
 
 - [ ] **Step 4: Run — verify pass.**
 
@@ -1256,6 +1285,45 @@ pytest tests/unit -v
 ruff check firm/cli.py
 mypy firm/cli.py
 ```
+
+---
+
+## Task 29a: Extend Risk to enforce `stale_filing_days` via Decision metadata
+
+**Files:**
+- Modified: `firm/agents/risk.py`
+- Test: extend `tests/unit/test_risk_limits.py`
+
+**Why this exists:** spec §3.7 + `policy.limits.stale_filing_days: 90` is already declared in `config/policy.yaml` and `firm/core/config.py:20`, but Plan 1's `evaluate_risk` only enforces `stale_quote_seconds` (`firm/agents/risk.py:85`). Plan 2 introduces grounded research producing chunks with real `published_at`; T19 step 3 #5 surfaces `oldest_filing_age_days` on the research Decision's `metadata`; T27 step 3 forwards it onto the PM Decision. This task closes the loop by making Risk read it and refuse with `FailureMode.STALE_DATA`. Without this task, Validation Gate #9 cannot honestly claim the `STALE_DATA` path is "newly exercised by Plan 2."
+
+**Tests:**
+- `test_blocks_stale_filing`: a PM proposal whose `metadata["oldest_filing_age_days"] = 120` (with `policy.limits.stale_filing_days = 90`) → Risk emits `Decision(action=REFUSE, failure_mode=STALE_DATA)`. Use the existing `_decision_stale` helper.
+- `test_passes_when_filing_age_within_limit`: `oldest_filing_age_days = 30` → Risk passes.
+- `test_filing_age_missing_metadata_is_not_a_breach`: when `metadata` lacks the key (e.g., HOLD or REFUSE upstream where no chunks were retrieved), Risk does NOT refuse with STALE_DATA — staleness check applies only when the upstream surfaced a value. This preserves Plan 1's HOLD/REFUSE pass-through invariant.
+
+- [ ] **Step 1: Write the three tests above** in `tests/unit/test_risk_limits.py`, mirroring the existing `test_blocks_stale_quote` shape.
+
+- [ ] **Step 2: Run — verify fail.**
+
+- [ ] **Step 3: Edit `firm/agents/risk.py::evaluate_risk`** — after the `stale_quote_seconds` check (line ~85) and before the `proposal.action == HOLD` short-circuit, add:
+  ```python
+  oldest_filing_age = proposal.metadata.get("oldest_filing_age_days") if proposal.metadata else None
+  if isinstance(oldest_filing_age, int) and oldest_filing_age > p.limits.stale_filing_days:
+      return _decision_stale(input, f"oldest cited filing {oldest_filing_age}d > {p.limits.stale_filing_days}d")
+  ```
+  Notes: read defensively (the field is optional and only populated when research had chunks); `isinstance(..., int)` guards against the LangGraph dict round-trip producing a non-int (it won't, but cheap insurance). Do not change `RiskInput` — the staleness signal is on the proposal itself, which Risk already has.
+
+- [ ] **Step 4: Run — verify pass.**
+
+- [ ] **Step 5: Commit.** `git commit -m "feat(risk): enforce stale_filing_days against Decision metadata"`
+
+**Verify with:**
+```
+pytest tests/unit/test_risk_limits.py -v
+mypy firm/agents/risk.py
+```
+
+**Risks / notes:** This is a Plan-1 module touch but does not change Plan-1 contracts — `RiskInput` is unchanged, `evaluate_risk` signature is unchanged, the new branch only fires when the *new* metadata key is present. Plan 1's `test_risk_limits.py` continues to pass because none of its fixtures populate `metadata["oldest_filing_age_days"]`.
 
 ---
 
@@ -1364,7 +1432,7 @@ The plan is considered complete when **all** of the following hold:
 6. `tests/integration/test_end_to_end_grounded.py` — passes; produced report contains at least one Citation with non-empty `chunk_id` and `source_span`.
 7. `make ingest && make demo` — both exit 0; `make demo` produces a confirmed paper trade whose research thesis cites real FinanceBench chunks.
 8. `escalate_new_ticker: true` in `config/policy.yaml`, and the corresponding HITL-routing test passes.
-9. All 5 mandatory `FailureMode` paths that Plan 2 newly exercises (`INSUFFICIENT_EVIDENCE`, `UNCITED_CLAIM`, `LLM_UNAVAILABLE`, `SCHEMA_VALIDATION_FAILED`, `STALE_DATA`) have at least one passing test exercising them (extending Plan 1's coverage toward the spec §9.5 full-enum invariant).
+9. All 5 mandatory `FailureMode` paths that Plan 2 newly exercises (`INSUFFICIENT_EVIDENCE`, `UNCITED_CLAIM`, `LLM_UNAVAILABLE`, `SCHEMA_VALIDATION_FAILED`, `STALE_DATA`) have at least one passing test exercising them (extending Plan 1's coverage toward the spec §9.5 full-enum invariant). The `STALE_DATA` path is satisfied by `test_blocks_stale_filing` in T29a (filing-age via research metadata) — not by Plan 1's pre-existing `test_blocks_stale_quote`, which is `stale_quote_seconds` and was already covered.
 
 ---
 
