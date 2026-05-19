@@ -24,13 +24,16 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import numpy as np
 from pydantic import BaseModel
 
 from firm.rag.chunk import Chunk
 from firm.rag.qdrant_store import VectorStore
+
+if TYPE_CHECKING:
+    from firm.rag.rerank import BgeReranker
 
 _RRF_K = 60
 
@@ -196,3 +199,33 @@ class HybridRetriever:
             )
 
         return results
+
+
+# ---------------------------------------------------------------------------
+# GroundedRetriever facade (T14)
+# ---------------------------------------------------------------------------
+
+
+class GroundedRetriever:
+    """Thin facade composing :class:`HybridRetriever` with a cross-encoder rerank step.
+
+    The retrieve-then-rerank pipeline is wrapped in a single ``retrieve`` call so
+    downstream agents do not need to know about the two-stage shape.  All filtering,
+    PIT semantics, and contextual-summary attachment live in the underlying
+    collaborators — this class is intentionally trivial.
+    """
+
+    def __init__(
+        self,
+        *,
+        hybrid: HybridRetriever,
+        reranker: BgeReranker,
+        k_final: int = 8,
+    ) -> None:
+        self._hybrid = hybrid
+        self._reranker = reranker
+        self._k_final = k_final
+
+    def retrieve(self, query: str, *, as_of: datetime) -> list[RetrievedChunk]:
+        cands = self._hybrid.retrieve(query, as_of=as_of)
+        return self._reranker.rerank(query, cands, k=self._k_final)

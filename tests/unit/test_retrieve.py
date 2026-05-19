@@ -14,7 +14,8 @@ from typing import Any
 import numpy as np
 import pytest
 
-from firm.rag.retrieve import HybridRetriever, RetrievedChunk
+from firm.rag.rerank import BgeReranker
+from firm.rag.retrieve import GroundedRetriever, HybridRetriever, RetrievedChunk
 
 _RRF_K = 60
 
@@ -245,3 +246,128 @@ def test_retrieve_requires_timezone_aware_as_of() -> None:
 
     with pytest.raises(ValueError, match="timezone-aware"):
         retriever.retrieve("q", as_of=datetime(2024, 12, 31))  # naive
+
+
+# ---------------------------------------------------------------------------
+# GroundedRetriever (T14) — facade composing hybrid + rerank
+# ---------------------------------------------------------------------------
+
+
+class _StubCrossEncoder:
+    """CrossEncoder stand-in scoring by query/doc token-overlap fraction."""
+
+    def predict(self, pairs: list[list[str]]) -> list[float]:
+        scores: list[float] = []
+        for query, doc in pairs:
+            q_tokens = set(query.lower().split())
+            d_tokens = set(doc.lower().split())
+            if not q_tokens:
+                scores.append(0.0)
+            else:
+                scores.append(len(q_tokens & d_tokens) / len(q_tokens))
+        return scores
+
+
+class _FixedScoreCrossEncoder:
+    """Returns a constant score for every input pair (validates floor filter)."""
+
+    def __init__(self, score: float) -> None:
+        self._score = score
+
+    def predict(self, pairs: list[list[str]]) -> list[float]:
+        return [self._score] * len(pairs)
+
+
+def test_grounded_retriever_returns_8_chunks_with_doc_summary_and_score() -> None:
+    """Facade returns k_final chunks, each with doc_summary prefix and rerank_score."""
+    # 50 candidates: each carries a non-empty doc_summary so the contextual prefix is
+    # attached by HybridRetriever; chunk text is constructed so a few have full
+    # overlap with the query.
+    query = "apple revenue"
+    dense = [
+        {
+            "chunk_id": f"d::{i:04d}",
+            "score": 1.0 - i * 0.001,
+            "payload": _payload(
+                f"d::{i:04d}",
+                text=(f"apple revenue figure {i}" if i % 2 == 0 else f"unrelated text {i}"),
+                doc_summary=f"summary-{i}",
+            ),
+        }
+        for i in range(50)
+    ]
+    store = FakeVectorStore(dense_hits=dense, sparse_hits=[])
+
+    hybrid = HybridRetriever(
+        store=store,  # type: ignore[arg-type]
+        embedder=FakeEmbedder(),
+        sparse=FakeSparseEncoder(),
+        collection="test",
+        k_retrieve=50,
+    )
+    reranker = BgeReranker(
+        model_id="stub",
+        score_floor=0.0,
+        model=_StubCrossEncoder(),
+    )
+    grounded = GroundedRetriever(hybrid=hybrid, reranker=reranker, k_final=8)
+
+    result = grounded.retrieve(query, as_of=datetime(2024, 12, 31, tzinfo=timezone.utc))
+
+    assert len(result) == 8
+    for rc in result:
+        # Contextual retrieval prefix from T12 was attached.
+        assert rc.chunk.doc_summary is not None and rc.chunk.doc_summary != ""
+        assert rc.chunk.text.startswith(f"{rc.chunk.doc_summary}\n\n")
+        # Reranker populated the score.
+        assert rc.rerank_score is not None
+
+
+def test_grounded_retriever_propagates_pit_filter() -> None:
+    """as_of is passed through to the underlying VectorStore search calls."""
+    store = FakeVectorStore(dense_hits=[], sparse_hits=[])
+    hybrid = HybridRetriever(
+        store=store,  # type: ignore[arg-type]
+        embedder=FakeEmbedder(),
+        sparse=FakeSparseEncoder(),
+        collection="test",
+        k_retrieve=10,
+    )
+    reranker = BgeReranker(
+        model_id="stub",
+        score_floor=0.0,
+        model=_StubCrossEncoder(),
+    )
+    grounded = GroundedRetriever(hybrid=hybrid, reranker=reranker, k_final=8)
+
+    as_of = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    grounded.retrieve("query", as_of=as_of)
+
+    assert store.last_published_before == as_of
+
+
+def test_grounded_retriever_empty_when_floor_filters_all() -> None:
+    """Floor=0.9 + constant scores of 0.1 means nothing survives reranking."""
+    dense = [
+        {"chunk_id": f"d::{i:04d}", "score": 0.5, "payload": _payload(f"d::{i:04d}")}
+        for i in range(10)
+    ]
+    store = FakeVectorStore(dense_hits=dense, sparse_hits=[])
+
+    hybrid = HybridRetriever(
+        store=store,  # type: ignore[arg-type]
+        embedder=FakeEmbedder(),
+        sparse=FakeSparseEncoder(),
+        collection="test",
+        k_retrieve=50,
+    )
+    reranker = BgeReranker(
+        model_id="stub",
+        score_floor=0.9,
+        model=_FixedScoreCrossEncoder(0.1),
+    )
+    grounded = GroundedRetriever(hybrid=hybrid, reranker=reranker, k_final=8)
+
+    result = grounded.retrieve("q", as_of=datetime(2024, 12, 31, tzinfo=timezone.utc))
+
+    assert result == []
