@@ -16,14 +16,14 @@ import click
 from firm.agents.execution import make_execution
 from firm.agents.hitl import make_hitl, mark_approved, mark_rejected
 from firm.agents.monitor import make_monitor
-from firm.agents.pm import make_pm
+from firm.agents.pm import PmVoter, make_pm
 from firm.agents.reporter import make_reporter
 from firm.agents.research import make_research
 from firm.agents.risk import RiskInput, evaluate_risk
 from firm.broker.alpaca_paper import make_broker
 from firm.broker.protocol import Broker
 from firm.core.clock import Clock, ReplayClock, WallClock
-from firm.core.config import load_policy, load_rag_config, load_universe
+from firm.core.config import load_llm_config, load_policy, load_rag_config, load_universe
 from firm.core.models import BuyPayload, SellPayload
 from firm.db.connection import get_conn
 from firm.db.migrations import init_db
@@ -71,6 +71,144 @@ def _reports_root() -> Path:
     return Path(os.environ.get("FIRM_REPORTS_ROOT", "data/reports"))
 
 
+def _llm_config_path() -> Path:
+    return Path(os.environ.get("FIRM_LLM_CONFIG", "config/llm.yaml"))
+
+
+def _rag_config_path() -> Path:
+    return Path(os.environ.get("FIRM_RAG_CONFIG", "config/rag.yaml"))
+
+
+def _fit_bm25_sparse(rag_config: Any, sparse: Any) -> None:
+    """Pre-pass: fit BM25 vocabulary from the FinanceBench corpus.
+
+    Mirrors the pre-pass in the ``ingest`` command. Both commands share the
+    same corpus source; extracting a shared helper is a Plan 3 follow-up.
+    The BM25 fit is CPU-only and model-free — the only I/O is reading the
+    source documents.
+    """
+    from firm.rag.chunk import chunk_document
+    from firm.rag.financebench import FinanceBenchSource
+    from firm.rag.preprocess import tables_to_prose
+
+    fixture_env = os.environ.get("FIRM_FINANCEBENCH_FIXTURE")
+    if fixture_env:
+        source: Any = FinanceBenchSource(
+            dataset_loader=_make_fixture_loader(fixture_env)
+        )
+    else:
+        source = FinanceBenchSource()
+
+    effective_max_docs: int | None = rag_config.corpus.financebench.max_docs
+
+    import itertools as _itertools
+
+    def _iter_source() -> Any:
+        if effective_max_docs is not None:
+            return _itertools.islice(source.iter_docs(), effective_max_docs)
+        return source.iter_docs()
+
+    all_texts: list[str] = []
+    for pre_doc in _iter_source():
+        processed_html = tables_to_prose(pre_doc.html)
+        pre_doc_processed = pre_doc.model_copy(update={"html": processed_html})
+        chunks = chunk_document(
+            pre_doc_processed,
+            target_tokens=rag_config.chunk.target_tokens,
+            overlap_tokens=rag_config.chunk.overlap_tokens,
+        )
+        all_texts.extend(c.text for c in chunks)
+
+    if all_texts:
+        sparse.fit(all_texts)
+    else:
+        sparse.fit(["placeholder"])
+
+
+def _build_llm_stack(
+    db: Path, clock: Clock, rag_config: Any, llm_config: Any
+) -> tuple[Any, Any, Any] | None:
+    """Construct RAG + LLM components for the grounded research path.
+
+    Returns ``(retriever, extractor, judge)`` on success, or ``None`` when any
+    external dependency (Qdrant, sentence-transformers models) is unavailable.
+    A warning is printed to stderr so the operator knows to run ``make ingest``.
+
+    The PM voter is constructed unconditionally by the caller (it is cheap and
+    has no external model dependencies at construction time).
+    """
+    try:
+        from firm.llm.anthropic_client import CachedAnthropicClient
+        from firm.llm.cache import LlmCache
+        from firm.rag.embed import BM25Sparse, NomicEmbedder
+        from firm.rag.qdrant_store import VectorStore
+        from firm.rag.retrieve import GroundedRetriever, HybridRetriever
+        from firm.rag.rerank import BgeReranker
+        from firm.tools.fundamentals import FundamentalsTool
+        from firm.tools.risk_metrics import RiskMetricsTool
+
+        llm_cache = LlmCache(db, clock)
+        client = CachedAnthropicClient.from_env(cache=llm_cache, clock=clock)
+
+        embedder = NomicEmbedder()
+        sparse = BM25Sparse()
+
+        click.echo("[firm run] Fitting BM25 vocabulary (pre-pass)...", err=True)
+        _fit_bm25_sparse(rag_config, sparse)
+
+        qdrant_client = _make_qdrant_client()
+        store = VectorStore(qdrant_client)
+
+        hybrid = HybridRetriever(
+            store=store,
+            embedder=embedder,
+            sparse=sparse,
+            collection=rag_config.qdrant.collection,
+        )
+        reranker = BgeReranker(model_id=rag_config.rerank.model)
+        retriever = GroundedRetriever(
+            hybrid=hybrid,
+            reranker=reranker,
+            k_final=rag_config.retrieval.top_k_rerank,
+        )
+
+        from firm.tools import Tool
+
+        tools: list[Tool] = [
+            FundamentalsTool(Path("data/precomputed/fundamentals.parquet")),
+            RiskMetricsTool(Path("data/precomputed/risk_metrics.parquet")),
+        ]
+
+        from firm.llm.citations import AnthropicCitationsExtractor
+        from firm.grounding.judge import SufficiencyJudge
+
+        extractor = AnthropicCitationsExtractor(
+            client=client,
+            model=llm_config.research.model,
+            max_tokens=llm_config.research.max_tokens,
+            tools=tools,
+        )
+        judge = SufficiencyJudge(
+            client=client,
+            model=llm_config.judge.model,
+        )
+
+        return retriever, extractor, judge
+
+    except Exception as exc:  # noqa: BLE001
+        click.echo(
+            "[firm run] LLM/RAG stack unavailable"
+            f" ({type(exc).__name__}: {exc})",
+            err=True,
+        )
+        click.echo(
+            "[firm run] Falling back to Plan 1 deterministic stub research."
+            " Run 'make ingest' to populate the corpus.",
+            err=True,
+        )
+        return None
+
+
 @click.group()
 def cli() -> None:
     pass
@@ -86,6 +224,8 @@ def run(once: bool) -> None:
     broker = make_broker(clock=clock)
     policy = load_policy(Path("config/policy.yaml"))
     universe = load_universe(Path("config/universe.yaml"))
+    rag_config = load_rag_config(_rag_config_path())
+    llm_config = load_llm_config(_llm_config_path())
 
     _seed_db_from_broker(db, broker, clock)
     recon = reconcile_on_boot(db, broker, clock)
@@ -95,8 +235,39 @@ def run(once: bool) -> None:
         sys.exit(1)
 
     monitor = make_monitor(clock)
-    research = make_research(clock=clock, broker=broker, universe=universe)
-    pm = make_pm()
+
+    # Build the grounded LLM stack; fall back to Plan 1 stub if unavailable.
+    rag_stack = _build_llm_stack(db, clock, rag_config, llm_config)
+    retriever: Any = None
+    extractor: Any = None
+    judge: Any = None
+    if rag_stack is not None:
+        retriever, extractor, judge = rag_stack
+
+    # nonce_secret is required for the grounded path; sourced from env.
+    nonce_secret: bytes | None = None
+    raw_secret = os.environ.get("FIRM_HMAC_SECRET")
+    if raw_secret:
+        nonce_secret = bytes.fromhex(raw_secret)
+
+    research = make_research(
+        clock=clock,
+        broker=broker,
+        universe=universe,
+        retriever=retriever,
+        extractor=extractor,
+        judge=judge,
+        nonce_secret=nonce_secret if rag_stack is not None else None,
+    )
+
+    # PM voter: always constructed (cheap, no external deps).
+    from firm.llm.cache import LlmCache
+    from firm.llm.anthropic_client import CachedAnthropicClient
+
+    llm_cache_pm = LlmCache(db, clock)
+    client_pm = CachedAnthropicClient.from_env(cache=llm_cache_pm, clock=clock)
+    voter = PmVoter(client=client_pm, model=llm_config.pm.model)
+    pm = make_pm(voter=voter)
 
     def risk_node(state: WorkingState) -> dict[str, Any]:
         proposal = state["pm_decision"]
