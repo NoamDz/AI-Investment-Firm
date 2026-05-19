@@ -187,6 +187,7 @@ def _make_fixture_loader(fixture_path: str) -> Any:
 @click.option(
     "--config",
     default="config/rag.yaml",
+    envvar="FIRM_RAG_CONFIG",
     help="Path to rag.yaml config file.",
     show_default=True,
 )
