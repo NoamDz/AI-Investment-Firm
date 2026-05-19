@@ -5,7 +5,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ActionEnum(StrEnum):
@@ -36,6 +36,30 @@ class Citation(BaseModel):
     source_id: str
     chunk_id: str
     span: tuple[int, int]
+    cited_text: str | None = None
+    document_index: int | None = None
+    document_title: str | None = None
+
+    def __init__(
+        self,
+        source_id: str,
+        chunk_id: str,
+        span: tuple[int, int],
+        *,
+        cited_text: str | None = None,
+        document_index: int | None = None,
+        document_title: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            source_id=source_id,
+            chunk_id=chunk_id,
+            span=span,
+            cited_text=cited_text,
+            document_index=document_index,
+            document_title=document_title,
+            **kwargs,
+        )
 
 
 class Claim(BaseModel):
@@ -45,6 +69,12 @@ class Claim(BaseModel):
     source_chunk_id: str | None = None
     source_span: tuple[int, int] | None = None
     tool_call_id: str | None = None
+
+    @model_validator(mode="after")
+    def _numeric_claim_requires_provenance(self) -> "Claim":
+        if self.value is not None and self.source_chunk_id is None and self.tool_call_id is None:
+            raise ValueError("numeric Claim requires source_chunk_id or tool_call_id")
+        return self
 
 
 class BuyPayload(BaseModel):
