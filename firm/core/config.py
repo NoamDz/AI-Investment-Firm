@@ -63,6 +63,7 @@ def load_universe(path: Path) -> UniverseConfig:
 class FinanceBenchCorpusConfig(BaseModel):
     split: str
     max_docs: int | None = None
+    eval_holdout_file: str | None = None
 
 
 class CorpusConfig(BaseModel):

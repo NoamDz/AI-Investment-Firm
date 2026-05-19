@@ -2,6 +2,7 @@ corpus:
   financebench:
     split: train
     max_docs: null
+    eval_holdout_file: config/financebench_eval_holdout.json
 
 chunk:
   target_tokens: 512
