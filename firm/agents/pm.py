@@ -1,44 +1,41 @@
-"""PM agent — deterministic pass-through stub for Plan 1.
+"""PM agent — vote-of-3 self-consistency over single-lens LLM rationales.
 
-Plan 2 swaps this for vote-of-3 self-consistency over LLM rationales.
+Plan 2 §T27: ``make_pm(voter)`` returns a node callable that runs three
+single-lens PM voters (quality / valuation / catalyst) over the research
+agent's extracted Claims, then aggregates the three votes via
+:func:`aggregate_votes` into one PM Decision.
 
-T25 adds:  PmLens, PmVote, PmVoteSchemaError, PmVoter.
-T27 will rewrite make_pm() to use PmVoter.
+T25 contributed:  PmLens, PmVote, PmVoteSchemaError, PmVoter.
+T26 contributed:  aggregate_votes (deterministic Python).
+T27 rewires make_pm() to call them in sequence.
+
+PM does NOT call retrieval or tools — Chinese-wall constraint from spec §3.2.
+It reasons only over claims produced by Research.
 """
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Callable
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from firm.core.ids import ulid_new
-from firm.core.models import ActionEnum, Claim, Decision, FailureMode
+from firm.core.models import (
+    ActionEnum,
+    BuyPayload,
+    Claim,
+    Decision,
+    EscalatePayload,
+    FailureMode,
+    HoldPayload,
+    SellPayload,
+    TypedPayload,
+)
 from firm.llm.citations import AnthropicMessagesClient
 from firm.llm.prompts import pm_voter_system
 from firm.orchestrator.state import WorkingState
-
-
-# ---------------------------------------------------------------------------
-# Plan 1 stub — preserved for T27
-# ---------------------------------------------------------------------------
-
-
-def make_pm() -> Callable[[WorkingState], dict[str, Any]]:
-    def pm(state: WorkingState) -> dict[str, Any]:
-        research: Decision = state["research_decision"]
-        decision = Decision(
-            id=ulid_new(), decision_id_chain=[research.id],
-            action=research.action, payload=research.payload,
-            rationale=f"pm pass-through: {research.rationale}",
-            confidence=research.confidence, citations=research.citations,
-            falsification_condition=research.falsification_condition,
-            escalation_reason=None, failure_mode=None,
-            metadata={"agent": "pm", "stub": True}, nonce="pm-stub",
-        )
-        return {"pm_decision": decision}
-    return pm
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +372,183 @@ def aggregate_votes(
     )
 
     return action, confidence, rationale, None
+
+
+# ---------------------------------------------------------------------------
+# T27 — make_pm: vote-of-3 + aggregation node
+# ---------------------------------------------------------------------------
+
+
+# Default share quantity used when the committee flips into a SELL whose
+# research counterpart did not carry a shares figure (e.g. research voted
+# HOLD).  Plan 2 defers real position sizing to Risk in Plan 3; the value
+# here is just a non-zero placeholder that satisfies the Decimal-typed
+# Sell/Buy payload schema.
+_DEFAULT_SHARES_PLACEHOLDER = Decimal("1")
+
+
+def _ticker_from_payload(payload: TypedPayload) -> str | None:
+    """Extract the ticker carried by a typed payload, if any.
+
+    BuyPayload and SellPayload carry ``ticker`` directly.  EscalatePayload
+    carries a nested proposed Buy/Sell.  HoldPayload and RefusePayload have
+    no ticker — return ``None`` for those.
+    """
+    if isinstance(payload, (BuyPayload, SellPayload)):
+        return payload.ticker
+    if isinstance(payload, EscalatePayload):
+        return payload.proposed.ticker
+    return None
+
+
+def _shares_from_payload(payload: TypedPayload) -> Decimal:
+    """Pull a share count off a payload, falling back to the placeholder."""
+    if isinstance(payload, (BuyPayload, SellPayload)):
+        return payload.shares
+    if isinstance(payload, EscalatePayload):
+        return payload.proposed.shares
+    return _DEFAULT_SHARES_PLACEHOLDER
+
+
+def _payload_for(action: ActionEnum, research: Decision) -> TypedPayload:
+    """Build the PM Decision's payload for the aggregated ``action``.
+
+    Plan 2 simplification: when the aggregated action matches the research
+    action, reuse the research payload verbatim.  When the committee flips
+    direction (e.g. research BUY but committee aggregates to HOLD), build a
+    fresh payload of the matching type carrying the same ticker / shares.
+    Real position sizing is deferred to Risk in Plan 3.
+    """
+    if action == research.action and not isinstance(research.payload, EscalatePayload):
+        # Reuse research's typed payload directly for matching directional cases.
+        return research.payload
+
+    ticker = _ticker_from_payload(research.payload) or "<unknown>"
+    shares = _shares_from_payload(research.payload)
+
+    if action == ActionEnum.BUY:
+        return BuyPayload(ticker=ticker, shares=shares)
+    if action == ActionEnum.SELL:
+        return SellPayload(ticker=ticker, shares=shares)
+    if action == ActionEnum.HOLD:
+        return HoldPayload(reason="PM committee aggregated to HOLD")
+    if action == ActionEnum.ESCALATE:
+        return EscalatePayload(
+            proposed=BuyPayload(ticker=ticker, shares=shares),
+            reason="PM committee directional disagreement",
+        )
+    # REFUSE is not produced by aggregate_votes; pass-through path handles it.
+    raise AssertionError(f"unexpected aggregated action: {action}")  # pragma: no cover
+
+
+def make_pm(voter: PmVoter) -> Callable[[WorkingState], dict[str, Any]]:
+    """Build the PM node callable.
+
+    For each heartbeat the node:
+
+    1. Inspects ``state["research_decision"]``.  If the research action is
+       REFUSE or ESCALATE, the PM does not vote — it emits a pass-through
+       Decision chaining the research id and tagged with ``passthrough=True``
+       so downstream nodes can distinguish.
+    2. Otherwise, deserializes ``state["claims"]`` back into a
+       ``list[Claim]`` and runs three sequential single-lens votes
+       (quality, valuation, catalyst) through ``voter``.  Plan 2 keeps the
+       calls sequential; Plan 3 introduces concurrency.
+    3. Aggregates via :func:`aggregate_votes` into ``(action, confidence,
+       combined_rationale, failure_mode)``.
+    4. Builds a typed payload matching the aggregated action via
+       :func:`_payload_for`, propagates ``oldest_filing_age_days`` from
+       research's metadata when present, and emits the PM Decision chained
+       to ``research.id`` while copying ``research.citations`` and
+       ``research.falsification_condition``.
+    5. Writes ``pm_votes`` to state as a list of dump dicts (pass-through
+       branches write an empty list).
+
+    The ``question`` argument required by :meth:`PmVoter.vote` is derived
+    from ``research.rationale`` — the research Decision does not carry the
+    original question as its own field, and rationale is the closest
+    available proxy.  Plan 3 may surface the question on working state
+    explicitly so the PM voter receives it verbatim.
+    """
+
+    def pm(state: WorkingState) -> dict[str, Any]:
+        research: Decision = state["research_decision"]
+
+        # ---- Pass-through path: research already terminated the heartbeat.
+        if research.action in (ActionEnum.REFUSE, ActionEnum.ESCALATE):
+            passthrough_metadata: dict[str, Any] = {
+                "agent": "pm",
+                "passthrough": True,
+            }
+            oldest_age = research.metadata.get("oldest_filing_age_days")
+            if oldest_age is not None:
+                passthrough_metadata["oldest_filing_age_days"] = oldest_age
+            passthrough = Decision(
+                id=ulid_new(),
+                decision_id_chain=[research.id],
+                action=research.action,
+                payload=research.payload,
+                rationale=research.rationale,
+                confidence=research.confidence,
+                citations=research.citations,
+                falsification_condition=research.falsification_condition,
+                escalation_reason=research.escalation_reason,
+                failure_mode=research.failure_mode,
+                metadata=passthrough_metadata,
+                nonce="pm",
+            )
+            return {"pm_decision": passthrough, "pm_votes": []}
+
+        # ---- Vote path: three sequential single-lens votes, then aggregate.
+        claims_dicts: list[dict[str, Any]] = list(state.get("claims", []))
+        claims: list[Claim] = [Claim.model_validate(c) for c in claims_dicts]
+        # Use research.rationale as the question proxy (see docstring).
+        question = research.rationale
+
+        votes: list[PmVote] = []
+        for lens in (PmLens.QUALITY, PmLens.VALUATION, PmLens.CATALYST):
+            vote = voter.vote(
+                lens=lens,
+                question=question,
+                claims=claims,
+                research_rationale=research.rationale,
+            )
+            votes.append(vote)
+
+        action, confidence, combined_rationale, fmode = aggregate_votes(votes)
+        payload = _payload_for(action, research)
+
+        pm_metadata: dict[str, Any] = {"agent": "pm"}
+        oldest_age = research.metadata.get("oldest_filing_age_days")
+        if oldest_age is not None:
+            pm_metadata["oldest_filing_age_days"] = oldest_age
+
+        escalation_reason = (
+            "PM committee aggregated to ESCALATE"
+            if action == ActionEnum.ESCALATE
+            else None
+        )
+
+        decision = Decision(
+            id=ulid_new(),
+            decision_id_chain=[research.id],
+            action=action,
+            payload=payload,
+            rationale=combined_rationale,
+            confidence=confidence,
+            citations=list(research.citations),
+            falsification_condition=research.falsification_condition,
+            escalation_reason=escalation_reason,
+            failure_mode=fmode,
+            metadata=pm_metadata,
+            nonce="pm",
+        )
+        return {
+            "pm_decision": decision,
+            "pm_votes": [v.model_dump(mode="json") for v in votes],
+        }
+
+    return pm
 
 
 __all__ = [
