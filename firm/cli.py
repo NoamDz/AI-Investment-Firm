@@ -22,6 +22,7 @@ from firm.broker.alpaca_paper import make_broker
 from firm.broker.protocol import Broker
 from firm.core.clock import Clock, ReplayClock, WallClock
 from firm.core.config import load_policy, load_universe
+from firm.core.models import BuyPayload, SellPayload
 from firm.db.connection import get_conn
 from firm.db.migrations import init_db
 from firm.orchestrator.graph import build_graph
@@ -97,7 +98,10 @@ def run(once: bool) -> None:
 
     def risk_node(state: WorkingState) -> dict[str, Any]:
         proposal = state["pm_decision"]
-        ticker = proposal.payload.ticker if hasattr(proposal.payload, "ticker") else "AAPL"
+        if not isinstance(proposal.payload, (BuyPayload, SellPayload)):
+            # No trade to risk-check — pass the proposal through unchanged.
+            return {"risk_decision": proposal}
+        ticker = proposal.payload.ticker
         quote = broker.get_quote(ticker)
         positions = {p.ticker: p.shares for p in broker.list_positions()}
         # TODO(Plan 2): wire live quote_age_seconds / trades_today / daily_pnl_pct; stubs disable those checks
