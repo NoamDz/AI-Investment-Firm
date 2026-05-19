@@ -240,6 +240,46 @@ def test_extractor_passes_documents_with_citations_enabled() -> None:
         assert doc_block["title"] == chunks[i].doc_id
 
 
+def test_extractor_counts_all_malformed_citations_as_uncited() -> None:
+    """Defensive belt: if every citation in a block fails parsing guards, the
+    block-level text would otherwise be silently dropped. Surface it on
+    ``last_uncited_count`` so upstream agents see the failure.
+    """
+    response: dict[str, Any] = {
+        "content": [
+            {
+                "type": "text",
+                "text": "Some assertion the model made.",
+                "citations": [
+                    {
+                        "type": "char_location",
+                        "cited_text": "irrelevant",
+                        "document_index": 999,  # out of range
+                        "document_title": "missing",
+                        "start_char_index": 0,
+                        "end_char_index": 10,
+                    }
+                ],
+            },
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+    chunks = [_chunk(0, "AAPL-10K", "Only one chunk here")]
+    stub = _StubClient(response)
+    extractor = AnthropicCitationsExtractor(
+        client=stub, model="claude-sonnet-4-6", max_tokens=1024
+    )
+
+    claims = extractor.extract(
+        query="q",
+        chunks=chunks,
+        as_of=datetime(2024, 6, 1, tzinfo=timezone.utc),
+    )
+
+    assert claims == []
+    assert extractor.last_uncited_count == 1
+
+
 def test_extractor_resets_uncited_count_per_call() -> None:
     """Regression guard: ``last_uncited_count`` must reset on every ``extract``."""
     uncited_response: dict[str, Any] = {

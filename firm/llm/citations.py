@@ -151,6 +151,7 @@ class AnthropicCitationsExtractor:
                 self.last_uncited_count += 1
                 continue
 
+            emitted_before = len(claims)
             for citation in citations_raw:
                 if not isinstance(citation, dict):
                     continue
@@ -173,6 +174,13 @@ class AnthropicCitationsExtractor:
                         source_span=(start_raw, end_raw),
                     )
                 )
+
+            # Defensive belt: a non-empty citations list whose every entry
+            # failed our parsing guards still represents evidence we cannot
+            # ground. Surface it on last_uncited_count rather than silently
+            # discarding the block-level text.
+            if len(claims) == emitted_before:
+                self.last_uncited_count += 1
 
         return claims
 
