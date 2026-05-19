@@ -4,12 +4,25 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol
 
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from firm.core.models import ActionEnum
 from firm.orchestrator.state import WorkingState
+
+# Register firm model types in the msgpack allowlist so that LangGraph checkpoint
+# deserialization does not emit "Deserializing unregistered type" deprecation warnings.
+# Without this, reloading a prior checkpoint triggers a per-type warning for each
+# firm.core.models class stored in the checkpoint, and the behaviour will be blocked
+# in a future LangGraph version (set LANGGRAPH_STRICT_MSGPACK=true to test now).
+_FIRM_SERDE = JsonPlusSerializer(
+    allowed_msgpack_modules=[
+        ("firm.core.models", "Decision"),
+        ("firm.core.models", "ActionEnum"),
+    ]
+)
 
 
 class NodeCallable(Protocol):
@@ -66,5 +79,5 @@ def build_graph(
 
     import sqlite3
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
-    saver = SqliteSaver(conn)
+    saver = SqliteSaver(conn, serde=_FIRM_SERDE)
     return g.compile(checkpointer=saver, interrupt_before=["hitl"])
