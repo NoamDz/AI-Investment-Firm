@@ -98,3 +98,55 @@ def test_every_limit_has_at_least_one_triggering_fixture():
     import sys
     triggered = {n for n in dir(sys.modules[__name__]) if n.startswith("test_blocks_")}
     assert len(triggered) >= 7
+
+
+# ---------------------------------------------------------------------------
+# T29a: stale_filing_days enforcement via Decision.metadata
+# ---------------------------------------------------------------------------
+
+def _make_input_with_filing_age(oldest_filing_age_days: int | None) -> RiskInput:
+    """Return a RiskInput whose proposal carries oldest_filing_age_days in metadata."""
+    base = _make_input(positions={"AAPL": Decimal("1")})
+    if oldest_filing_age_days is None:
+        new_metadata: dict = {}
+    else:
+        new_metadata = {"oldest_filing_age_days": oldest_filing_age_days}
+    updated_proposal = base.proposal.model_copy(update={"metadata": new_metadata})
+    return RiskInput(
+        proposal=updated_proposal,
+        quote_price=base.quote_price,
+        quote_age_seconds=base.quote_age_seconds,
+        cash=base.cash,
+        positions=base.positions,
+        sector_map=base.sector_map,
+        trades_today=base.trades_today,
+        nav=base.nav,
+        daily_pnl_pct=base.daily_pnl_pct,
+        policy=base.policy,
+    )
+
+
+def test_blocks_stale_filing():
+    """oldest_filing_age_days=120 > stale_filing_days=90 → REFUSE with STALE_DATA."""
+    out = evaluate_risk(_make_input_with_filing_age(120))
+    assert out.action == ActionEnum.REFUSE
+    assert out.failure_mode is not None
+    assert out.failure_mode.value == "stale_data"
+
+
+def test_passes_when_filing_age_within_limit():
+    """oldest_filing_age_days=30 < stale_filing_days=90 → passes (BUY)."""
+    out = evaluate_risk(_make_input_with_filing_age(30))
+    assert out.action == ActionEnum.BUY
+
+
+def test_filing_age_missing_metadata_is_not_a_breach():
+    """Absent oldest_filing_age_days key must NOT trigger STALE_DATA.
+
+    This preserves Plan 1's HOLD/REFUSE pass-through invariant: when no grounded
+    research chunks were retrieved, the key is simply absent and Risk must not refuse.
+    """
+    out = evaluate_risk(_make_input_with_filing_age(None))
+    assert out.failure_mode != "stale_data"
+    # The underlying proposal is a valid BUY that passes all other limits.
+    assert out.action == ActionEnum.BUY

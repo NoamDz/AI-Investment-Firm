@@ -85,6 +85,10 @@ def evaluate_risk(input: RiskInput) -> Decision:
     if input.quote_age_seconds > p.limits.stale_quote_seconds:
         return _decision_stale(input, f"quote age {input.quote_age_seconds}s")
 
+    oldest_filing_age = proposal.metadata.get("oldest_filing_age_days") if proposal.metadata else None
+    if isinstance(oldest_filing_age, int) and oldest_filing_age > p.limits.stale_filing_days:
+        return _decision_stale(input, f"oldest cited filing {oldest_filing_age}d > {p.limits.stale_filing_days}d")
+
     if proposal.action == ActionEnum.HOLD:
         return _pass(input)
 
