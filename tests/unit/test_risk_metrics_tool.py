@@ -95,6 +95,19 @@ def test_get_metric_uses_as_of_window(tool: RiskMetricsTool) -> None:
     )
 
 
+def test_get_metric_accepts_iso_date_string_for_as_of(
+    tool: RiskMetricsTool,
+) -> None:
+    """get_metric accepts ISO 8601 date string (Anthropic tool_use JSON payload)."""
+    result_date = tool.get_metric(
+        ticker="AAPL", metric="volatility_30d", as_of=date(2024, 11, 1)
+    )
+    result_str = tool.get_metric(
+        ticker="AAPL", metric="volatility_30d", as_of="2024-11-01"
+    )
+    assert result_date == result_str == Decimal("0.21")
+
+
 def test_get_metric_signature_matches_mcp_tool_schema(
     tool: RiskMetricsTool,
 ) -> None:

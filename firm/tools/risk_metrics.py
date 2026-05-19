@@ -127,7 +127,9 @@ class RiskMetricsTool:
 
         self._index = index
 
-    def get_metric(self, *, ticker: str, metric: str, as_of: date) -> Decimal:
+    def get_metric(
+        self, *, ticker: str, metric: str, as_of: date | str
+    ) -> Decimal:
         """Return the risk metric value for the given PIT parameters.
 
         Performs a PIT lookup: returns the value from the latest precomputed
@@ -140,7 +142,10 @@ class RiskMetricsTool:
         metric:
             One of the supported metric IDs (see ``tool_def.input_schema``).
         as_of:
-            The point-in-time date for the lookup.
+            The point-in-time date for the lookup. Accepts either a
+            :class:`datetime.date` or an ISO 8601 date string (``YYYY-MM-DD``).
+            The string form supports direct invocation from an Anthropic
+            ``tool_use`` block, where ``tool_input["as_of"]`` is a JSON string.
 
         Returns
         -------
@@ -154,6 +159,8 @@ class RiskMetricsTool:
             If ``ticker`` is unknown, ``metric`` is unknown for the ticker,
             or no row exists on or before ``as_of``.
         """
+        if isinstance(as_of, str):
+            as_of = date.fromisoformat(as_of)
         # Check ticker presence across all metric names first.
         ticker_keys = [k for k in self._index if k[0] == ticker]
         if not ticker_keys:

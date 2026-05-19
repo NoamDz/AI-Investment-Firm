@@ -93,6 +93,19 @@ def test_get_ratio_raises_when_no_entry_on_or_before_as_of(
         tool.get_ratio(ticker="AAPL", ratio_name="pe_ratio", as_of=date(2020, 1, 1))
 
 
+def test_get_ratio_accepts_iso_date_string_for_as_of(
+    tool: FundamentalsTool,
+) -> None:
+    """get_ratio accepts ISO 8601 date string (Anthropic tool_use JSON payload)."""
+    result_date = tool.get_ratio(
+        ticker="AAPL", ratio_name="pe_ratio", as_of=date(2024, 11, 1)
+    )
+    result_str = tool.get_ratio(
+        ticker="AAPL", ratio_name="pe_ratio", as_of="2024-11-01"
+    )
+    assert result_date == result_str == Decimal("28.5")
+
+
 def test_get_ratio_signature_matches_mcp_tool_schema(
     tool: FundamentalsTool,
 ) -> None:
