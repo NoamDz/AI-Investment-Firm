@@ -14,6 +14,7 @@ dependencies = [
     "alpaca-py>=0.30",  # optional broker; only imported when ALPACA selected
     "anthropic>=0.39",
     "qdrant-client>=1.11",
+    "numpy>=1.26",
     "sentence-transformers>=3.0",
     "datasets>=2.20",
     "rank-bm25>=0.2.2",
@@ -36,6 +37,7 @@ firm = "firm.cli:main"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
+markers = ["requires_models: tests that need a downloaded model"]
 
 [tool.ruff]
 line-length = 100
