@@ -3,7 +3,7 @@ from pathlib import Path
 
 from firm.agents.risk import RiskInput, evaluate_risk
 from firm.core.config import load_policy
-from firm.core.models import ActionEnum, BuyPayload, Decision
+from firm.core.models import ActionEnum, BuyPayload, Decision, FailureMode
 
 POLICY = load_policy(Path("config/policy.yaml"))
 
@@ -97,7 +97,7 @@ def test_every_limit_has_at_least_one_triggering_fixture():
     """CI invariant: each enumerated limit row must be triggered by a test above."""
     import sys
     triggered = {n for n in dir(sys.modules[__name__]) if n.startswith("test_blocks_")}
-    assert len(triggered) >= 7
+    assert len(triggered) >= 8
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +147,6 @@ def test_filing_age_missing_metadata_is_not_a_breach():
     research chunks were retrieved, the key is simply absent and Risk must not refuse.
     """
     out = evaluate_risk(_make_input_with_filing_age(None))
-    assert out.failure_mode != "stale_data"
+    assert out.failure_mode != FailureMode.STALE_DATA
     # The underlying proposal is a valid BUY that passes all other limits.
     assert out.action == ActionEnum.BUY
