@@ -35,7 +35,7 @@ def test_strips_boilerplate_and_normalizes_whitespace() -> None:
     raw = (
         "Table of Contents\n\n"
         "Some​ text   with‌ zero‍ width﻿ chars.\n"
-        "Forward-Looking Statements: these may differ.\n"
+        "Forward-Looking Statements\n"
         "Normal   content   here."
     )
     cleaned = normalize_text(raw)
@@ -85,3 +85,49 @@ def test_normalize_text_nfkc() -> None:
 def test_normalize_text_multiple_spaces() -> None:
     cleaned = normalize_text("too   many     spaces")
     assert cleaned == "too many spaces"
+
+
+# ── IMPORTANT #4 new tests ────────────────────────────────────────────────────
+
+
+def test_table_without_thead_still_converts_or_preserves_text() -> None:
+    """A <table> with no <thead>/<tbody> must not silently drop cell data."""
+    html = (
+        "<html><body>"
+        "<table>"
+        "<tr><td>Metric</td><td>Q1 2024</td></tr>"
+        "<tr><td>Total revenue</td><td>18,120</td></tr>"
+        "</table>"
+        "</body></html>"
+    )
+    result = tables_to_prose(html)
+    assert "<table" not in result.lower()
+    assert "Total revenue" in result or "total revenue" in result
+    assert "18,120" in result
+
+
+def test_boilerplate_does_not_eat_legitimate_prose() -> None:
+    """Boilerplate pattern must not consume text beyond the matched line."""
+    text = "The Forward-Looking Statements section is on page 5."
+    cleaned = normalize_text(text)
+    assert "section is on page 5" in cleaned
+
+
+def test_tables_to_prose_output_has_no_table_tags() -> None:
+    """tables_to_prose must remove all <table> tags — the chunker invariant."""
+    html = (
+        "<html><body>"
+        "<table><thead><tr><th>Metric</th><th>Q3 2024</th></tr></thead>"
+        "<tbody><tr><td>Revenue</td><td>100</td></tr></tbody></table>"
+        "</body></html>"
+    )
+    result = tables_to_prose(html)
+    assert "<table" not in result.lower()
+    assert "</table>" not in result.lower()
+
+
+def test_ticker_tokens_adjacent_punctuation() -> None:
+    """Trailing comma/period must not break dollar-ticker capture."""
+    tokens = ticker_aware_tokens("Buy $AAPL, sell $MSFT.")
+    assert "$AAPL" in tokens
+    assert "$MSFT" in tokens
