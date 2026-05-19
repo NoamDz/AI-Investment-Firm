@@ -1,11 +1,11 @@
 """Tests for firm.rag.chunk — T4 spec compliance."""
 from __future__ import annotations
 
-import types
 from datetime import datetime, timezone
 
 import pytest
 import tiktoken
+from pydantic import ValidationError
 
 from firm.rag.chunk import Chunk, chunk_document
 from firm.rag.source import FilingDoc
@@ -98,17 +98,83 @@ def test_chunk_preserves_published_at_and_metadata() -> None:
         assert chunk.section == "body", f"chunk {idx} section should be 'body'"
         assert chunk.id == f"META-002::{idx:04d}", f"chunk {idx} id format mismatch"
 
+    # Verify char_span round-trips on the normal sentence fixture.
+    for idx, chunk in enumerate(chunks):
+        assert doc.html[chunk.char_span[0] : chunk.char_span[1]] == chunk.text, (
+            f"chunk {idx} char_span does not round-trip to chunk.text"
+        )
+
 
 def test_chunker_rejects_doc_without_published_at() -> None:
-    text = _synthetic_text(100)
-    duck = types.SimpleNamespace(
-        doc_id="BAD-001",
-        ticker="TSLA",
+    """FilingDoc enforces the published_at invariant before the chunker is reachable.
+
+    This test verifies the source-model gate works: a FilingDoc with a missing or
+    naive published_at cannot be constructed, so it can never reach chunk_document.
+    The chunker is therefore protected by the model layer, not by its own dead-code
+    guard.
+    """
+    # None published_at must be rejected by Pydantic at construction time.
+    with pytest.raises(ValidationError):
+        FilingDoc(
+            doc_id="BAD-001",
+            ticker="TSLA",
+            filing_type="10-K",
+            published_at=None,  # type: ignore[arg-type]
+            title="Bad Doc",
+            html="some text",
+        )
+
+    # A naive datetime (no timezone) must also be rejected.
+    naive_dt = datetime(2024, 1, 15)  # no tzinfo
+    with pytest.raises(ValidationError):
+        FilingDoc(
+            doc_id="BAD-002",
+            ticker="TSLA",
+            filing_type="10-K",
+            published_at=naive_dt,
+            title="Bad Doc",
+            html="some text",
+        )
+
+
+def test_chunker_rejects_overlap_geq_target() -> None:
+    doc = _make_doc("hello " * 1000)
+    with pytest.raises(ValueError, match="overlap_tokens"):
+        chunk_document(doc, target_tokens=64, overlap_tokens=64)
+    with pytest.raises(ValueError, match="overlap_tokens"):
+        chunk_document(doc, target_tokens=64, overlap_tokens=128)
+
+
+def test_chunk_char_span_round_trips_on_repetitive_text() -> None:
+    """Char-span monotonicity and round-trip correctness on highly repetitive input.
+
+    This test would have caught CRITICAL #1: the old find()-based scheme re-matched
+    the previous chunk's location on repetitive text, causing all spans past index 2
+    to collapse to the same offset.
+    """
+    repetitive_text = "AAAA BBBB " * 2000
+    doc = FilingDoc(
+        doc_id="REP-001",
+        ticker="TEST",
         filing_type="10-K",
-        published_at=None,
-        title="Bad Doc",
-        html=text,
-        metadata={},
+        published_at=_PUBLISHED_AT,
+        title="Repetitive Doc",
+        html=repetitive_text,
     )
-    with pytest.raises(ValueError, match="published_at"):
-        chunk_document(duck, target_tokens=TARGET, overlap_tokens=OVERLAP)  # type: ignore[arg-type]
+    chunks = chunk_document(doc, target_tokens=512, overlap_tokens=64)
+
+    assert len(chunks) >= 2, "Expected multiple chunks for a large repetitive document"
+
+    for idx, chunk in enumerate(chunks):
+        # Round-trip: slicing the source with char_span must reproduce chunk.text exactly.
+        assert doc.html[chunk.char_span[0] : chunk.char_span[1]] == chunk.text, (
+            f"chunk {idx} char_span does not round-trip: "
+            f"span=({chunk.char_span[0]}, {chunk.char_span[1]})"
+        )
+
+    # Strict monotonicity: each chunk must start strictly after the previous one.
+    for i in range(len(chunks) - 1):
+        assert chunks[i].char_span[0] < chunks[i + 1].char_span[0], (
+            f"char_span not monotonically increasing between chunk {i} and {i + 1}: "
+            f"{chunks[i].char_span[0]} >= {chunks[i + 1].char_span[0]}"
+        )

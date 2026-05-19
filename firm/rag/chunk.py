@@ -3,6 +3,9 @@
 Input text is taken directly from FilingDoc.html (raw HTML string). T5 will replace
 this with a proper finance-aware HTML→text extractor; for now the raw HTML is the
 corpus text. char_span offsets are therefore into FilingDoc.html.
+
+T5 will populate `section` based on filing structure (`item_1A`, `risk_factors`, etc.);
+for T4 every chunk is tagged `body`.
 """
 from __future__ import annotations
 
@@ -36,8 +39,12 @@ def chunk_document(
     target_tokens: int,
     overlap_tokens: int,
 ) -> list[Chunk]:
-    if doc.published_at is None:
-        raise ValueError("FilingDoc.published_at is required; got None")
+    if target_tokens <= 0:
+        raise ValueError("target_tokens must be positive")
+    if overlap_tokens < 0:
+        raise ValueError("overlap_tokens must be non-negative")
+    if overlap_tokens >= target_tokens:
+        raise ValueError("overlap_tokens must be < target_tokens")
 
     text = doc.html
     all_tokens = _ENCODING.encode(text)
@@ -48,24 +55,25 @@ def chunk_document(
 
     step = target_tokens - overlap_tokens
     chunks: list[Chunk] = []
-    start_tok = 0
 
-    while start_tok < total:
-        end_tok = min(start_tok + target_tokens, total)
-        window_tokens = all_tokens[start_tok:end_tok]
+    # char_cursor tracks the character offset of the first token of the current window.
+    # We advance it by the decoded length of the step prefix after each window so that
+    # it always points to the exact start of the next window in the source text.
+    char_cursor = 0
+
+    for window_start_token_idx in range(0, total, step):
+        window_tokens = all_tokens[window_start_token_idx : window_start_token_idx + target_tokens]
         window_text = _ENCODING.decode(window_tokens)
 
-        # Locate char_span by finding the decoded window inside the source text.
-        # We search from approximately where the previous chunk ended to keep
-        # find() efficient and avoid false matches for repeated phrases.
-        search_from = 0 if not chunks else chunks[-1].char_span[0]
-        char_start = text.find(window_text, search_from)
-        if char_start == -1:
-            # Fallback: search from the beginning (should not normally happen).
-            char_start = text.find(window_text)
-        char_end = char_start + len(window_text) if char_start != -1 else len(window_text)
+        char_start = char_cursor
+        char_end = char_start + len(window_text)
 
         idx = len(chunks)
+
+        # Verify the BPE round-trip is exact so we never emit a corrupt span.
+        if text[char_start:char_end] != window_text:
+            raise RuntimeError(f"char_span resolution failed at chunk {idx}")
+
         chunks.append(
             Chunk(
                 id=f"{doc.doc_id}::{idx:04d}",
@@ -80,8 +88,13 @@ def chunk_document(
             )
         )
 
-        if end_tok == total:
+        # Advance cursor by the decoded length of the step prefix of this window.
+        # This is the portion not re-emitted in the next (overlapping) chunk.
+        step_prefix = _ENCODING.decode(window_tokens[:step])
+        char_cursor += len(step_prefix)
+
+        # If this window consumed the last tokens, we are done.
+        if window_start_token_idx + target_tokens >= total:
             break
-        start_tok += step
 
     return chunks
