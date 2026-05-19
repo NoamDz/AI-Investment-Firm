@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timezone
-from typing import Sequence
+from collections.abc import Sequence
 
 from firm.llm.client import CompletionResponse
 from firm.rag.chunk import Chunk
@@ -29,6 +29,7 @@ class FakeAnthropicClient:
         self._summary_text = summary_text
         self._cache: dict[str, CompletionResponse] = {}
         self.api_calls: int = 0
+        self.last_call: dict[str, object] = {}
 
     @staticmethod
     def _key(model: str, messages: Sequence[dict[str, object]]) -> str:
@@ -44,6 +45,7 @@ class FakeAnthropicClient:
         max_tokens: int,
         temperature: float = 0.0,
     ) -> CompletionResponse:
+        self.last_call = {"model": model, "system": system, "messages": messages}
         key = self._key(model, messages)
         if key in self._cache:
             return CompletionResponse(
@@ -61,14 +63,16 @@ class FakeAnthropicClient:
 # ---------------------------------------------------------------------------
 
 
-def _make_doc() -> FilingDoc:
+def _make_doc(
+    html: str = "<p>Apple Inc. is a technology company that designs consumer electronics.</p>",
+) -> FilingDoc:
     return FilingDoc(
         doc_id="AAPL-2024-10K",
         ticker="AAPL",
         filing_type="10-K",
         published_at=datetime(2024, 1, 31, tzinfo=timezone.utc),
         title="Apple Inc. Annual Report 2024",
-        html="<p>Apple Inc. is a technology company that designs consumer electronics.</p>",
+        html=html,
     )
 
 
@@ -146,3 +150,22 @@ def test_summary_uses_llm_cache() -> None:
     # Both results must have doc_summary populated.
     for chunk in first_result + second_result:
         assert chunk.doc_summary == "Cached summary text."
+
+
+def test_augment_strips_html_before_calling_haiku() -> None:
+    """HTML tags must be absent from the <doc>...</doc> excerpt sent to Haiku."""
+    client = FakeAnthropicClient()
+    augmenter = ContextualAugmenter(client=client, model="claude-haiku-4-5", max_tokens=512)
+    doc = _make_doc("<html><body><p>Apple Inc. quarterly revenue grew.</p></body></html>")
+    chunks = _make_chunks(doc, n=2)
+
+    augmenter.augment(doc, chunks)
+
+    messages = client.last_call["messages"]
+    assert isinstance(messages, list)
+    user_content = str(messages[0]["content"])
+    # Extract the text between <doc> and </doc> and assert it contains no HTML tags.
+    doc_start = user_content.index("<doc>") + len("<doc>")
+    doc_end = user_content.index("</doc>")
+    doc_section = user_content[doc_start:doc_end]
+    assert "<" not in doc_section, f"HTML tags found in doc excerpt: {doc_section!r}"

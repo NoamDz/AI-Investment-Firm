@@ -6,9 +6,11 @@ Caching across invocations is the responsibility of the injected AnthropicClient
 """
 from __future__ import annotations
 
+from bs4 import BeautifulSoup
+
 from firm.llm.client import AnthropicClient
 from firm.rag.chunk import Chunk
-from firm.rag.preprocess import normalize_text
+from firm.rag.preprocess import normalize_text, tables_to_prose
 from firm.rag.source import FilingDoc
 
 _DOC_EXCERPT_CHARS: int = 2000
@@ -29,7 +31,9 @@ class ContextualAugmenter:
         implements local caching (T15), identical prompts across invocations will
         be served from cache without hitting the API.
         """
-        doc_excerpt = normalize_text(doc.html)[:_DOC_EXCERPT_CHARS]
+        prose_html = tables_to_prose(doc.html)
+        plain = BeautifulSoup(prose_html, "lxml").get_text(separator=" ")
+        doc_excerpt = normalize_text(plain)[:_DOC_EXCERPT_CHARS]
         summary_user_prompt = (
             "Here is the document this chunk belongs to:\n"
             "<doc>\n"
