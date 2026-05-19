@@ -245,14 +245,13 @@ class _RecordingClient:
             raise ValueError("at least one response required")
         self._responses = list(responses)
         self.calls: list[dict[str, Any]] = []
+        self._last_text: str = responses[-1]
 
     def messages_create(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
         text = self._responses.pop(0) if self._responses else self._last_text
         self._last_text = text
         return {"content": [{"type": "text", "text": text}]}
-
-    _last_text: str = ""
 
 
 def _vote_json(
@@ -328,6 +327,23 @@ def _research_escalate() -> Decision:
         escalation_reason="sufficiency:partial",
         failure_mode=None,
         metadata={"agent": "research", "ticker": "AAPL"},
+        nonce="research-nonce",
+    )
+
+
+def _research_hold() -> Decision:
+    return Decision(
+        id="res-hold-1",
+        decision_id_chain=[],
+        action=ActionEnum.HOLD,
+        payload=HoldPayload(reason="research holds"),
+        rationale="research holds; no clear directional signal",
+        confidence=0.5,
+        citations=[],
+        falsification_condition="signal clarifies at a later heartbeat",
+        escalation_reason=None,
+        failure_mode=None,
+        metadata={"agent": "research"},
         nonce="research-nonce",
     )
 
@@ -500,6 +516,29 @@ def test_pm_builds_fresh_payload_when_aggregated_differs_from_research() -> None
     decision: Decision = out["pm_decision"]
     assert decision.action == ActionEnum.HOLD
     assert isinstance(decision.payload, HoldPayload)
+
+
+def test_pm_uses_unknown_ticker_when_hold_research_aggregates_to_buy() -> None:
+    """Research HOLD has no ticker on payload; committee BUY → ticker=<unknown>, shares=1."""
+    responses = [
+        _vote_json("BUY", 0.8, "q-buy"),
+        _vote_json("BUY", 0.7, "v-buy"),
+        _vote_json("HOLD", 0.5, "c-hold"),
+    ]
+    client = _RecordingClient(responses)
+    voter = PmVoter(client=client, model="claude-sonnet-4-6")
+    pm = make_pm(voter)
+
+    state: WorkingState = {
+        "research_decision": _research_hold(),
+        "claims": _claim_dicts(1),
+    }
+    out = pm(state)
+    decision: Decision = out["pm_decision"]
+    assert decision.action == ActionEnum.BUY
+    assert isinstance(decision.payload, BuyPayload)
+    assert decision.payload.ticker == "<unknown>"
+    assert decision.payload.shares == Decimal("1")
 
 
 def test_pm_escalates_with_escalate_payload_on_committee_disagreement() -> None:
