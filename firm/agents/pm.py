@@ -14,7 +14,7 @@ from typing import Any, Callable
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from firm.core.ids import ulid_new
-from firm.core.models import ActionEnum, Claim, Decision
+from firm.core.models import ActionEnum, Claim, Decision, FailureMode
 from firm.llm.citations import AnthropicMessagesClient
 from firm.llm.prompts import pm_voter_system
 from firm.orchestrator.state import WorkingState
@@ -238,10 +238,150 @@ class PmVoter:
         return vote_obj
 
 
+# ---------------------------------------------------------------------------
+# T26 — deterministic vote aggregation
+# ---------------------------------------------------------------------------
+
+
+# Discount applied to the majority confidence when one voter dissents.
+# Hard-coded constant (rather than a parameter) so the aggregation function
+# stays pure and deterministic; documented in aggregate_votes' docstring.
+_MAJORITY_DISSENT_DISCOUNT = 0.8
+
+# Canonical lens ordering for rationale concatenation. T27's caller will lift
+# the per-lens rationales out of this combined string into Decision.metadata.
+_LENS_ORDER: tuple[PmLens, ...] = (PmLens.QUALITY, PmLens.VALUATION, PmLens.CATALYST)
+
+
+def aggregate_votes(
+    votes: list[PmVote],
+) -> tuple[ActionEnum, float, str, FailureMode | None]:
+    """Combine three single-lens PmVotes into a committee decision.
+
+    Aggregation rules (locked, see plan §T26):
+
+    1. **3 of the same vote** (unanimous BUY/HOLD/SELL) → that vote.
+    2. **2 BUY + 1 HOLD** → BUY, with reservation (confidence discounted).
+    3. **2 BUY + 1 SELL** → ESCALATE (informative directional split).
+    4. **1 BUY + 2 SELL** → SELL, with reservation.
+    5. **3 HOLD** → HOLD (subsumed by rule 1).
+    6. **1 BUY + 1 HOLD + 1 SELL** → ESCALATE (full disagreement).
+
+    Consistent extensions for the remaining 2-1 multisets:
+
+    * 2 SELL + 1 HOLD → SELL, with reservation (parallel to rule 2).
+    * 2 HOLD + 1 BUY  → HOLD (HOLD majority dominates a minority directional).
+    * 2 HOLD + 1 SELL → HOLD (HOLD majority dominates a minority directional).
+
+    Confidence formula:
+
+    * **Unanimous:** ``mean(confidence)`` of all three voters.
+    * **2-1 majority (incl. with-reservation cases):**
+      ``mean(confidence of the 2 majority voters) * 0.8``.  The lone
+      dissenter's confidence is not counted; its rationale is still preserved
+      in the combined rationale string for downstream review.
+    * **ESCALATE outcomes:** ``mean(confidence)`` of all three voters, used as
+      an alignment signal; the action is ESCALATE regardless.
+
+    Rationale: per-lens rationales are joined with lens labels, ordered
+    QUALITY → VALUATION → CATALYST, so T27 can both store the combined
+    string on ``Decision.rationale`` and split it out into
+    ``Decision.metadata`` if desired.
+
+    The returned ``FailureMode | None`` slot is always ``None`` in the
+    deterministic happy path.  It exists so T27 can propagate failure
+    detections (e.g., empty/malformed inputs surfaced by upstream voters)
+    through the same return contract.
+
+    Parameters
+    ----------
+    votes:
+        Exactly three :class:`PmVote` objects, one per :class:`PmLens`.
+
+    Returns
+    -------
+    tuple
+        ``(action, confidence, rationale, failure_mode)`` — see formulas above.
+
+    Raises
+    ------
+    ValueError
+        If ``len(votes) != 3``.  Duplicate-lens guards are the caller's
+        responsibility.
+    """
+    if len(votes) != 3:
+        raise ValueError(
+            f"aggregate_votes requires exactly 3 votes (one per lens); got {len(votes)}"
+        )
+
+    # ----- Tally the multiset (BUY, HOLD, SELL). ---------------------------
+    by_action: dict[ActionEnum, list[PmVote]] = {
+        ActionEnum.BUY: [],
+        ActionEnum.HOLD: [],
+        ActionEnum.SELL: [],
+    }
+    for v in votes:
+        by_action[v.vote].append(v)
+
+    buy_count = len(by_action[ActionEnum.BUY])
+    hold_count = len(by_action[ActionEnum.HOLD])
+    sell_count = len(by_action[ActionEnum.SELL])
+    counts = (buy_count, hold_count, sell_count)
+
+    # ----- Dispatch by multiset.  Table is 10 cases, fully enumerated. -----
+    # Each entry decides which voter-subset's confidences average into the
+    # final score; the discount is applied for 2-1 majorities only.
+    mean_all = sum(v.confidence for v in votes) / 3.0
+
+    def _mean(subset: list[PmVote]) -> float:
+        return sum(v.confidence for v in subset) / len(subset)
+
+    action: ActionEnum
+    confidence: float
+    if counts == (3, 0, 0):  # Rule 1: unanimous BUY
+        action, confidence = ActionEnum.BUY, mean_all
+    elif counts == (0, 3, 0):  # Rule 1 / 5: unanimous HOLD
+        action, confidence = ActionEnum.HOLD, mean_all
+    elif counts == (0, 0, 3):  # Rule 1: unanimous SELL
+        action, confidence = ActionEnum.SELL, mean_all
+    elif counts == (2, 1, 0):  # Rule 2: 2 BUY + 1 HOLD → BUY w/ reservation
+        action = ActionEnum.BUY
+        confidence = _mean(by_action[ActionEnum.BUY]) * _MAJORITY_DISSENT_DISCOUNT
+    elif counts == (0, 1, 2):  # Extension: 2 SELL + 1 HOLD → SELL w/ reservation
+        action = ActionEnum.SELL
+        confidence = _mean(by_action[ActionEnum.SELL]) * _MAJORITY_DISSENT_DISCOUNT
+    elif counts == (1, 0, 2):  # Rule 4: 1 BUY + 2 SELL → SELL w/ reservation
+        action = ActionEnum.SELL
+        confidence = _mean(by_action[ActionEnum.SELL]) * _MAJORITY_DISSENT_DISCOUNT
+    elif counts == (1, 2, 0):  # Extension: 2 HOLD + 1 BUY → HOLD
+        action = ActionEnum.HOLD
+        confidence = _mean(by_action[ActionEnum.HOLD]) * _MAJORITY_DISSENT_DISCOUNT
+    elif counts == (0, 2, 1):  # Extension: 2 HOLD + 1 SELL → HOLD
+        action = ActionEnum.HOLD
+        confidence = _mean(by_action[ActionEnum.HOLD]) * _MAJORITY_DISSENT_DISCOUNT
+    elif counts == (2, 0, 1):  # Rule 3: 2 BUY + 1 SELL → ESCALATE
+        action, confidence = ActionEnum.ESCALATE, mean_all
+    elif counts == (1, 1, 1):  # Rule 6: full disagreement → ESCALATE
+        action, confidence = ActionEnum.ESCALATE, mean_all
+    else:  # pragma: no cover — exhaustive over multisets of size 3 over {B,H,S}.
+        raise AssertionError(f"unreachable: vote multiset {counts}")
+
+    # ----- Build the combined rationale, ordered QUALITY → VAL → CATALYST. -
+    by_lens: dict[PmLens, PmVote] = {v.lens: v for v in votes}
+    rationale = "\n".join(
+        f"[{lens.value}] {by_lens[lens].rationale}"
+        for lens in _LENS_ORDER
+        if lens in by_lens
+    )
+
+    return action, confidence, rationale, None
+
+
 __all__ = [
     "PmLens",
     "PmVote",
     "PmVoteSchemaError",
     "PmVoter",
+    "aggregate_votes",
     "make_pm",
 ]
