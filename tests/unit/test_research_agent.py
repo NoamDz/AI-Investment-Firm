@@ -137,6 +137,7 @@ def test_research_emits_decision_with_citations_and_claims(
         universe=universe,
         retriever=retriever,  # type: ignore[arg-type]  # stub is structurally compatible
         extractor=extractor,
+        nonce_secret=b"x" * 32,
     )
     out = research({"heartbeat_at": clock.now().isoformat()})
 
@@ -158,6 +159,7 @@ def test_research_refuses_when_retriever_returns_empty(
         universe=universe,
         retriever=retriever,  # type: ignore[arg-type]  # stub is structurally compatible
         extractor=extractor,
+        nonce_secret=b"x" * 32,
     )
     out = research({"heartbeat_at": clock.now().isoformat()})
 
@@ -187,6 +189,7 @@ def test_research_uses_pit_filter_with_replay_clock(
         universe=universe,
         retriever=retriever,  # type: ignore[arg-type]  # stub is structurally compatible
         extractor=extractor,
+        nonce_secret=b"x" * 32,
     )
     research({"heartbeat_at": clock.now().isoformat()})
 
@@ -215,6 +218,7 @@ def test_research_falsification_condition_non_empty(
         universe=universe,
         retriever=retriever,  # type: ignore[arg-type]  # stub is structurally compatible
         extractor=extractor,
+        nonce_secret=b"x" * 32,
     )
     out = research({"heartbeat_at": clock.now().isoformat()})
     decision = out["research_decision"]
@@ -244,6 +248,7 @@ def test_research_citation_fields_map_from_claim(
         universe=universe,
         retriever=retriever,  # type: ignore[arg-type]  # stub is structurally compatible
         extractor=extractor,
+        nonce_secret=b"x" * 32,
     )
     out = research({"heartbeat_at": clock.now().isoformat()})
     decision = out["research_decision"]
@@ -282,6 +287,7 @@ def test_research_tool_only_claims_do_not_produce_citation(
         universe=universe,
         retriever=retriever,  # type: ignore[arg-type]  # stub is structurally compatible
         extractor=extractor,
+        nonce_secret=b"x" * 32,
     )
     out = research({"heartbeat_at": clock.now().isoformat()})
     decision = out["research_decision"]
@@ -323,6 +329,7 @@ def test_research_surfaces_oldest_filing_age_days(
         universe=universe,
         retriever=retriever,  # type: ignore[arg-type]  # stub is structurally compatible
         extractor=extractor,
+        nonce_secret=b"x" * 32,
     )
     out = research({"heartbeat_at": clock.now().isoformat()})
     decision = out["research_decision"]
@@ -350,6 +357,7 @@ def test_research_grounded_uses_first_universe_ticker_in_question(
         universe=universe,
         retriever=retriever,  # type: ignore[arg-type]  # stub is structurally compatible
         extractor=extractor,
+        nonce_secret=b"x" * 32,
     )
     research({"heartbeat_at": clock.now().isoformat()})
 
@@ -386,3 +394,25 @@ def test_research_nonce_is_hmac_signed(
         timestamp=int(clock.now().timestamp()),
         nonce=decision.nonce,
     )
+
+
+def test_research_grounded_requires_nonce_secret(
+    universe: UniverseConfig, broker: FakeBroker, clock: ReplayClock
+) -> None:
+    """The grounded path must refuse to build when nonce_secret is absent.
+
+    Guards against a T29 wiring slip that would otherwise let every Decision
+    ship with an HMAC over a known zero key.
+    """
+    retriever = _StubRetriever([])
+    extractor = _StubExtractor([])
+
+    with pytest.raises(ValueError, match="nonce_secret"):
+        make_research(
+            clock=clock,
+            broker=broker,
+            universe=universe,
+            retriever=retriever,  # type: ignore[arg-type]  # stub is structurally compatible
+            extractor=extractor,
+            # nonce_secret intentionally omitted → factory must raise.
+        )

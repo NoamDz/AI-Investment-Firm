@@ -134,6 +134,7 @@ def test_research_end_to_end_produces_decision_with_citation() -> None:
         universe=universe,
         retriever=retriever,
         extractor=extractor,
+        nonce_secret=b"x" * 32,
     )
     out = research({"heartbeat_at": clock.now().isoformat()})
 

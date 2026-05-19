@@ -40,10 +40,6 @@ from firm.rag.retrieve import GroundedRetriever
 from firm.orchestrator.state import WorkingState
 
 
-# Dev/test default; T29 wires the real secret from config / environment.
-_DEFAULT_NONCE_SECRET: bytes = b"\x00" * 32
-
-
 def _doc_id_of(chunk_id: str, chunks: list[Chunk]) -> str:
     """Look up the ``doc_id`` of the chunk with ``chunk_id`` in ``chunks``.
 
@@ -112,9 +108,17 @@ def _make_grounded_research(
     universe: UniverseConfig,
     retriever: GroundedRetriever,
     extractor: CitedClaimExtractor,
-    nonce_secret: bytes,
+    nonce_secret: bytes | None,
 ) -> Callable[[WorkingState], dict[str, Any]]:
     """Build the grounded heartbeat node."""
+    if nonce_secret is None:
+        # Fail fast at factory time: a missing secret in the grounded path would
+        # otherwise either propagate as a ValueError from sign_nonce at the
+        # first heartbeat or — if defaulted — silently ship every Decision
+        # with an HMAC over a known key.  Force callers to inject explicitly.
+        raise ValueError(
+            "nonce_secret is required for the grounded research path"
+        )
 
     def research(state: WorkingState) -> dict[str, Any]:  # noqa: ARG001 -- reads clock, not heartbeat
         # Step 1: deterministic ticker selection. Simplest stable rule.
@@ -251,14 +255,17 @@ def make_research(
     universe: UniverseConfig,
     retriever: GroundedRetriever | None = None,
     extractor: CitedClaimExtractor | None = None,
-    nonce_secret: bytes = _DEFAULT_NONCE_SECRET,
+    nonce_secret: bytes | None = None,
 ) -> Callable[[WorkingState], dict[str, Any]]:
     """Build a research node callable.
 
     When both ``retriever`` and ``extractor`` are provided, returns the
-    grounded heartbeat (Plan 2 §T19).  Otherwise returns the Plan 1
-    deterministic stub.  This dual signature lets T29 swap in the real RAG
-    stack while keeping existing Plan 1 tests + CLI working today.
+    grounded heartbeat (Plan 2 §T19) and ``nonce_secret`` is REQUIRED —
+    leaving it ``None`` raises rather than letting the agent ship Decisions
+    signed with a zero key.  Otherwise returns the Plan 1 deterministic stub
+    (which uses a literal nonce and ignores ``nonce_secret`` entirely).  This
+    dual signature lets T29 swap in the real RAG stack while keeping existing
+    Plan 1 tests + CLI working today.
     """
     if retriever is not None and extractor is not None:
         return _make_grounded_research(
