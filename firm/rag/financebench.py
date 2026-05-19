@@ -1,4 +1,10 @@
-"""FinanceBench corpus adapter.
+"""FinanceBench corpus adapter. See spec §5.2 and plan T7.
+
+FinanceBench's `filing_date` is a calendar date (no time component); we
+treat each filing as published at UTC midnight on that date. This is a
+convention, not a precise timestamp — if a future schema change starts
+emitting local-time timestamps the silent UTC coercion would mask it,
+so the source-of-truth assumption is documented here.
 
 Loads SEC filings from the PatronusAI/financebench Hugging Face dataset and
 exposes them via the CorpusSource protocol.
@@ -18,7 +24,7 @@ from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
-from firm.rag.source import CorpusSource, FilingDoc
+from firm.rag.source import FilingDoc
 
 
 def _load_from_hf() -> Iterable[dict[str, object]]:
@@ -39,6 +45,7 @@ def _row_to_filing_doc(row: dict[str, object]) -> FilingDoc:
 
     dt = datetime.fromisoformat(str(filing_date_raw).strip())
     if dt.tzinfo is None:
+        # FinanceBench filing_date is date-only; UTC midnight is the convention.
         dt = dt.replace(tzinfo=timezone.utc)
 
     ticker = str(row.get("company") or row.get("ticker_name") or "")
@@ -98,5 +105,3 @@ class FinanceBenchSource:
             yield _row_to_filing_doc(row)
 
 
-# Satisfy the runtime-checkable CorpusSource protocol.
-assert isinstance(FinanceBenchSource(), CorpusSource)
