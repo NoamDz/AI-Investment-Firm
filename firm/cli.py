@@ -127,12 +127,15 @@ def _fit_bm25_sparse(rag_config: Any, sparse: Any) -> None:
 
 def _build_llm_stack(
     db: Path, clock: Clock, rag_config: Any, llm_config: Any
-) -> tuple[Any, Any, Any] | None:
+) -> tuple[Any, Any, Any]:
     """Construct RAG + LLM components for the grounded research path.
 
-    Returns ``(retriever, extractor, judge)`` on success, or ``None`` when any
-    external dependency (Qdrant, sentence-transformers models) is unavailable.
-    A warning is printed to stderr so the operator knows to run ``make ingest``.
+    Returns ``(retriever, extractor, judge)`` on success.  Any construction
+    failure (Qdrant unreachable, sentence-transformers model missing,
+    ``ANTHROPIC_API_KEY`` unset in LIVE/RECORD mode, etc.) is converted to a
+    :class:`click.ClickException` pointing the operator to ``make ingest`` and
+    ``make record``.  Silent fallback to the Plan 1 stub is intentionally
+    disallowed — a misconfigured production deployment must fail loudly.
 
     The PM voter is constructed unconditionally by the caller (it is cheap and
     has no external model dependencies at construction time).
@@ -196,17 +199,11 @@ def _build_llm_stack(
         return retriever, extractor, judge
 
     except Exception as exc:  # noqa: BLE001
-        click.echo(
-            "[firm run] LLM/RAG stack unavailable"
-            f" ({type(exc).__name__}: {exc})",
-            err=True,
-        )
-        click.echo(
-            "[firm run] Falling back to Plan 1 deterministic stub research."
-            " Run 'make ingest' to populate the corpus.",
-            err=True,
-        )
-        return None
+        raise click.ClickException(
+            f"LLM/RAG stack unavailable ({type(exc).__name__}: {exc}).\n"
+            "Run 'make ingest' to populate the corpus and 'make record' to "
+            "warm the LLM cache before invoking 'firm run'."
+        ) from exc
 
 
 @click.group()
@@ -236,19 +233,18 @@ def run(once: bool) -> None:
 
     monitor = make_monitor(clock)
 
-    # Build the grounded LLM stack; fall back to Plan 1 stub if unavailable.
-    rag_stack = _build_llm_stack(db, clock, rag_config, llm_config)
-    retriever: Any = None
-    extractor: Any = None
-    judge: Any = None
-    if rag_stack is not None:
-        retriever, extractor, judge = rag_stack
+    # Build the grounded LLM stack — hard-fails if any external dep is missing
+    # (Qdrant unreachable, models absent, etc.) so misconfigured deployments
+    # surface clearly instead of silently dropping to the Plan 1 stub.
+    retriever, extractor, judge = _build_llm_stack(db, clock, rag_config, llm_config)
 
     # nonce_secret is required for the grounded path; sourced from env.
-    nonce_secret: bytes | None = None
     raw_secret = os.environ.get("FIRM_HMAC_SECRET")
-    if raw_secret:
-        nonce_secret = bytes.fromhex(raw_secret)
+    if not raw_secret:
+        raise click.ClickException(
+            "FIRM_HMAC_SECRET is required for the grounded research path."
+        )
+    nonce_secret = bytes.fromhex(raw_secret)
 
     research = make_research(
         clock=clock,
@@ -257,7 +253,7 @@ def run(once: bool) -> None:
         retriever=retriever,
         extractor=extractor,
         judge=judge,
-        nonce_secret=nonce_secret if rag_stack is not None else None,
+        nonce_secret=nonce_secret,
     )
 
     # PM voter: always constructed (cheap, no external deps).
