@@ -65,6 +65,7 @@ from firm.db.migrations import init_db  # noqa: E402
 from firm.grounding.judge import SufficiencyJudge  # noqa: E402
 from firm.llm.cache import LlmCache, hash_prompt  # noqa: E402
 from firm.llm.citations import AnthropicCitationsExtractor  # noqa: E402
+from firm.llm.client import CompletionResponse  # noqa: E402
 from firm.rag.chunk import Chunk, chunk_document  # noqa: E402
 from firm.rag.contextual import ContextualAugmenter  # noqa: E402
 from firm.rag.source import FilingDoc  # noqa: E402
@@ -185,9 +186,7 @@ class _CapturingMessagesClient:
         messages: Sequence[dict[str, object]],
         max_tokens: int,
         temperature: float = 0.0,
-    ) -> Any:
-        from firm.llm.client import CompletionResponse
-
+    ) -> CompletionResponse:
         self.calls.append({
             "model": model,
             "system": system if system is not None else "",
