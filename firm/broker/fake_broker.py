@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from firm.broker.protocol import OrderResult, Position, Quote
@@ -31,15 +31,27 @@ def _load_initial_positions() -> dict[str, Position]:
     raw = os.environ.get("FIRM_INITIAL_POSITIONS")
     if not raw:
         return {}
-    mapping: dict[str, str] = json.loads(raw)
-    return {
-        ticker: Position(
+    try:
+        mapping: dict[str, str] = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"FIRM_INITIAL_POSITIONS is not valid JSON: {e}"
+        ) from e
+    positions: dict[str, Position] = {}
+    for ticker, shares_str in mapping.items():
+        try:
+            shares = Decimal(str(shares_str))
+        except InvalidOperation as e:
+            raise ValueError(
+                f"FIRM_INITIAL_POSITIONS[{ticker!r}] is not a valid Decimal: "
+                f"{shares_str!r}"
+            ) from e
+        positions[ticker] = Position(
             ticker=ticker,
-            shares=Decimal(shares_str),
+            shares=shares,
             avg_cost=_deterministic_price(ticker),
         )
-        for ticker, shares_str in mapping.items()
-    }
+    return positions
 
 
 class FakeBroker:

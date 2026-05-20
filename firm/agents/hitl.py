@@ -61,12 +61,13 @@ def mark_approved(*, db_path: Path, decision_id: str, approver: str, clock: Cloc
     now_iso = clock.now().isoformat()
     with closing(get_conn(db_path)) as conn:
         # Pre-approve path: insert an 'approved' row if none exists yet.
-        conn.execute(
+        ins = conn.execute(
             "INSERT OR IGNORE INTO hitl_queue "
             "(decision_id, queued_at, status, approver, decided_at) "
             "VALUES (?, ?, 'approved', ?, ?)",
             (decision_id, now_iso, approver, now_iso),
         )
+        pre_approved = ins.rowcount == 1
         # Post-queue path: flip an existing 'pending' row to 'approved'.
         cur = conn.execute(
             "UPDATE hitl_queue SET status='approved', approver=?, decided_at=? "
@@ -74,7 +75,10 @@ def mark_approved(*, db_path: Path, decision_id: str, approver: str, clock: Cloc
             (approver, now_iso, decision_id),
         )
         mutated = cur.rowcount == 1
-    if mutated:
+    # Emit the audit event on either path: a fresh pre-approve INSERT or a
+    # pending → approved UPDATE.  Without this, pre-approved decisions slipped
+    # through with zero entries in audit_log — a real audit trail gap.
+    if pre_approved or mutated:
         AuditLog(db_path, clock).append("hitl.approved", {"decision_id": decision_id, "approver": approver})
 
 
