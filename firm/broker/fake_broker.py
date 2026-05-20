@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from decimal import Decimal
 from typing import Any
 
@@ -16,13 +17,38 @@ def _deterministic_price(ticker: str) -> Decimal:
     return Decimal(50 + h) + Decimal("0.50")
 
 
+def _load_initial_positions() -> dict[str, Position]:
+    """Load initial positions from FIRM_INITIAL_POSITIONS env var (JSON dict of ticker→shares).
+
+    Used by integration tests to seed a non-zero position so the
+    ``escalate_new_ticker`` risk check does not trigger on tickers the
+    test has already decided to hold.
+
+    Example::
+
+        FIRM_INITIAL_POSITIONS='{"AAPL": "10"}'
+    """
+    raw = os.environ.get("FIRM_INITIAL_POSITIONS")
+    if not raw:
+        return {}
+    mapping: dict[str, str] = json.loads(raw)
+    return {
+        ticker: Position(
+            ticker=ticker,
+            shares=Decimal(shares_str),
+            avg_cost=_deterministic_price(ticker),
+        )
+        for ticker, shares_str in mapping.items()
+    }
+
+
 class FakeBroker:
     COMMISSION = Decimal("0.005")  # 0.5% per trade
 
     def __init__(self, initial_cash: Decimal = Decimal("100000"), clock: Clock | None = None) -> None:
         self._cash: Decimal = initial_cash
         self._clock: Clock = clock if clock is not None else WallClock()
-        self._positions: dict[str, Position] = {}
+        self._positions: dict[str, Position] = _load_initial_positions()
         # idempotency_key → (payload_hash, result)
         self._order_cache: dict[str, tuple[str, OrderResult]] = {}
 

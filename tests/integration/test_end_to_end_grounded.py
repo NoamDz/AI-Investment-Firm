@@ -40,6 +40,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -57,15 +58,19 @@ import pyarrow as pa  # type: ignore[import-untyped]  # noqa: E402
 import pyarrow.parquet as pq  # type: ignore[import-untyped]  # noqa: E402
 from qdrant_client import QdrantClient  # noqa: E402
 
+from firm.agents.hitl import mark_approved  # noqa: E402
 from firm.agents.pm import PmLens, PmVoter  # noqa: E402
+from firm.agents.reporter import _persist_decisions_from_state  # noqa: E402
 from firm.core.clock import ReplayClock  # noqa: E402
-from firm.core.models import Claim  # noqa: E402
+from firm.core.models import Claim, Decision  # noqa: E402
 from firm.db.connection import get_conn  # noqa: E402
 from firm.db.migrations import init_db  # noqa: E402
 from firm.grounding.judge import SufficiencyJudge  # noqa: E402
 from firm.llm.cache import LlmCache, hash_prompt  # noqa: E402
 from firm.llm.citations import AnthropicCitationsExtractor  # noqa: E402
 from firm.llm.client import CompletionResponse  # noqa: E402
+from firm.orchestrator.graph import _FIRM_SERDE  # noqa: E402
+from firm.orchestrator.state import WorkingState  # noqa: E402
 from firm.rag.chunk import Chunk, chunk_document  # noqa: E402
 from firm.rag.contextual import ContextualAugmenter  # noqa: E402
 from firm.rag.source import FilingDoc  # noqa: E402
@@ -805,6 +810,10 @@ def test_grounded_demo_produces_confirmed_trade_with_citations(
     env["FIRM_BROKER"] = "FAKE"
     env["FIRM_REPLAY_AT"] = _REPLAY_AT
     env["FIRM_REPORTS_ROOT"] = str(reports_root)
+    # Seed a non-zero AAPL position so Risk's escalate_new_ticker check does not
+    # trigger (escalate_new_ticker is now true; this test verifies the BUY
+    # pass-through path, not the HITL path — that is covered by T31).
+    env["FIRM_INITIAL_POSITIONS"] = '{"AAPL": "10"}'
     # ANTHROPIC_API_KEY is not needed in cached mode, but from_env() reads it.
     # Set a dummy so no ValueError is raised.
     env.setdefault("ANTHROPIC_API_KEY", "dummy-key-for-cached-mode")
@@ -939,4 +948,348 @@ def test_grounded_demo_produces_confirmed_trade_with_citations(
     assert found_citation_with_chunk_id, (
         f"No citation with chunk_id found in {report_file}\n"
         f"Report contents:\n{report_file.read_text(encoding='utf-8')}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helper: read risk_decision from LangGraph checkpoint (T31)
+# ---------------------------------------------------------------------------
+
+
+def _read_risk_decision_from_checkpoint(db_path: Path, thread_id: str) -> Decision:
+    """Deserialize the ``risk_decision`` from the LangGraph SQLite checkpoint.
+
+    Opens a minimal graph shell (same topology, same ``_FIRM_SERDE``) so that
+    ``graph.get_state()`` can deserialize firm's Decision types from the
+    msgpack checkpoint without running any nodes.
+    """
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    from langgraph.graph import END, StateGraph
+
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    saver = SqliteSaver(conn, serde=_FIRM_SERDE)
+
+    # Mirror the real graph topology so get_state() can match the checkpoint.
+    g = StateGraph(WorkingState)
+    for node_name in ("monitor", "research", "pm", "risk", "hitl", "execution", "reporter"):
+        g.add_node(node_name, lambda s: {})  # noqa: B023 -- dummy; never executed
+    g.set_entry_point("monitor")
+    g.add_edge("monitor", "research")
+    g.add_edge("research", "pm")
+    g.add_edge("pm", "risk")
+    g.add_conditional_edges(
+        "risk",
+        lambda s: "hitl",
+        {"hitl": "hitl", "execution": "execution"},
+    )
+    g.add_edge("hitl", "execution")
+    g.add_edge("execution", "reporter")
+    g.add_edge("reporter", END)
+    graph = g.compile(checkpointer=saver, interrupt_before=["hitl"])
+
+    config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+    state = graph.get_state(config)
+    conn.close()
+
+    risk_decision = state.values.get("risk_decision")
+    if risk_decision is None:
+        raise RuntimeError(
+            f"risk_decision not found in checkpoint for thread_id={thread_id!r}; "
+            f"state keys: {list(state.values.keys())}"
+        )
+    if not isinstance(risk_decision, Decision):
+        raise TypeError(
+            f"Expected Decision, got {type(risk_decision).__name__}: {risk_decision!r}"
+        )
+    return risk_decision
+
+
+# ---------------------------------------------------------------------------
+# T31: new-ticker → ESCALATE → HITL → mark_approved → resume → confirmed
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.requires_models
+def test_grounded_demo_new_ticker_routes_through_hitl(
+    tmp_path: Path,
+) -> None:
+    """T31: research on a new ticker (0 existing shares) routes through HITL.
+
+    Flow:
+    1. Ingest fixture corpus (subprocess).
+    2. Retrieve AAPL chunks + seed LLM caches (in-process, same as T30).
+    3. First ``firm run --once`` → Risk emits ESCALATE (new ticker, 0 shares)
+       → LangGraph interrupt before hitl → subprocess exits 0.
+    4. Read ``risk_decision`` from checkpoint. Persist it to ``decisions`` table
+       (satisfying the FK on hitl_queue), then call ``mark_approved``.
+    5. Second ``firm run --once`` with same thread_id (same FIRM_REPLAY_AT) →
+       hitl resumes, finds pre-approved row → ``hitl_approved=True`` →
+       execution unwraps EscalatePayload and submits the trade → outbox confirmed.
+    6. Assert: hitl_queue has 1 approved row, outbox has 1 confirmed row.
+
+    NOTE: ``FIRM_INITIAL_POSITIONS`` is intentionally NOT set so FakeBroker
+    starts with 0 AAPL shares — triggering ``escalate_new_ticker`` in Risk.
+    """
+    # ------------------------------------------------------------------ #
+    # Phase 0: precomputed parquets                                       #
+    # ------------------------------------------------------------------ #
+    _ensure_precomputed_parquets()
+
+    # ------------------------------------------------------------------ #
+    # Phase 1: layout                                                      #
+    # ------------------------------------------------------------------ #
+    fixture_json = tmp_path / "financebench_fixture.json"
+    fixture_json.write_text(json.dumps(_FIXTURE_ROWS), encoding="utf-8")
+
+    qdrant_local_path = tmp_path / "qdrant"
+    qdrant_local_path.mkdir()
+
+    reports_root = tmp_path / "reports"
+    db_path = tmp_path / "firm.db"
+
+    # ------------------------------------------------------------------ #
+    # Phase 2: fixture YAMLs                                               #
+    # ------------------------------------------------------------------ #
+    fixture_rag_yaml = tmp_path / "rag.yaml"
+    fixture_rag_yaml.write_text(
+        "\n".join([
+            "corpus:",
+            "  financebench:",
+            "    split: train",
+            "    max_docs: 2",
+            "",
+            "chunk:",
+            f"  target_tokens: {_FIXTURE_CHUNK_TARGET_TOKENS}",
+            f"  overlap_tokens: {_FIXTURE_CHUNK_OVERLAP_TOKENS}",
+            "",
+            "embedding:",
+            "  dense_model: nomic-ai/nomic-embed-text-v1.5",
+            "  dense_dim: 768",
+            "  sparse: bm25",
+            "",
+            "retrieval:",
+            "  top_k_retrieve: 8",
+            "  top_k_rerank: 4",
+            "",
+            "rerank:",
+            "  model: BAAI/bge-reranker-v2-m3",
+            "  score_floor: 0.0",
+            "",
+            "contextual:",
+            f"  summary_model: {_AUGMENTATION_MODEL}",
+            "",
+            "qdrant:",
+            f"  collection: {_COLLECTION}",
+            "  url_env: QDRANT_URL",
+        ]),
+        encoding="utf-8",
+    )
+
+    fixture_llm_yaml = tmp_path / "llm.yaml"
+    fixture_llm_yaml.write_text(
+        "\n".join([
+            "research:",
+            f"  model: {_RESEARCH_MODEL}",
+            "  max_tokens: 4096",
+            "  temperature: 0.0",
+            "",
+            "judge:",
+            f"  model: {_JUDGE_MODEL}",
+            "  max_tokens: 2048",
+            "  temperature: 0.0",
+            "",
+            "pm:",
+            f"  model: {_PM_MODEL}",
+            "  max_tokens: 1024",
+            "  temperature: 0.0",
+        ]),
+        encoding="utf-8",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Phase 3: init DB + seed augmentation cache                          #
+    # ------------------------------------------------------------------ #
+    init_db(db_path)
+    _seed_augmentation_cache(db_path)
+
+    # ------------------------------------------------------------------ #
+    # Phase 4: common subprocess environment                              #
+    # ------------------------------------------------------------------ #
+    env = os.environ.copy()
+    env["FIRM_DB_PATH"] = str(db_path)
+    env["FIRM_LLM_MODE"] = "cached"
+    env["FIRM_FINANCEBENCH_FIXTURE"] = str(fixture_json)
+    env["QDRANT_LOCAL_PATH"] = str(qdrant_local_path)
+    env["FIRM_HMAC_SECRET"] = "a" * 64
+    env["FIRM_RAG_CONFIG"] = str(fixture_rag_yaml)
+    env["FIRM_LLM_CONFIG"] = str(fixture_llm_yaml)
+    env["FIRM_BROKER"] = "FAKE"
+    env["FIRM_REPLAY_AT"] = _REPLAY_AT
+    env["FIRM_REPORTS_ROOT"] = str(reports_root)
+    # Intentionally no FIRM_INITIAL_POSITIONS — FakeBroker has 0 AAPL shares,
+    # triggering escalate_new_ticker in Risk.
+    env.pop("FIRM_INITIAL_POSITIONS", None)
+    env.setdefault("ANTHROPIC_API_KEY", "dummy-key-for-cached-mode")
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    env.pop("QDRANT_URL", None)
+
+    # ------------------------------------------------------------------ #
+    # Phase 5: firm ingest                                                #
+    # ------------------------------------------------------------------ #
+    ingest_result = subprocess.run(
+        [sys.executable, "-m", "firm.cli", "ingest", "--config", str(fixture_rag_yaml)],
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=300,
+        cwd=str(_REPO_ROOT),
+    )
+    assert ingest_result.returncode == 0, (
+        f"firm ingest exited {ingest_result.returncode}\n"
+        f"stdout:\n{ingest_result.stdout}\n"
+        f"stderr:\n{ingest_result.stderr}"
+    )
+
+    # Confirm Qdrant was populated.
+    _qc = QdrantClient(path=str(qdrant_local_path))
+    chunk_count = _qc.count(collection_name=_COLLECTION, exact=True).count
+    _qc.close()
+    assert chunk_count > 0, "Qdrant collection empty after ingest"
+
+    # ------------------------------------------------------------------ #
+    # Phase 6: in-process retrieval                                       #
+    # ------------------------------------------------------------------ #
+    retrieved_chunks = _retrieve_aapl_chunks(qdrant_local_path)
+    assert retrieved_chunks, (
+        "In-process retrieval returned no AAPL chunks; "
+        "check that ingest seeded the collection correctly."
+    )
+
+    # ------------------------------------------------------------------ #
+    # Phase 7: seed LLM cache for run-time agents                        #
+    # ------------------------------------------------------------------ #
+    claims = _seed_extractor_cache(db_path, retrieved_chunks)
+    _seed_judge_cache(db_path, claims)
+    _seed_pm_voter_cache(db_path, claims)
+
+    # ------------------------------------------------------------------ #
+    # Phase 8a: first firm run --once → interrupt before hitl            #
+    # ------------------------------------------------------------------ #
+    # The thread_id used by cli.py is clock.now().isoformat() which, for a
+    # ReplayClock seeded with FIRM_REPLAY_AT, is always _REPLAY_AT.
+    thread_id = _REPLAY_AT
+
+    run1_result = subprocess.run(
+        [sys.executable, "-m", "firm.cli", "run", "--once"],
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=300,
+        cwd=str(_REPO_ROOT),
+    )
+    # LangGraph interrupt_before exits cleanly (the invoke returns normally
+    # after the checkpoint is saved); exit code must be 0.
+    assert run1_result.returncode == 0, (
+        f"firm run (first invoke) exited {run1_result.returncode}\n"
+        f"stdout:\n{run1_result.stdout}\n"
+        f"stderr:\n{run1_result.stderr}"
+    )
+
+    # ------------------------------------------------------------------ #
+    # Phase 8b: read risk_decision, persist decisions row, pre-approve   #
+    # ------------------------------------------------------------------ #
+    # The LangGraph checkpoint holds risk_decision in the state after risk
+    # ran but before hitl.  Deserialize it via a graph shell.
+    risk_decision: Decision = _read_risk_decision_from_checkpoint(db_path, thread_id)
+
+    assert risk_decision.action.value == "ESCALATE", (
+        f"Expected ESCALATE from Risk (new ticker + 0 shares + escalate_new_ticker=true), "
+        f"got {risk_decision.action.value!r}.  "
+        f"Make sure escalate_new_ticker is true in config/policy.yaml and FIRM_INITIAL_POSITIONS is unset."
+    )
+
+    # The hitl_queue has a FK → decisions; insert the risk_decision row so
+    # the FK is satisfied before mark_approved creates the pre-approved row.
+    _persist_decisions_from_state(
+        {"risk_decision": risk_decision}, db_path, _FIXTURE_CLOCK
+    )
+
+    # Pre-approve: insert an 'approved' hitl_queue row so that when the
+    # graph resumes and hitl runs its INSERT OR IGNORE, it finds this row
+    # and SELECT status returns 'approved' immediately.
+    mark_approved(
+        db_path=db_path,
+        decision_id=risk_decision.id,
+        approver="t31-test",
+        clock=_FIXTURE_CLOCK,
+    )
+
+    # Verify pre-approval is visible.
+    with closing(get_conn(db_path)) as conn:
+        row = conn.execute(
+            "SELECT status FROM hitl_queue WHERE decision_id=?", (risk_decision.id,)
+        ).fetchone()
+    assert row is not None, "hitl_queue row missing after mark_approved pre-approve"
+    assert row["status"] == "approved", (
+        f"Expected 'approved', got {row['status']!r}"
+    )
+
+    # ------------------------------------------------------------------ #
+    # Phase 8c: second firm run --once → resume → execution → confirmed  #
+    # ------------------------------------------------------------------ #
+    run2_result = subprocess.run(
+        [sys.executable, "-m", "firm.cli", "run", "--once"],
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=300,
+        cwd=str(_REPO_ROOT),
+    )
+    assert run2_result.returncode == 0, (
+        f"firm run (second invoke / resume) exited {run2_result.returncode}\n"
+        f"stdout:\n{run2_result.stdout}\n"
+        f"stderr:\n{run2_result.stderr}"
+    )
+
+    # ------------------------------------------------------------------ #
+    # Phase 9: assertions                                                 #
+    # ------------------------------------------------------------------ #
+    # 9a: hitl_queue shows the approved row.
+    with closing(get_conn(db_path)) as conn:
+        hitl_row = conn.execute(
+            "SELECT status, approver FROM hitl_queue WHERE decision_id=?",
+            (risk_decision.id,),
+        ).fetchone()
+    assert hitl_row is not None, "hitl_queue row missing after both runs"
+    assert hitl_row["status"] == "approved", (
+        f"hitl_queue status expected 'approved', got {hitl_row['status']!r}"
+    )
+
+    # 9b: outbox has 1 confirmed row (the HITL-approved AAPL trade executed).
+    with closing(get_conn(db_path)) as conn:
+        outbox_confirmed = conn.execute(
+            "SELECT COUNT(*) AS n FROM outbox WHERE status='confirmed'"
+        ).fetchone()["n"]
+    assert outbox_confirmed == 1, (
+        f"Expected 1 confirmed outbox row after HITL-approved resume, got {outbox_confirmed}\n"
+        f"run2 stdout:\n{run2_result.stdout}\n"
+        f"run2 stderr:\n{run2_result.stderr}"
+    )
+
+    # 9c: decisions table has >= 3 rows (research + pm + risk at minimum).
+    with closing(get_conn(db_path)) as conn:
+        decisions_count = conn.execute(
+            "SELECT COUNT(*) AS n FROM decisions"
+        ).fetchone()["n"]
+    assert decisions_count >= 3, (
+        f"Expected >= 3 decisions rows, got {decisions_count}\n"
+        f"run2 stdout:\n{run2_result.stdout}\n"
+        f"run2 stderr:\n{run2_result.stderr}"
     )

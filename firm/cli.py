@@ -295,7 +295,23 @@ def run(once: bool) -> None:
     )
 
     config: RunnableConfig = {"configurable": {"thread_id": clock.now().isoformat()}}
-    final = graph.invoke({}, config=config)
+
+    # Resume an interrupted graph (e.g. pending HITL approval) rather than
+    # restarting it with a fresh empty-state invoke.  LangGraph distinguishes
+    # "resume" from "new run" by the input argument: None → resume from the
+    # saved checkpoint; dict → start a new run (clobbering the checkpoint).
+    # T31 surfaced that invoke({}) always restarts, so approved HITL decisions
+    # were never processed — the graph re-entered research and hit the interrupt
+    # again instead of continuing to execution.
+    existing = graph.get_state(config)
+    if existing.next:
+        # Pending checkpoint: resume (HITL gate waiting for approval, etc.).
+        invoke_input: dict[str, Any] | None = None
+    else:
+        # No checkpoint or completed checkpoint: start a fresh heartbeat.
+        invoke_input = {}
+
+    final = graph.invoke(invoke_input, config=config)
     click.echo(f"Heartbeat complete. Report: {final.get('report_path')}")
 
 

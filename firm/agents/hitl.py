@@ -40,11 +40,38 @@ def make_hitl(*, db_path: Path, clock: Clock) -> Callable[[WorkingState], dict[s
 
 
 def mark_approved(*, db_path: Path, decision_id: str, approver: str, clock: Clock) -> None:
+    """Approve a queued HITL decision.
+
+    Supports two modes:
+
+    * **Post-queue**: when ``hitl`` has already run and inserted a ``'pending'``
+      row, the ``UPDATE … WHERE status='pending'`` flips it to ``'approved'``.
+
+    * **Pre-queue** (T31 pattern): when the graph has been interrupted
+      *before* the ``hitl`` node executes (``interrupt_before=["hitl"]``),
+      the ``hitl_queue`` row does not exist yet.  A preceding
+      ``INSERT OR IGNORE`` creates a pre-approved row so that when the
+      graph resumes and ``hitl`` runs its own ``INSERT OR IGNORE``, that
+      insert is a no-op and the ``SELECT status`` immediately returns
+      ``'approved'``.
+
+    The caller is responsible for ensuring the ``decisions`` row for
+    ``decision_id`` already exists (FK constraint on ``hitl_queue``).
+    """
+    now_iso = clock.now().isoformat()
     with closing(get_conn(db_path)) as conn:
+        # Pre-approve path: insert an 'approved' row if none exists yet.
+        conn.execute(
+            "INSERT OR IGNORE INTO hitl_queue "
+            "(decision_id, queued_at, status, approver, decided_at) "
+            "VALUES (?, ?, 'approved', ?, ?)",
+            (decision_id, now_iso, approver, now_iso),
+        )
+        # Post-queue path: flip an existing 'pending' row to 'approved'.
         cur = conn.execute(
             "UPDATE hitl_queue SET status='approved', approver=?, decided_at=? "
             "WHERE decision_id=? AND status='pending'",
-            (approver, clock.now().isoformat(), decision_id),
+            (approver, now_iso, decision_id),
         )
         mutated = cur.rowcount == 1
     if mutated:
