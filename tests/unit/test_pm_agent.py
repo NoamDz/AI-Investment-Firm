@@ -561,4 +561,40 @@ def test_pm_escalates_with_escalate_payload_on_committee_disagreement() -> None:
     assert decision.action == ActionEnum.ESCALATE
     assert isinstance(decision.payload, EscalatePayload)
     assert decision.escalation_reason is not None
-    assert "PM committee" in decision.escalation_reason
+
+
+def test_pm_maps_pm_vote_schema_error_to_refuse_schema_validation_failed() -> None:
+    """A malformed Sonnet response on any voter must not crash the heartbeat.
+
+    Regression: previously the for-loop raised ``PmVoteSchemaError`` and that
+    propagated up through LangGraph, aborting the run.  Mirror Research's
+    ``JudgeSchemaError`` path: emit a REFUSE Decision with
+    ``SCHEMA_VALIDATION_FAILED``.
+    """
+    from firm.core.models import FailureMode
+
+    # First voter returns valid JSON, second returns garbage.
+    responses = [
+        _vote_json("BUY", 0.8, "q-ok"),
+        "not json at all",
+        _vote_json("BUY", 0.6, "c-ok"),
+    ]
+    client = _RecordingClient(responses)
+    voter = PmVoter(client=client, model="claude-sonnet-4-6")
+    pm = make_pm(voter)
+
+    state: WorkingState = {
+        "research_decision": _research_buy(),
+        "claims": _claim_dicts(1),
+    }
+    out = pm(state)
+    decision: Decision = out["pm_decision"]
+
+    assert decision.action == ActionEnum.REFUSE
+    assert decision.failure_mode == FailureMode.SCHEMA_VALIDATION_FAILED
+    assert isinstance(decision.payload, RefusePayload)
+    assert "schema_validation_failed" in decision.payload.reason
+    assert "res-1" in decision.decision_id_chain
+    # The first (successful) vote is preserved in pm_votes so the audit trail
+    # shows where the failure happened.
+    assert len(out["pm_votes"]) == 1

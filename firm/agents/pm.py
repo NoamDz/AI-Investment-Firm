@@ -30,6 +30,7 @@ from firm.core.models import (
     EscalatePayload,
     FailureMode,
     HoldPayload,
+    RefusePayload,
     SellPayload,
     TypedPayload,
 )
@@ -506,14 +507,41 @@ def make_pm(voter: PmVoter) -> Callable[[WorkingState], dict[str, Any]]:
         question = research.rationale
 
         votes: list[PmVote] = []
-        for lens in (PmLens.QUALITY, PmLens.VALUATION, PmLens.CATALYST):
-            vote = voter.vote(
-                lens=lens,
-                question=question,
-                claims=claims,
-                research_rationale=research.rationale,
+        try:
+            for lens in (PmLens.QUALITY, PmLens.VALUATION, PmLens.CATALYST):
+                vote = voter.vote(
+                    lens=lens,
+                    question=question,
+                    claims=claims,
+                    research_rationale=research.rationale,
+                )
+                votes.append(vote)
+        except PmVoteSchemaError as exc:
+            # Mirror research.py's JudgeSchemaError path: surface as a REFUSE
+            # Decision with SCHEMA_VALIDATION_FAILED so a single malformed
+            # voter response does not crash the heartbeat.
+            schema_metadata: dict[str, Any] = {"agent": "pm"}
+            oldest_age = research.metadata.get("oldest_filing_age_days")
+            if oldest_age is not None:
+                schema_metadata["oldest_filing_age_days"] = oldest_age
+            schema_refuse = Decision(
+                id=ulid_new(),
+                decision_id_chain=[research.id],
+                action=ActionEnum.REFUSE,
+                payload=RefusePayload(reason="pm:schema_validation_failed"),
+                rationale=f"PM voter response failed schema validation: {exc!s}",
+                confidence=0.0,
+                citations=list(research.citations),
+                falsification_condition=research.falsification_condition,
+                escalation_reason=None,
+                failure_mode=FailureMode.SCHEMA_VALIDATION_FAILED,
+                metadata=schema_metadata,
+                nonce="pm",
             )
-            votes.append(vote)
+            return {
+                "pm_decision": schema_refuse,
+                "pm_votes": [v.model_dump(mode="json") for v in votes],
+            }
 
         action, confidence, combined_rationale, fmode = aggregate_votes(votes)
         payload = _payload_for(action, research)
