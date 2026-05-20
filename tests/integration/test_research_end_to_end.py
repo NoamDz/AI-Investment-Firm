@@ -62,9 +62,13 @@ class _PassThroughCrossEncoder:
 class _OneClaimExtractor:
     """Stub extractor returning a single grounded Claim against the first chunk."""
 
+    # Required by the CitedClaimExtractorProtocol contract (added in T24).
+    last_tool_call_ids: list[str] = []
+
     def extract(
         self, *, query: str, chunks: list[Chunk], as_of: datetime
     ) -> list[Claim]:
+        self.last_tool_call_ids = []
         if not chunks:
             return []
         chunk = chunks[0]
