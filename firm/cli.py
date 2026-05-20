@@ -381,6 +381,7 @@ def _make_fixture_loader(fixture_path: str) -> Any:
     "--max-docs",
     default=None,
     type=int,
+    envvar="FIRM_INGEST_MAX_DOCS",
     help="Override corpus.financebench.max_docs from config.",
 )
 def ingest(config: str, max_docs: int | None) -> None:

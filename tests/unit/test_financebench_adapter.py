@@ -97,15 +97,40 @@ class TestPublishedAtIsParsedTzAware:
         (doc,) = list(source.iter_docs())
         assert doc.published_at.tzinfo == timezone.utc
 
-    def test_missing_filing_date_raises(self) -> None:
+    def test_missing_filing_date_and_doc_period_raises(self) -> None:
         row: dict[str, object] = {
             "doc_name": "bad-row",
             "company": "ACME",
             "doc_type": "10-K",
             "text": "body",
         }
-        with pytest.raises(ValueError, match="missing filing_date"):
+        with pytest.raises(ValueError, match="missing filing_date and doc_period"):
             _row_to_filing_doc(row)
+
+    def test_doc_period_with_10k_derives_filing_date(self) -> None:
+        row: dict[str, object] = {
+            "doc_name": "3M_2018_10K",
+            "company": "3M",
+            "doc_type": "10k",
+            "doc_period": 2018,
+            "text": "body",
+        }
+        doc = _row_to_filing_doc(row)
+        assert doc.published_at.year == 2019
+        assert doc.published_at.month == 3
+        assert doc.published_at.tzinfo == timezone.utc
+
+    def test_doc_period_with_10q_derives_filing_date(self) -> None:
+        row: dict[str, object] = {
+            "doc_name": "AAPL_2022_10Q",
+            "company": "Apple",
+            "doc_type": "10q",
+            "doc_period": 2022,
+            "text": "body",
+        }
+        doc = _row_to_filing_doc(row)
+        assert doc.published_at.year == 2023
+        assert doc.published_at.month == 2
 
 
 @pytest.mark.skipif(

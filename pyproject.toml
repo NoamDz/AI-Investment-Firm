@@ -16,6 +16,7 @@ dependencies = [
     "qdrant-client>=1.11",
     "numpy>=1.26",
     "sentence-transformers>=3.0",
+    "einops>=0.7",  # required by nomic-embed-text-v1.5 remote modeling code
     "datasets>=2.20",
     "rank-bm25>=0.2.2",
     "beautifulsoup4>=4.12",

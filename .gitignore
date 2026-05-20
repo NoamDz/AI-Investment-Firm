@@ -23,4 +23,5 @@ htmlcov/
 .vscode/
 .DS_Store
 logs/
+*.log
 artifacts/
