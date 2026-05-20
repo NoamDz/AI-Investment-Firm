@@ -29,7 +29,7 @@ from firm.db.connection import get_conn
 from firm.db.migrations import init_db
 from firm.orchestrator.graph import build_graph
 from firm.orchestrator.state import WorkingState
-from firm.reconcile.boot import reconcile_on_boot
+from firm.reconcile.boot import reconcile_on_boot, resolve_from_broker
 
 try:
     from langchain_core.runnables import RunnableConfig
@@ -230,9 +230,14 @@ def run(once: bool) -> None:
     _seed_db_from_broker(db, broker, clock)
     recon = reconcile_on_boot(db, broker, clock)
     if recon.status == "mismatch":
-        click.echo(f"BOOT RECONCILIATION MISMATCH: {recon.diff}", err=True)
-        click.echo("Resolve the mismatch and re-run.", err=True)
-        sys.exit(1)
+        # Boot reconcile = implicit ack (spec §5.7): broker is source of truth,
+        # local DB is rewritten. The diff is already audit-logged by
+        # reconcile_on_boot() above, and resolve_from_broker() logs the rewrite.
+        click.echo(
+            f"BOOT RECONCILED: broker is source of truth; local DB synced. "
+            f"diff={recon.diff}"
+        )
+        resolve_from_broker(db, broker, clock, recon.diff)
 
     monitor = make_monitor(clock)
 
