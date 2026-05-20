@@ -21,7 +21,6 @@ Design decisions
 from __future__ import annotations
 
 import uuid
-import warnings
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
@@ -43,21 +42,31 @@ class VectorStore:
     def __init__(self, client: QdrantClient) -> None:
         self._client = client
 
-    def create_collection(self, name: str, dense_dim: int) -> None:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            self._client.recreate_collection(
-                collection_name=name,
-                vectors_config={
-                    self.DENSE_NAME: models.VectorParams(
-                        size=dense_dim,
-                        distance=models.Distance.COSINE,
-                    ),
-                },
-                sparse_vectors_config={
-                    self.SPARSE_NAME: models.SparseVectorParams(),
-                },
-            )
+    def create_collection(self, name: str, dense_dim: int, *, force: bool = False) -> None:
+        """Create the named hybrid collection if it does not already exist.
+
+        Idempotent by default — calling this on an existing collection is a no-op,
+        which is what the ingest pipeline relies on for resumability (the per-doc
+        ``doc_exists`` skip is meaningless if the collection itself gets wiped).
+        Pass ``force=True`` to drop and recreate (test fixtures use this).
+        """
+        existing = {c.name for c in self._client.get_collections().collections}
+        if name in existing:
+            if not force:
+                return
+            self._client.delete_collection(collection_name=name)
+        self._client.create_collection(
+            collection_name=name,
+            vectors_config={
+                self.DENSE_NAME: models.VectorParams(
+                    size=dense_dim,
+                    distance=models.Distance.COSINE,
+                ),
+            },
+            sparse_vectors_config={
+                self.SPARSE_NAME: models.SparseVectorParams(),
+            },
+        )
 
     def upsert(
         self,

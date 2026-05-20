@@ -244,3 +244,46 @@ def test_doc_exists() -> None:
     # After upsert: known doc_id resolves True, unknown stays False.
     assert store.doc_exists("exists_col", "doc-a") is True
     assert store.doc_exists("exists_col", "doc-missing") is False
+
+
+def test_create_collection_is_idempotent_and_preserves_data() -> None:
+    """A second create_collection call must NOT wipe existing points.
+
+    Regression for a bug where ``create_collection`` called Qdrant's
+    ``recreate_collection`` unconditionally — every ``firm ingest`` invocation
+    silently dropped the previously-indexed corpus, making the per-doc
+    ``doc_exists`` skip dead code in production.
+    """
+    from firm.rag.qdrant_store import VectorStore
+
+    client = _make_client()
+    store = VectorStore(client)
+    utc = timezone.utc
+    published = datetime(2023, 6, 1, tzinfo=utc)
+    chunk = _make_chunk("preserve::0001", "AAPL", published)
+
+    store.create_collection("preserve_col", dense_dim=4)
+    store.upsert("preserve_col", [chunk], [[1.0, 0.0, 0.0, 0.0]], [{0: 1.0}])
+    assert store.doc_exists("preserve_col", "test-doc") is True
+
+    # Second call must be a no-op — points must survive.
+    store.create_collection("preserve_col", dense_dim=4)
+    assert store.doc_exists("preserve_col", "test-doc") is True
+
+
+def test_create_collection_force_recreates() -> None:
+    """``force=True`` drops the collection and rebuilds it empty."""
+    from firm.rag.qdrant_store import VectorStore
+
+    client = _make_client()
+    store = VectorStore(client)
+    utc = timezone.utc
+    published = datetime(2023, 6, 1, tzinfo=utc)
+    chunk = _make_chunk("force::0001", "AAPL", published)
+
+    store.create_collection("force_col", dense_dim=4)
+    store.upsert("force_col", [chunk], [[1.0, 0.0, 0.0, 0.0]], [{0: 1.0}])
+    assert store.doc_exists("force_col", "test-doc") is True
+
+    store.create_collection("force_col", dense_dim=4, force=True)
+    assert store.doc_exists("force_col", "test-doc") is False
