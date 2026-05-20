@@ -2,16 +2,16 @@
 
 Multi-agent paper-trading firm. Take-home for Cato Networks — Agentic AI Engineer.
 
-## Quickstart (clone-to-demo in <10 min)
+## Quickstart (Plan 2 — RAG-grounded demo)
 
 ```bash
-git clone <repo>
-cd ai-investment-firm
+docker compose up -d qdrant
 pip install -e ".[dev]"
-make demo
+make ingest    # one-time, populates Qdrant from FinanceBench
+make demo      # heartbeat with grounded research and confirmed paper trade
 ```
 
-Output: one heartbeat through the 5-agent workflow, one paper trade via FakeBroker, and a JSONL report in `data/reports/2024-03-13/`.
+Output: one heartbeat through the 5-agent workflow, a JSONL report under `data/reports/<date>/` containing at least one citation, and one `confirmed` row in the `outbox` table.
 
 ## Docker demo
 
@@ -35,6 +35,6 @@ See `docs/superpowers/specs/2026-05-18-ai-investment-firm-design.md` for the ful
 ## Status
 
 - [x] **Plan 1 (this branch):** Foundation + Walking Skeleton — 5 agents stubbed, outbox-protected trade, boot reconciliation.
-- [ ] Plan 2: RAG + Citations + Grounding
+- [x] Plan 2: RAG + Citations + Grounding
 - [ ] Plan 3: HITL + Daily Reports + Observability
 - [ ] Plan 4: Eval Harness + Red Team + CI/CD + Bonuses
