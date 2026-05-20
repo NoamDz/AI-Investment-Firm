@@ -195,6 +195,37 @@ def test_extractor_carries_source_span() -> None:
     assert claims[2].source_span == (50, 83)
 
 
+def test_extractor_carries_verbatim_source_quote() -> None:
+    """``source_quote`` must mirror the Anthropic API's verbatim ``cited_text``.
+
+    Regression: previously the verbatim cited_text was discarded and downstream
+    Citation.cited_text held the block-level claim text (the LLM's assertion),
+    not the actual source-document substring.
+    """
+    chunks = [
+        _chunk(0, "AAPL-10K-2023", "Total net sales were $383.285 billion"),
+        _chunk(0, "AAPL-10Q-Q1-2024", "Services revenue of $85.2 billion"),
+    ]
+    stub = _StubClient(_three_citations_response())
+    extractor = AnthropicCitationsExtractor(
+        client=stub, model="claude-sonnet-4-6", max_tokens=1024
+    )
+
+    claims = extractor.extract(
+        query="What were Apple's FY2023 financials?",
+        chunks=chunks,
+        as_of=datetime(2024, 6, 1, tzinfo=timezone.utc),
+    )
+
+    assert [c.source_quote for c in claims] == [
+        "Total net sales were $383.285 billion",
+        "Gross margin was 44.1%",
+        "Services revenue of $85.2 billion",
+    ]
+    # Block-level text remains the LLM's assertion, distinct from source_quote.
+    assert claims[0].text == "Apple reported revenue of $383.3B in fiscal 2023."
+
+
 def test_extractor_passes_documents_with_citations_enabled() -> None:
     chunks = [
         _chunk(0, "AAPL-10K-2023", "Total net sales were $383.285 billion"),

@@ -68,6 +68,12 @@ class Claim(BaseModel):
     unit: str | None = None
     source_chunk_id: str | None = None
     source_span: tuple[int, int] | None = None
+    # Verbatim ``cited_text`` from the Anthropic Citations API (the actual
+    # source-document substring), as opposed to ``text`` which is the LLM's
+    # block-level assertion built around it.  Populated by
+    # AnthropicCitationsExtractor; ``None`` for tool-derived Claims or older
+    # records that predate this field.
+    source_quote: str | None = None
     tool_call_id: str | None = None
 
     @model_validator(mode="after")

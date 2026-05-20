@@ -104,6 +104,11 @@ def _build_citations(claims: list[Claim], chunks: list[Chunk]) -> list[Citation]
     A Claim with ``source_chunk_id is None`` (e.g. tool-derived) produces no
     Citation.  The (chunk_id, span, source_id, cited_text) mapping is
     load-bearing — implemented exactly per spec §T19 step 3 #4.
+
+    ``cited_text`` prefers the verbatim ``source_quote`` (the literal source
+    span returned by Anthropic's Citations API) and falls back to the Claim's
+    block-level ``text`` only when the extractor could not capture a quote
+    (older records or malformed API entries).
     """
     citations: list[Citation] = []
     for claim in claims:
@@ -114,7 +119,7 @@ def _build_citations(claims: list[Claim], chunks: list[Chunk]) -> list[Citation]
                 source_id=_doc_id_of(claim.source_chunk_id, chunks),
                 chunk_id=claim.source_chunk_id,
                 span=claim.source_span if claim.source_span is not None else (0, 0),
-                cited_text=claim.text,
+                cited_text=claim.source_quote if claim.source_quote is not None else claim.text,
                 document_index=None,
                 document_title=None,
             )

@@ -13,9 +13,10 @@ DROPPED, with the count surfaced on :attr:`AnthropicCitationsExtractor.last_unci
 so the upstream agent can raise an ``UNCITED_CLAIM`` failure mode.
 
 Claim ``text`` is set from the block-level ``text`` (the model's natural-
-language assertion). The verbatim ``cited_text`` from each citation is
-reserved for the :class:`firm.core.models.Citation` object that T19 will
-attach alongside the claim.
+language assertion). The verbatim ``cited_text`` from each citation is also
+captured onto :attr:`firm.core.models.Claim.source_quote` so downstream code
+(see :func:`firm.agents.research._build_citations`) can populate the
+:class:`firm.core.models.Citation` with the exact spec-compliant span text.
 
 Tool dispatch (§T24)
 --------------------
@@ -296,11 +297,14 @@ class AnthropicCitationsExtractor:
                 if doc_index_raw < 0 or doc_index_raw >= len(chunks):
                     continue
                 source_chunk_id = chunks[doc_index_raw].id
+                cited_text_raw = citation.get("cited_text")
+                source_quote = cited_text_raw if isinstance(cited_text_raw, str) else None
                 claims.append(
                     Claim(
                         text=text_val,
                         source_chunk_id=source_chunk_id,
                         source_span=(start_raw, end_raw),
+                        source_quote=source_quote,
                     )
                 )
 

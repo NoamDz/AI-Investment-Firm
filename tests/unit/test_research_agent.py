@@ -356,6 +356,42 @@ def test_research_citation_fields_map_from_claim(
     assert citation.document_title is None
 
 
+def test_research_citation_cited_text_prefers_verbatim_source_quote(
+    universe: UniverseConfig, broker: FakeBroker, clock: ReplayClock
+) -> None:
+    """When the extractor supplies ``source_quote``, Citation.cited_text holds
+    that verbatim API span — NOT the block-level claim text (LLM assertion).
+    """
+    chunk = _make_chunk(
+        "doc-quote::0001",
+        doc_id="doc-quote",
+        text="Total net sales were $383.285 billion in fiscal 2023.",
+    )
+    retriever = _StubRetriever([_wrap(chunk)])
+    claim = Claim(
+        text="Apple reported revenue of $383.3B in fiscal 2023.",
+        source_chunk_id="doc-quote::0001",
+        source_span=(0, 37),
+        source_quote="Total net sales were $383.285 billion",
+    )
+    extractor = _StubExtractor([claim])
+    judge = _StubJudge(_all_supported(num_claims=1))
+
+    research = make_research(
+        clock=clock,
+        broker=broker,
+        universe=universe,
+        retriever=retriever,  # type: ignore[arg-type]  # stub is structurally compatible
+        extractor=extractor,
+        judge=judge,  # type: ignore[arg-type]  # stub is structurally compatible
+        nonce_secret=b"x" * 32,
+    )
+    out = research({"heartbeat_at": clock.now().isoformat()})
+    decision = out["research_decision"]
+
+    assert decision.citations[0].cited_text == "Total net sales were $383.285 billion"
+
+
 def test_research_tool_only_claims_do_not_produce_citation(
     universe: UniverseConfig, broker: FakeBroker, clock: ReplayClock
 ) -> None:
