@@ -19,7 +19,7 @@ from firm.core.clock import ReplayClock
 from firm.core.config import UniverseConfig, load_universe
 from firm.core.ids import verify_nonce
 from firm.core.models import ActionEnum, Claim, FailureMode
-from firm.grounding.judge import JudgeResponseError
+from firm.grounding.judge import JudgeResponseError, JudgeSchemaError
 from firm.grounding.schema import (
     ClaimAssessment,
     ClaimSupport,
@@ -723,6 +723,42 @@ def test_research_refuses_on_judge_response_error(
     # On error we still surface a sufficiency_result placeholder so downstream
     # nodes can introspect a uniform shape (claim_assessments list always
     # present).
+    assert "sufficiency_result" in out
+    assert "claim_assessments" in out["sufficiency_result"]
+
+
+def test_judge_schema_error_maps_to_schema_validation_failed(
+    universe: UniverseConfig, broker: FakeBroker, clock: ReplayClock
+) -> None:
+    """JudgeSchemaError → REFUSE / SCHEMA_VALIDATION_FAILED (T32a).
+
+    The judge was reachable but returned non-conforming output — a distinct
+    operational signal from LLM_UNAVAILABLE (transport / JSON-parse errors).
+    """
+    chunk = _make_chunk("doc-a::0001", text="Apple revenue grew 8% YoY.")
+    retriever = _StubRetriever([_wrap(chunk)])
+    claim = Claim(
+        text="Apple revenue grew 8% YoY.",
+        source_chunk_id=chunk.id,
+        source_span=(0, 26),
+    )
+    extractor = _StubExtractor([claim])
+    judge = _StubJudge(JudgeSchemaError("claim_assessments: field required"))
+
+    research = make_research(
+        clock=clock,
+        broker=broker,
+        universe=universe,
+        retriever=retriever,  # type: ignore[arg-type]
+        extractor=extractor,
+        judge=judge,  # type: ignore[arg-type]
+        nonce_secret=b"x" * 32,
+    )
+    out = research({"heartbeat_at": clock.now().isoformat()})
+    decision = out["research_decision"]
+
+    assert decision.action == ActionEnum.REFUSE
+    assert decision.failure_mode == FailureMode.SCHEMA_VALIDATION_FAILED
     assert "sufficiency_result" in out
     assert "claim_assessments" in out["sufficiency_result"]
 

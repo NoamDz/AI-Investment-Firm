@@ -46,7 +46,7 @@ from firm.core.models import (
     HoldPayload,
     RefusePayload,
 )
-from firm.grounding.judge import JudgeResponseError, SufficiencyJudge
+from firm.grounding.judge import JudgeResponseError, JudgeSchemaError, SufficiencyJudge
 from firm.grounding.schema import SufficiencyResult
 from firm.llm.citations import CitedClaimExtractor
 from firm.rag.chunk import Chunk
@@ -59,6 +59,13 @@ from firm.orchestrator.state import WorkingState
 _LLM_UNAVAILABLE_SUFFICIENCY: dict[str, Any] = {
     "claim_assessments": [],
     "overall_reasoning": "sufficiency judge unavailable (LLM error)",
+}
+
+# Placeholder used when the judge returned a response that failed schema
+# validation — distinct from LLM_UNAVAILABLE (transport/JSON parse errors).
+_SCHEMA_VALIDATION_FAILED_SUFFICIENCY: dict[str, Any] = {
+    "claim_assessments": [],
+    "overall_reasoning": "sufficiency judge response failed schema validation",
 }
 
 # Placeholder used when retrieval returned no chunks — the judge is skipped
@@ -208,13 +215,40 @@ def _make_grounded_research(
         if oldest_age is not None:
             metadata["oldest_filing_age_days"] = oldest_age
 
-        # Step 5: sufficiency gate. JudgeResponseError → REFUSE LLM_UNAVAILABLE.
-        # Catch ONLY JudgeResponseError; other exceptions propagate so a real
-        # bug (e.g. schema drift) is not silently masked.
+        # Step 5: sufficiency gate.
+        # JudgeSchemaError (subclass) → REFUSE SCHEMA_VALIDATION_FAILED.
+        # JudgeResponseError           → REFUSE LLM_UNAVAILABLE.
+        # Catch ONLY these two; other exceptions propagate so a real
+        # bug is not silently masked. JudgeSchemaError must come first
+        # because it is a subclass of JudgeResponseError.
         try:
             sufficiency: SufficiencyResult = judge.assess(
                 question=question, claims=claims
             )
+        except JudgeSchemaError as exc:
+            schema_validation_failed_decision = Decision(
+                id=decision_id,
+                decision_id_chain=[],
+                action=ActionEnum.REFUSE,
+                payload=RefusePayload(reason="sufficiency:schema_validation_failed"),
+                rationale=f"sufficiency judge response failed schema validation: {exc!s}",
+                confidence=0.0,
+                citations=_build_citations(claims, chunks),
+                falsification_condition=(
+                    f"sufficiency judge returns a conforming response for {ticker} at a later heartbeat"
+                ),
+                escalation_reason=None,
+                failure_mode=FailureMode.SCHEMA_VALIDATION_FAILED,
+                metadata=metadata,
+                nonce=nonce,
+            )
+            return {
+                "research_decision": schema_validation_failed_decision,
+                "retrieved_chunks": chunks_dump,
+                "claims": claims_dump,
+                "sufficiency_result": copy.deepcopy(_SCHEMA_VALIDATION_FAILED_SUFFICIENCY),
+                "tool_call_ids": tool_call_ids,
+            }
         except JudgeResponseError as exc:
             llm_unavailable_decision = Decision(
                 id=decision_id,

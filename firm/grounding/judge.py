@@ -33,6 +33,14 @@ class JudgeResponseError(Exception):
     """Raised when the sufficiency judge returns un-parseable JSON or a schema violation."""
 
 
+class JudgeSchemaError(JudgeResponseError):
+    """Raised when the sufficiency judge's response fails schema validation.
+
+    Distinct from generic JudgeResponseError so callers can map this to
+    FailureMode.SCHEMA_VALIDATION_FAILED instead of LLM_UNAVAILABLE.
+    """
+
+
 def _strip_markdown_fences(text: str) -> str:
     """Strip a single leading ```...``` markdown fence if present.
 
@@ -174,9 +182,9 @@ class SufficiencyJudge:
         try:
             return SufficiencyResult.model_validate(translated)
         except ValidationError as exc:
-            raise JudgeResponseError(
+            raise JudgeSchemaError(
                 f"sufficiency judge JSON failed schema validation: {exc!s}"
             ) from exc
 
 
-__all__ = ["JudgeResponseError", "SufficiencyJudge"]
+__all__ = ["JudgeResponseError", "JudgeSchemaError", "SufficiencyJudge"]
