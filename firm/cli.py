@@ -168,7 +168,10 @@ def _build_llm_stack(
             sparse=sparse,
             collection=rag_config.qdrant.collection,
         )
-        reranker = BgeReranker(model_id=rag_config.rerank.model)
+        reranker = BgeReranker(
+            model_id=rag_config.rerank.model,
+            score_floor=rag_config.rerank.score_floor,
+        )
         retriever = GroundedRetriever(
             hybrid=hybrid,
             reranker=reranker,
