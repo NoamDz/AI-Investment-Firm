@@ -104,7 +104,7 @@ Tasks are ordered for subagent-driven execution. Each task is sized to fit one f
 
 This section is first because every downstream task (router, reports, HITL) emits spans, and the test invariants for those tasks assume the span schema.
 
-- [ ] **T01: Bootstrap `firm/obs/tracer.py`** — TracerProvider + custom file exporter that writes one JSON line per span to `traces/YYYY-MM-DD/run-<run_id>.jsonl`. `run_id` = `ulid_new()` minted at CLI entry. Honor `OTEL_EXPORTER` env (`file` default; `otlp` for production). Fields per span match spec §10.1: `trace_id`, `span_id`, `parent_span_id`, `agent`, `operation`, `decision_id`, `duration_ms`, `model`, `input_tokens`, `output_tokens`, `cached_tokens`, `cost_usd`, `citations`, `failure_mode`, `status`. Test in `tests/unit/test_otel_spans.py` writes a known span and asserts every field present + JSON-parsable.
+- [ ] **T01: Bootstrap `firm/obs/tracer.py`** — TracerProvider + custom file exporter that writes one JSON line per span to `traces/YYYY-MM-DD/run-<run_id>.jsonl`. `run_id` = `ulid_new()` minted at CLI entry. Honor `OTEL_EXPORTER` env (`file` default; `otlp` for production). Default span processor is `BatchSpanProcessor` so hot-path agent code doesn't block on disk; expose `firm.obs.tracer.use_sync_exporter()` (also via `FIRM_OTEL_SYNC=1` env) that swaps in `SimpleSpanProcessor` for test determinism. Conftest enables sync mode at session scope. Fields per span match spec §10.1: `trace_id`, `span_id`, `parent_span_id`, `agent`, `operation`, `decision_id`, `duration_ms`, `model`, `input_tokens`, `output_tokens`, `cached_tokens`, `cost_usd`, `citations`, `failure_mode`, `status`. Test in `tests/unit/test_otel_spans.py` writes a known span and asserts every field present + JSON-parsable.
 
 - [ ] **T02: `firm/obs/spans.py` decorators** — `@agent_span("research")`, `@llm_span("anthropic", model)`, `@tool_span("fundamentals.get_ratio")`, `@retrieval_span("hybrid|rerank|pit")`. Each is a context manager that opens a span, sets `agent`/`operation` attrs, swallows-and-rethrows exceptions (setting `status="error"` + the exception class name on `failure_mode`). Test verifies a nested span sequence yields correct `parent_span_id` chaining.
 
@@ -134,6 +134,8 @@ This section is first because every downstream task (router, reports, HITL) emit
 
 - [ ] **T13: `--dev-ack` CLI fallback** — Keep `firm.cli.ack <decision_id>` working unchanged but require `--dev-ack` flag in non-test environments (otherwise emit a Slack reminder and exit 1). Ensures we don't accidentally ship a backdoor. Test: missing flag → exits 1; with flag → original behavior.
 
+- [ ] **T13a: Dual-key Slack secret rotation** — Extend `firm/hitl/signing.py:verify()` to accept either `FIRM_SLACK_SECRET` or optional `FIRM_SLACK_SECRET_PREVIOUS`, valid only while `FIRM_SLACK_SECRET_ROTATED_AT` is within a configurable grace window (default 24h). Logs which key matched so audit can trace rotation events. Runbook section in T29 documents the procedure: set previous → set new → wait window → unset previous. Test: valid sig under previous key during window accepted; same sig after window rejected; tampered sig rejected under both keys.
+
 - [ ] **T14: `hitl_queue.approver_id` NOT NULL** — `firm/db/schema.sql` migration: the approver_id column is currently nullable from Plan 1's stub. Tighten to NOT NULL since Slack always supplies it. Test: insertion without approver_id raises `IntegrityError`.
 
 ### Section D — Daily reports + EOD reconcile (§5.7, §10.3)
@@ -152,19 +154,25 @@ This section is first because every downstream task (router, reports, HITL) emit
 
 - [ ] **T20: `firm.rag.news.NewsCorpusSource`** — Polygon or NewsAPI client gated by `POLYGON_API_KEY` / `NEWSAPI_KEY` env. Without creds it's a no-op (logs once, returns empty iter). With creds it polls rolling 12 months for the 30-ticker universe. Test both paths.
 
+- [ ] **T20a: News rate limiting + opt-in flag** — Wrap the Polygon/NewsAPI client in `firm/rag/_rate_limit.py:TokenBucket` (4 req/min ceiling — one below Polygon free tier's 5/min cap) with exponential backoff on 429. Cache headlines per `(ticker, YYYY-MM-DD)` in SQLite so a heartbeat retry doesn't double-spend the quota. Gate the entire adapter behind `FIRM_NEWS_ENABLED` (default `false`); production env opts in explicitly. Test: 6 rapid calls → only 4 hit the wire, 2 wait; 429 response → 1 backoff before retry; disabled flag → no network call.
+
 - [ ] **T21: Multi-source `make ingest`** — Update `firm.cli ingest` to take `--source {financebench,transcripts,news,all}` (default `all`). Each source contributes chunks to the same `firm_chunks` Qdrant collection; the chunk payload carries `source: str` so retrieval can be filtered if needed. Test ingestion is order-independent and idempotent (uses the now-non-destructive `create_collection` from Plan 2's hardening).
 
 ### Section F — Litestream live
 
-- [ ] **T22: Litestream container** — Add a `litestream` service to `docker-compose.yml` running `litestream replicate` against `data/firm.db` to a `data/litestream/` directory (file destination; S3 is optional via env). Healthcheck: file destination growing. Test: integration `docker compose up firm litestream && stop firm && verify litestream caught up`.
+- [ ] **T22: Litestream container** — Add a `litestream` service to `docker-compose.yml` running `litestream replicate` against `data/firm.db` to a `data/litestream/` directory (file destination; S3 is optional via env). Healthcheck: file destination growing. Config `config/litestream.yml` sets `max-wal-size: 16MB` so a stuck checkpointer surfaces as a replication error rather than unbounded growth; `PRAGMA wal_autocheckpoint=1000` in `firm/db/__init__.py` complements this on the SQLite side. Test: integration `docker compose up firm litestream && stop firm && verify litestream caught up`.
 
-- [ ] **T23: PIT restore drill** — `docs/runbook.md` gets a "Restore from Litestream" section with exact commands. CI invariant: `make litestream-drill` (a target that restores into a temp DB and asserts row counts match) runs green.
+- [ ] **T23: PIT restore drill** — `docs/runbook.md` gets a "Restore from Litestream" section with exact commands. CI invariant: `make litestream-drill` (a target that restores into a temp DB and asserts row counts match) runs green. After the drill, an additional assertion: `os.path.getsize('data/firm.db-wal') < 16 * 1024 * 1024` — catches a paused-but-undetected replicator before it eats the disk.
+
+- [ ] **T23a: `firm doctor` health command** — New `firm.cli doctor` subcommand prints WAL size, last-checkpoint age, last-replication timestamp, Qdrant `points_count`, and cost-ledger row count for today. One line per check, `OK` / `WARN` / `FAIL` prefix. Ops wires this to monitoring (cron + alert on any non-OK line). Test: snapshot the output format against a golden fixture.
 
 ### Section G — Hardening pickups from Plan 2 audit
 
 These are the loose ends the Plan 2 audit surfaced (the four 🔴/🟡 fixes already landed inline). They are listed here so they aren't lost; each is a 1-task subagent invocation.
 
-- [ ] **T24: Parallel PM voting** — Plan 2 ran the three voters sequentially. Plan 3's OTel + cost router make parallel execution observable and cheap. Convert `make_pm.invoke` to use `asyncio.gather` over the three voters; cap concurrency at 3. Cached client must be re-entrant — verify in test. Save the latency delta into the OTel parent span.
+- [ ] **T24: Parallel PM voting** — Plan 2 ran the three voters sequentially. Plan 3's OTel + cost router make parallel execution observable and cheap. Convert `make_pm.invoke` to use `asyncio.gather` over the three voters; cap concurrency at 3. Save the latency delta into the OTel parent span.
+
+- [ ] **T24a: Cached-client thread-safety** — Prerequisite for T24. The current `CachedAnthropicClient` uses a single `sqlite3.connect(...)` from one thread. Convert to a `threading.local()` connection factory (each thread opens its own connection lazily) with a module-level `threading.Lock` only around writes — reads stay lock-free. Document the concurrency model in a `CachedAnthropicClient` class docstring. Stress test: 50 parallel `extract()` calls across 10 threads, assert no `sqlite3.ProgrammingError` and cache-hit rate matches sequential baseline.
 
 - [ ] **T25: Full FailureMode CI invariant (partial)** — Plan 2 brought coverage to 9 modes (gate UNCITED_CLAIM was deferred enum-only by design). Plan 3 adds 3 more triggering fixtures (`LLM_UNAVAILABLE`, `RECONCILIATION_DRIFT`, `SIGNED_APPROVAL_INVALID`). Leaves the last gap (UNCITED_CLAIM end-to-end) for Plan 4 because it ties into the red-team corpus.
 
@@ -212,11 +220,13 @@ These are the loose ends the Plan 2 audit surfaced (the four 🔴/🟡 fixes alr
 
 ## Risks / notes
 
-- **Parallel PM under cached client.** The cache is a single SQLite connection; re-entrant access from `asyncio.gather` needs `check_same_thread=False` on the connection, or a small connection pool. T24 should validate this with a stress test (50 parallel voter calls).
-- **Slack signing secret rotation.** The HMAC over `(decision_id, approver_id, ts)` uses a server-side secret. Rotating it invalidates pending HITL approvals. Document this in T29's runbook section.
-- **OTel exporter latency.** The file exporter is synchronous in T01 to keep tests deterministic. If span flush blocks the hot path, switch to the OTel `BatchSpanProcessor` — but only after the run-E2E test still passes.
-- **News API rate limits.** Polygon free tier is 5 req/min; the news adapter must back off respectfully. Plan 4's eval harness will rerun ingest more aggressively — if rate limits bite, gate news ingest behind a "production" env flag.
-- **Litestream's strict mode.** Litestream pauses replication if the WAL grows during a checkpoint failure. The reconcile drill should also assert WAL size < 16 MB.
+Each risk below has a planned mitigation; the right column names the task that delivers it.
+
+- **Parallel PM under cached client → T24a.** SQLite raises `ProgrammingError` if a connection is reused across threads. T24a swaps the single connection for a `threading.local()` factory with a write-only lock; T24's 50-call stress test is the regression gate.
+- **Slack signing secret rotation → T13a.** Naïve rotation invalidates every pending HITL approval in flight. T13a accepts both current and previous secret during a configurable grace window, and the T29 runbook documents the drain/swap procedure.
+- **OTel exporter latency → T01.** Synchronous file export blocks the hot path on every flush. T01 ships `BatchSpanProcessor` by default and exposes a `FIRM_OTEL_SYNC=1` test override so determinism stays available without paying for it in production.
+- **News API rate limits → T20a.** Polygon free tier caps at 5 req/min with hard burst bans. T20a adds a 4 req/min token bucket, per-day SQLite cache, exponential backoff on 429, and an opt-in `FIRM_NEWS_ENABLED` flag (default off).
+- **Litestream WAL growth → T22 + T23 + T23a.** Strict mode pauses replication during a failed checkpoint, growing the WAL unboundedly. T22 caps WAL at 16 MB via `max-wal-size` + `PRAGMA wal_autocheckpoint=1000`; T23 asserts the cap in the restore drill; T23a's `firm doctor` surfaces WAL size + last-checkpoint age for monitoring.
 
 **Explicitly deferred to Plan 4:**
 - FinanceBench-Q&A eval harness with three regime windows (spec §9.1–§9.7).
