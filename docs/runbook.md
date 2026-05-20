@@ -154,3 +154,27 @@ No re-ingest needed after a restore from a clean backup.
 ```bash
 curl -s http://localhost:6333/collections/firm_chunks | python -m json.tool | grep vectors_count
 ```
+
+---
+
+## Known Limitations
+
+### Forward-reference leakage in PIT-filtered RAG (spec §6.4)
+
+Point-in-time retrieval filters chunks by their **document-level** `published_at`
+timestamp against the run's `as_of` cursor. Forward references *inside* an
+otherwise-valid chunk — phrases like *"as we'll see in Q4…"* or *"refer to our
+upcoming guidance…"* — cannot be detected or stripped automatically, because the
+chunk itself is dated before `as_of` and the reference target may never materialize
+in the corpus.
+
+**Operator impact.** Backtests may incorporate subtly leaked forward information.
+In production, this means historical filings can mention future events that the
+agent then treats as known. Spot-check citations on flagged decisions; treat any
+research claim whose `source_quote` references a future quarter relative to
+`as_of` as suspect.
+
+**Mitigation path.** Detection would require either claim-level published_at
+tagging (deferred to Plan 3) or post-hoc forward-reference NER over `cited_text`.
+Neither is implemented in Plan 2.
+

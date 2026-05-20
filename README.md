@@ -127,6 +127,20 @@ docker compose run --rm firm python -m firm.cli ack <DECISION_ID>
 docker compose run --rm firm
 ```
 
+## Running `firm run` natively (no Docker)
+
+The `docker compose up firm` flow above sets every required environment variable
+for you. If you bypass Docker and invoke `python -m firm.cli run …` directly
+from the host, you must additionally export:
+
+```powershell
+# 32-byte hex string used as HMAC nonce secret for signed decisions.
+$env:FIRM_HMAC_SECRET = "$(python -c 'import secrets; print(secrets.token_hex(32))')"
+```
+
+Without it the CLI exits with `FIRM_HMAC_SECRET is required for the grounded
+research path.` A non-hex value also fails fast with a clear error.
+
 ## Real paper trading (Alpaca)
 
 Set in `.env`:
