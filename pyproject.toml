@@ -22,6 +22,8 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "lxml>=5.0",
     "tiktoken>=0.7",
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
 ]
 
 [project.optional-dependencies]
