@@ -93,11 +93,44 @@ def test_hitl_threshold_escalates_instead_of_passing():
     assert out.action == ActionEnum.ESCALATE
 
 
+def test_blocks_max_gross_exposure():
+    """Configure positions so gross_exposure is the limit that fires.
+
+    Per-name (10%) and sector (30%) caps inspect only the traded ticker/sector, so
+    existing positions in *other* tickers and sectors can stack to push gross above
+    100% without tripping those caps. The trade itself is a 1-share BUY in a new
+    sector ("energy") so the per-name and sector checks on AAPL/JPM/WMT don't fire.
+    """
+    proposal = _proposal("XYZ", "1")  # 1 share trade = $180, new ticker
+    positions = {
+        "AAPL": Decimal("55"),  # 55 * $180 = $9,900 — tech
+        "JPM": Decimal("55"),   # 55 * $180 = $9,900 — finance
+        "WMT": Decimal("55"),   # 55 * $180 = $9,900 — retail
+    }
+    sector_map = {"AAPL": "tech", "JPM": "finance", "WMT": "retail", "XYZ": "energy"}
+    inp = RiskInput(
+        proposal=proposal,
+        quote_price=Decimal("180"),
+        quote_age_seconds=5,
+        cash=Decimal("100000"),
+        positions=positions,
+        sector_map=sector_map,
+        trades_today=0,
+        nav=Decimal("10000"),  # NAV = $10k → existing book is ~297% gross
+        daily_pnl_pct=0.0,
+        policy=POLICY,
+    )
+    out = evaluate_risk(inp)
+    assert out.action == ActionEnum.REFUSE
+    assert out.failure_mode == FailureMode.RISK_LIMIT_BREACHED
+    assert "gross exposure" in out.payload.reason
+
+
 def test_every_limit_has_at_least_one_triggering_fixture():
     """CI invariant: each enumerated limit row must be triggered by a test above."""
     import sys
     triggered = {n for n in dir(sys.modules[__name__]) if n.startswith("test_blocks_")}
-    assert len(triggered) >= 8
+    assert len(triggered) >= 9
 
 
 # ---------------------------------------------------------------------------

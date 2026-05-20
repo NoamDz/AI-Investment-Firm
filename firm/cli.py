@@ -252,7 +252,12 @@ def run(once: bool) -> None:
         raise click.ClickException(
             "FIRM_HMAC_SECRET is required for the grounded research path."
         )
-    nonce_secret = bytes.fromhex(raw_secret)
+    try:
+        nonce_secret = bytes.fromhex(raw_secret)
+    except ValueError as e:
+        raise click.ClickException(
+            f"FIRM_HMAC_SECRET must be a hex string: {e}"
+        ) from e
 
     research = make_research(
         clock=clock,

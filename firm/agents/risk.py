@@ -133,8 +133,24 @@ def evaluate_risk(input: RiskInput) -> Decision:
     if sector_pct > p.limits.max_sector_pct:
         return _decision_from_breach(input, f"sector {sector} {sector_pct:.3f} > {p.limits.max_sector_pct}")
 
-    # max_gross_exposure: deferred — Plan 1 has no shorts, so gross == net.
-    # Re-enable when Plan 2 introduces short positions.
+    # max_gross_exposure: long-only Plan 2 has no shorts, so |position_value|
+    # collapses to position_value. Once the proposed trade is applied (BUY adds
+    # shares, SELL removes them) the sum-of-absolute-values across the book is
+    # what counts; quote_price stands in for per-ticker pricing until Plan 3.
+    projected_positions: dict[str, Decimal] = dict(input.positions)
+    if proposal.action == ActionEnum.BUY:
+        projected_positions[ticker] = cur_shares + proposal.payload.shares
+    else:
+        projected_positions[ticker] = cur_shares - proposal.payload.shares
+    gross_value = sum(
+        (abs(s) * input.quote_price for s in projected_positions.values()),
+        start=Decimal("0"),
+    )
+    gross_pct = float(gross_value / input.nav)
+    if gross_pct > p.limits.max_gross_exposure:
+        return _decision_from_breach(
+            input, f"gross exposure {gross_pct:.3f} > {p.limits.max_gross_exposure}"
+        )
 
     # HITL threshold — emit distinct reasons so audit trail is unambiguous
     if trade_pct > p.hitl.trade_threshold_pct:
