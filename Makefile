@@ -1,7 +1,7 @@
 # GnuWin32 Make defaults to cmd.exe; force bash so recipes use POSIX syntax.
 SHELL := bash
 
-.PHONY: install test demo demo-docker reconcile clean
+.PHONY: install test demo demo-docker reconcile ingest clean
 
 install:
 	pip install -e ".[dev]"
@@ -19,6 +19,9 @@ demo-docker:
 
 reconcile:
 	FIRM_HMAC_SECRET=$${FIRM_HMAC_SECRET:-placeholder} python -m firm.cli reconcile
+
+ingest:
+	FIRM_LLM_MODE=$${FIRM_LLM_MODE:-cached} python -m firm.cli ingest
 
 clean:
 	rm -rf data/firm.db data/firm.db-wal data/firm.db-shm data/reports

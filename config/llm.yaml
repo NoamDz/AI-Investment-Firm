@@ -1,0 +1,14 @@
+research:
+  model: claude-sonnet-4-6
+  max_tokens: 4096
+  temperature: 0.0
+
+judge:
+  model: claude-haiku-4-5
+  max_tokens: 2048
+  temperature: 0.0
+
+pm:
+  model: claude-sonnet-4-6
+  max_tokens: 1024
+  temperature: 0.0

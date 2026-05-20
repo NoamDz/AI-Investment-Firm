@@ -10,4 +10,4 @@ limits:
   stale_filing_days: 90
 hitl:
   trade_threshold_pct: 0.03
-  escalate_new_ticker: false  # Plan 2 will set this back to true once the LLM-backed research agent is wired in.
+  escalate_new_ticker: true

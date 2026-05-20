@@ -117,3 +117,17 @@ def test_fake_broker_get_quote_uses_clock_for_timestamp():
     assert quote.timestamp == replay_ts.isoformat(), (
         f"quote.timestamp should be replay time {replay_ts.isoformat()!r}, got {quote.timestamp!r}"
     )
+
+
+def test_initial_positions_invalid_json_raises_with_env_var_hint(monkeypatch):
+    """Malformed FIRM_INITIAL_POSITIONS surfaces a ValueError naming the env var."""
+    monkeypatch.setenv("FIRM_INITIAL_POSITIONS", "{not json")
+    with pytest.raises(ValueError, match="FIRM_INITIAL_POSITIONS is not valid JSON"):
+        FakeBroker(initial_cash=Decimal("100000"))
+
+
+def test_initial_positions_invalid_decimal_raises_with_ticker_hint(monkeypatch):
+    """Non-Decimal share value surfaces a ValueError naming the env var + ticker."""
+    monkeypatch.setenv("FIRM_INITIAL_POSITIONS", '{"AAPL": "not-a-number"}')
+    with pytest.raises(ValueError, match=r"FIRM_INITIAL_POSITIONS\['AAPL'\].*not a valid Decimal"):
+        FakeBroker(initial_cash=Decimal("100000"))

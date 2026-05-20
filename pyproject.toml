@@ -12,6 +12,16 @@ dependencies = [
     "click>=8.1",
     "structlog>=24.1",
     "alpaca-py>=0.30",  # optional broker; only imported when ALPACA selected
+    "anthropic>=0.39",
+    "qdrant-client>=1.11,<1.13",  # keep within one minor of the v1.11 server pinned in docker-compose
+    "numpy>=1.26",
+    "sentence-transformers>=3.0",
+    "einops>=0.7",  # required by nomic-embed-text-v1.5 remote modeling code
+    "datasets>=2.20",
+    "rank-bm25>=0.2.2",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+    "tiktoken>=0.7",
 ]
 
 [project.optional-dependencies]
@@ -28,6 +38,7 @@ firm = "firm.cli:main"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
+markers = ["requires_models: tests that need a downloaded model"]
 
 [tool.ruff]
 line-length = 100

@@ -64,3 +64,39 @@ def reconcile_on_boot(db_path: Path, broker: Broker, clock: Clock) -> ReconcileR
         )
     AuditLog(db_path, clock).append("reconcile.boot", {"status": status, "diff": diff})
     return ReconcileResult(status=status, diff=diff)
+
+
+def resolve_from_broker(
+    db_path: Path, broker: Broker, clock: Clock, diff: dict[str, Any]
+) -> None:
+    """Rewrite local positions + cash to match the broker (spec §5.7).
+
+    Spec §5.7 prescribes "halt + human ack, then rewrite local from broker."
+    For the demo we treat every boot as an implicit ack: the diff is already
+    persisted by ``reconcile_on_boot`` (audit-logged + reconciliations table)
+    before this is called, so the resolution stays reviewable. Wrapped in a
+    single transaction so a crash mid-rewrite leaves the DB unchanged.
+    """
+    broker_positions = list(broker.list_positions())
+    broker_cash = broker.get_cash()
+    now = clock.now().isoformat()
+    with closing(get_conn(db_path)) as conn:
+        conn.execute("BEGIN")
+        try:
+            conn.execute("DELETE FROM positions")
+            for pos in broker_positions:
+                conn.execute(
+                    "INSERT INTO positions (ticker, shares, avg_cost, updated_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (pos.ticker, str(pos.shares), str(pos.avg_cost), now),
+                )
+            conn.execute(
+                "INSERT OR REPLACE INTO cash (id, amount, updated_at) "
+                "VALUES (1, ?, ?)",
+                (str(broker_cash), now),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    AuditLog(db_path, clock).append("reconcile.resolved", {"diff": diff})

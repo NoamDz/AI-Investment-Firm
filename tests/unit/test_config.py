@@ -1,5 +1,14 @@
 from pathlib import Path
-from firm.core.config import PolicyConfig, UniverseConfig, load_policy, load_universe
+from firm.core.config import (
+    LlmConfig,
+    PolicyConfig,
+    RagConfig,
+    UniverseConfig,
+    load_llm_config,
+    load_policy,
+    load_rag_config,
+    load_universe,
+)
 
 
 def test_load_policy_from_repo():
@@ -100,3 +109,23 @@ def test_universe_rejects_orphan_sector_map_key(tmp_path: Path):
     import pytest
     with pytest.raises(ValueError, match="EXTRA"):
         load_universe(bad)
+
+
+def test_load_rag_config_from_repo():
+    cfg = load_rag_config(Path("config/rag.yaml"))
+    assert isinstance(cfg, RagConfig)
+    assert cfg.corpus.financebench.split != ""
+    assert cfg.embedding.dense_model != ""
+    assert cfg.retrieval.top_k_retrieve == 50
+    assert cfg.retrieval.top_k_rerank == 8
+
+
+def test_load_llm_config_from_repo():
+    cfg = load_llm_config(Path("config/llm.yaml"))
+    assert isinstance(cfg, LlmConfig)
+    assert cfg.research.model != ""
+    assert cfg.judge.model != ""
+    assert cfg.pm.model != ""
+    assert cfg.research.max_tokens == 4096
+    assert cfg.judge.max_tokens == 2048
+    assert cfg.pm.max_tokens == 1024

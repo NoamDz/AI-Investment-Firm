@@ -120,3 +120,27 @@ def test_hitl_resume_after_approval_sees_approved_status(tmp_path: Path):
 
     resumed = hitl({"risk_decision": d})
     assert resumed == {"hitl_required": True, "hitl_approved": True}
+
+
+def test_mark_approved_pre_queue_emits_audit_event(tmp_path: Path):
+    """Pre-approve path (no prior 'pending' row) must still write hitl.approved."""
+    db = tmp_path / "test.db"
+    init_db(db)
+    clock = ReplayClock(datetime(2024, 3, 13, tzinfo=timezone.utc))
+    d = _risk_escalation()
+    _persist_decision(db, d, clock)
+
+    # Call mark_approved WITHOUT first invoking hitl — exercises the
+    # INSERT OR IGNORE 'approved' pre-queue path used by T31.
+    mark_approved(db_path=db, decision_id=d.id, approver="t31-test", clock=clock)
+
+    with closing(get_conn(db)) as conn:
+        row = conn.execute(
+            "SELECT status FROM hitl_queue WHERE decision_id=?", (d.id,)
+        ).fetchone()
+        audit = conn.execute(
+            "SELECT COUNT(*) AS n FROM audit_log WHERE event='hitl.approved' AND detail LIKE ?",
+            (f"%{d.id}%",),
+        ).fetchone()["n"]
+    assert row["status"] == "approved"
+    assert audit == 1, "hitl.approved audit event missing on pre-approve path"

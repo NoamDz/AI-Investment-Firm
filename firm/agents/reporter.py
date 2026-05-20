@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from contextlib import closing
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -10,6 +11,21 @@ from firm.core.clock import Clock
 from firm.core.models import Decision
 from firm.db.connection import get_conn
 from firm.orchestrator.state import WorkingState
+
+
+def _json_default(obj: Any) -> Any:
+    """``json.dumps`` fallback for non-primitive types in WorkingState values.
+
+    LangGraph state may contain plain datetime/date objects nested inside
+    ``model_dump()`` output (which does not stringify datetimes by default).
+    Convert them to ISO 8601 strings so the JSONL stays serialisable; other
+    unknown types fall back to ``repr()`` rather than raising.
+    """
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump(mode="json")
+    return repr(obj)
 
 
 def _persist_decisions_from_state(state: WorkingState | dict[str, Any], db_path: Path, clock: Clock) -> None:
@@ -62,7 +78,7 @@ def make_reporter(
         for k, v in state.items():
             payload[k] = _serialize_value(v)
         with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(payload) + "\n")
+            f.write(json.dumps(payload, default=_json_default) + "\n")
         if db_path is not None:
             _persist_decisions_from_state(state, db_path, clock)
         return {"report_path": str(path)}

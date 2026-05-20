@@ -1,0 +1,289 @@
+"""Tests for firm.rag.qdrant_store — T10 spec compliance."""
+from __future__ import annotations
+
+import warnings
+from datetime import datetime, timezone
+
+import pytest
+
+pytest.importorskip("qdrant_client.local.qdrant_local")
+
+from qdrant_client import QdrantClient  # noqa: E402
+
+from firm.rag.chunk import Chunk  # noqa: E402
+
+
+def _make_client() -> QdrantClient:
+    return QdrantClient(":memory:")
+
+
+def _make_chunk(chunk_id: str, ticker: str, published_at: datetime) -> Chunk:
+    return Chunk(
+        id=chunk_id,
+        doc_id="test-doc",
+        ticker=ticker,
+        published_at=published_at,
+        section="body",
+        text=f"Text for {chunk_id}",
+        char_span=(0, 20),
+        token_count=5,
+    )
+
+
+# ---------------------------------------------------------------------------
+# T10-test-1
+# ---------------------------------------------------------------------------
+
+
+def test_create_collection_with_named_vectors() -> None:
+    from firm.rag.qdrant_store import VectorStore
+
+    client = _make_client()
+    store = VectorStore(client)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        store.create_collection("test_col", dense_dim=768)
+
+    info = client.get_collection("test_col")
+    vectors = info.config.params.vectors
+    sparse_vectors = info.config.params.sparse_vectors
+
+    assert isinstance(vectors, dict), "vectors_config must be a named-vector dict"
+    assert "dense" in vectors, "dense vector not found"
+    assert vectors["dense"].size == 768
+    assert sparse_vectors is not None, "sparse_vectors must be configured"
+    assert "sparse" in sparse_vectors, "sparse vector not found"
+
+
+# ---------------------------------------------------------------------------
+# T10-test-2
+# ---------------------------------------------------------------------------
+
+
+def test_upsert_then_search_returns_chunk_id() -> None:
+    from firm.rag.qdrant_store import VectorStore
+
+    client = _make_client()
+    store = VectorStore(client)
+    utc = timezone.utc
+    published = datetime(2023, 6, 1, tzinfo=utc)
+
+    chunks = [
+        _make_chunk("aapl-10k::0001", "AAPL", published),
+        _make_chunk("aapl-10k::0002", "AAPL", published),
+        _make_chunk("aapl-10k::0003", "AAPL", published),
+    ]
+
+    dim = 4
+    dense_vecs: list[list[float]] = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+    ]
+    sparse_vecs: list[dict[int, float]] = [
+        {0: 1.0},
+        {1: 1.0},
+        {2: 1.0},
+    ]
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        store.create_collection("chunks", dense_dim=dim)
+        store.upsert("chunks", chunks, dense_vecs, sparse_vecs)
+
+    results = store.search_dense(
+        "chunks",
+        [1.0, 0.0, 0.0, 0.0],
+        k=2,
+        published_before=datetime(2024, 1, 1, tzinfo=utc),
+    )
+
+    assert len(results) > 0, "search returned no results"
+    # Query [1,0,0,0] is identical to chunk-1's dense vec — it must rank #1 by cosine.
+    assert results[0]["chunk_id"] == "aapl-10k::0001", (
+        f"expected aapl-10k::0001 as top hit by cosine similarity; got {results[0]['chunk_id']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# T10-test-3
+# ---------------------------------------------------------------------------
+
+
+def test_payload_filter_published_at_excludes_future() -> None:
+    from firm.rag.qdrant_store import VectorStore
+
+    client = _make_client()
+    store = VectorStore(client)
+    utc = timezone.utc
+
+    past_chunk = _make_chunk("doc::0001", "AAPL", datetime(2023, 1, 1, tzinfo=utc))
+    future_chunk = _make_chunk("doc::0002", "AAPL", datetime(2025, 1, 1, tzinfo=utc))
+
+    dense_vecs: list[list[float]] = [
+        [1.0, 0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+    ]
+    sparse_vecs: list[dict[int, float]] = [
+        {0: 1.0},
+        {0: 1.0},
+    ]
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        store.create_collection("pit_test", dense_dim=4)
+        store.upsert("pit_test", [past_chunk, future_chunk], dense_vecs, sparse_vecs)
+
+    cutoff = datetime(2024, 1, 1, tzinfo=utc)
+    results = store.search_dense("pit_test", [1.0, 0.0, 0.0, 0.0], k=10, published_before=cutoff)
+
+    returned_ids = {r["chunk_id"] for r in results}
+    assert "doc::0001" in returned_ids, "past chunk should be returned"
+    assert "doc::0002" not in returned_ids, "future chunk must be excluded by PIT filter"
+
+
+# ---------------------------------------------------------------------------
+# Length-mismatch guard
+# ---------------------------------------------------------------------------
+
+
+def test_upsert_rejects_length_mismatch() -> None:
+    from firm.rag.qdrant_store import VectorStore
+
+    client = _make_client()
+    store = VectorStore(client)
+    utc = timezone.utc
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        store.create_collection("mismatch", dense_dim=4)
+
+    chunks = [_make_chunk("doc::0001", "AAPL", datetime(2023, 1, 1, tzinfo=utc))]
+    dense_vecs: list[list[float]] = []  # length 0, not 1
+    sparse_vecs: list[dict[int, float]] = [{}]
+
+    with pytest.raises(ValueError, match="length mismatch"):
+        store.upsert("mismatch", chunks, dense_vecs, sparse_vecs)
+
+
+# ---------------------------------------------------------------------------
+# doc_exists — used by the ingest pipeline for resumability
+# ---------------------------------------------------------------------------
+
+
+def test_upsert_stores_char_span_and_token_count_in_payload() -> None:
+    """T12 prerequisite: payload must carry char_span (list[int]) and token_count.
+
+    The retriever needs these fields to reconstruct a Chunk from a scroll result,
+    since the Chunk pydantic model declares them as required.
+    """
+    from firm.rag.qdrant_store import VectorStore
+
+    client = _make_client()
+    store = VectorStore(client)
+    utc = timezone.utc
+    published = datetime(2023, 6, 1, tzinfo=utc)
+
+    chunk = Chunk(
+        id="payload-doc::0001",
+        doc_id="payload-doc",
+        ticker="AAPL",
+        published_at=published,
+        section="body",
+        text="payload reconstruction test",
+        char_span=(13, 42),
+        token_count=7,
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        store.create_collection("payload_col", dense_dim=4)
+        store.upsert("payload_col", [chunk], [[1.0, 0.0, 0.0, 0.0]], [{0: 1.0}])
+
+    points, _ = client.scroll(
+        collection_name="payload_col",
+        limit=10,
+        with_payload=True,
+        with_vectors=False,
+    )
+    assert len(points) == 1
+    payload = points[0].payload
+    assert payload is not None
+    assert payload.get("char_span") == [13, 42], "char_span must be stored as list[int]"
+    assert payload.get("token_count") == 7
+
+
+def test_doc_exists() -> None:
+    from firm.rag.qdrant_store import VectorStore
+
+    client = _make_client()
+    store = VectorStore(client)
+    utc = timezone.utc
+    published = datetime(2023, 6, 1, tzinfo=utc)
+
+    chunk = Chunk(
+        id="doc-a::0001",
+        doc_id="doc-a",
+        ticker="AAPL",
+        published_at=published,
+        section="body",
+        text="text-a",
+        char_span=(0, 6),
+        token_count=2,
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        store.create_collection("exists_col", dense_dim=4)
+
+    # Before any upsert: no document exists.
+    assert store.doc_exists("exists_col", "doc-a") is False
+
+    store.upsert("exists_col", [chunk], [[1.0, 0.0, 0.0, 0.0]], [{0: 1.0}])
+
+    # After upsert: known doc_id resolves True, unknown stays False.
+    assert store.doc_exists("exists_col", "doc-a") is True
+    assert store.doc_exists("exists_col", "doc-missing") is False
+
+
+def test_create_collection_is_idempotent_and_preserves_data() -> None:
+    """A second create_collection call must NOT wipe existing points.
+
+    Regression for a bug where ``create_collection`` called Qdrant's
+    ``recreate_collection`` unconditionally — every ``firm ingest`` invocation
+    silently dropped the previously-indexed corpus, making the per-doc
+    ``doc_exists`` skip dead code in production.
+    """
+    from firm.rag.qdrant_store import VectorStore
+
+    client = _make_client()
+    store = VectorStore(client)
+    utc = timezone.utc
+    published = datetime(2023, 6, 1, tzinfo=utc)
+    chunk = _make_chunk("preserve::0001", "AAPL", published)
+
+    store.create_collection("preserve_col", dense_dim=4)
+    store.upsert("preserve_col", [chunk], [[1.0, 0.0, 0.0, 0.0]], [{0: 1.0}])
+    assert store.doc_exists("preserve_col", "test-doc") is True
+
+    # Second call must be a no-op — points must survive.
+    store.create_collection("preserve_col", dense_dim=4)
+    assert store.doc_exists("preserve_col", "test-doc") is True
+
+
+def test_create_collection_force_recreates() -> None:
+    """``force=True`` drops the collection and rebuilds it empty."""
+    from firm.rag.qdrant_store import VectorStore
+
+    client = _make_client()
+    store = VectorStore(client)
+    utc = timezone.utc
+    published = datetime(2023, 6, 1, tzinfo=utc)
+    chunk = _make_chunk("force::0001", "AAPL", published)
+
+    store.create_collection("force_col", dense_dim=4)
+    store.upsert("force_col", [chunk], [[1.0, 0.0, 0.0, 0.0]], [{0: 1.0}])
+    assert store.doc_exists("force_col", "test-doc") is True
+
+    store.create_collection("force_col", dense_dim=4, force=True)
+    assert store.doc_exists("force_col", "test-doc") is False

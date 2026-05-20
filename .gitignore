@@ -11,6 +11,7 @@ data/firm.db-shm
 data/backups/
 data/qdrant/
 data/reports/
+data/precomputed/
 .env
 .env.local
 *.egg-info/
@@ -22,4 +23,5 @@ htmlcov/
 .vscode/
 .DS_Store
 logs/
+*.log
 artifacts/

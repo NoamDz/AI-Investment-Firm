@@ -21,6 +21,7 @@ _FIRM_SERDE = JsonPlusSerializer(
     allowed_msgpack_modules=[
         ("firm.core.models", "Decision"),
         ("firm.core.models", "ActionEnum"),
+        ("firm.core.models", "FailureMode"),
     ]
 )
 

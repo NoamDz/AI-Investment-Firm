@@ -3,7 +3,7 @@ from pathlib import Path
 
 from firm.agents.risk import RiskInput, evaluate_risk
 from firm.core.config import load_policy
-from firm.core.models import ActionEnum, BuyPayload, Decision
+from firm.core.models import ActionEnum, BuyPayload, Decision, FailureMode
 
 POLICY = load_policy(Path("config/policy.yaml"))
 
@@ -93,8 +93,93 @@ def test_hitl_threshold_escalates_instead_of_passing():
     assert out.action == ActionEnum.ESCALATE
 
 
+def test_blocks_max_gross_exposure():
+    """Configure positions so gross_exposure is the limit that fires.
+
+    Per-name (10%) and sector (30%) caps inspect only the traded ticker/sector, so
+    existing positions in *other* tickers and sectors can stack to push gross above
+    100% without tripping those caps. The trade itself is a 1-share BUY in a new
+    sector ("energy") so the per-name and sector checks on AAPL/JPM/WMT don't fire.
+    """
+    proposal = _proposal("XYZ", "1")  # 1 share trade = $180, new ticker
+    positions = {
+        "AAPL": Decimal("55"),  # 55 * $180 = $9,900 — tech
+        "JPM": Decimal("55"),   # 55 * $180 = $9,900 — finance
+        "WMT": Decimal("55"),   # 55 * $180 = $9,900 — retail
+    }
+    sector_map = {"AAPL": "tech", "JPM": "finance", "WMT": "retail", "XYZ": "energy"}
+    inp = RiskInput(
+        proposal=proposal,
+        quote_price=Decimal("180"),
+        quote_age_seconds=5,
+        cash=Decimal("100000"),
+        positions=positions,
+        sector_map=sector_map,
+        trades_today=0,
+        nav=Decimal("10000"),  # NAV = $10k → existing book is ~297% gross
+        daily_pnl_pct=0.0,
+        policy=POLICY,
+    )
+    out = evaluate_risk(inp)
+    assert out.action == ActionEnum.REFUSE
+    assert out.failure_mode == FailureMode.RISK_LIMIT_BREACHED
+    assert "gross exposure" in out.payload.reason
+
+
 def test_every_limit_has_at_least_one_triggering_fixture():
     """CI invariant: each enumerated limit row must be triggered by a test above."""
     import sys
     triggered = {n for n in dir(sys.modules[__name__]) if n.startswith("test_blocks_")}
-    assert len(triggered) >= 7
+    assert len(triggered) >= 9
+
+
+# ---------------------------------------------------------------------------
+# T29a: stale_filing_days enforcement via Decision.metadata
+# ---------------------------------------------------------------------------
+
+def _make_input_with_filing_age(oldest_filing_age_days: int | None) -> RiskInput:
+    """Return a RiskInput whose proposal carries oldest_filing_age_days in metadata."""
+    base = _make_input(positions={"AAPL": Decimal("1")})
+    if oldest_filing_age_days is None:
+        new_metadata: dict = {}
+    else:
+        new_metadata = {"oldest_filing_age_days": oldest_filing_age_days}
+    updated_proposal = base.proposal.model_copy(update={"metadata": new_metadata})
+    return RiskInput(
+        proposal=updated_proposal,
+        quote_price=base.quote_price,
+        quote_age_seconds=base.quote_age_seconds,
+        cash=base.cash,
+        positions=base.positions,
+        sector_map=base.sector_map,
+        trades_today=base.trades_today,
+        nav=base.nav,
+        daily_pnl_pct=base.daily_pnl_pct,
+        policy=base.policy,
+    )
+
+
+def test_blocks_stale_filing():
+    """oldest_filing_age_days=120 > stale_filing_days=90 → REFUSE with STALE_DATA."""
+    out = evaluate_risk(_make_input_with_filing_age(120))
+    assert out.action == ActionEnum.REFUSE
+    assert out.failure_mode is not None
+    assert out.failure_mode.value == "stale_data"
+
+
+def test_passes_when_filing_age_within_limit():
+    """oldest_filing_age_days=30 < stale_filing_days=90 → passes (BUY)."""
+    out = evaluate_risk(_make_input_with_filing_age(30))
+    assert out.action == ActionEnum.BUY
+
+
+def test_filing_age_missing_metadata_is_not_a_breach():
+    """Absent oldest_filing_age_days key must NOT trigger STALE_DATA.
+
+    This preserves Plan 1's HOLD/REFUSE pass-through invariant: when no grounded
+    research chunks were retrieved, the key is simply absent and Risk must not refuse.
+    """
+    out = evaluate_risk(_make_input_with_filing_age(None))
+    assert out.failure_mode != FailureMode.STALE_DATA
+    # The underlying proposal is a valid BUY that passes all other limits.
+    assert out.action == ActionEnum.BUY
