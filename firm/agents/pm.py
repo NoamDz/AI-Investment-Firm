@@ -470,29 +470,42 @@ async def _vote_parallel(
     claims: list[Claim],
     research_rationale: str,
     voter_model: str,
-) -> list[PmVote]:
+) -> tuple[list[PmVote], list[float]]:
     """Run three single-lens voters concurrently via asyncio.gather + to_thread.
 
     Concurrency cap = 3 (one task per lens). Each task wraps voter.vote in its
     own llm_span so per-call cost/timing attribution survives.  OTel ContextVars
     are propagated by asyncio.to_thread so each llm_span nests under the caller's
     agent_span("pm") context.
+
+    Returns
+    -------
+    tuple
+        ``(votes, per_voter_ms)``.  ``per_voter_ms[i]`` is the wall-clock
+        cost of the i-th voter's call (in the same order as ``votes``) so
+        the caller can stamp the OTel parent span with a measurement-based
+        sequential-estimate instead of a multiplicative guess.
     """
 
-    def _one(lens: PmLens) -> PmVote:
+    def _one(lens: PmLens) -> tuple[PmVote, float]:
+        t0 = time.perf_counter()
         with llm_span(_PROVIDER_ANTHROPIC, voter_model):
-            return voter.vote(
+            vote = voter.vote(
                 lens=lens,
                 question=question,
                 claims=claims,
                 research_rationale=research_rationale,
             )
+        return vote, (time.perf_counter() - t0) * 1000.0
 
     coros = [
         asyncio.to_thread(_one, lens)
         for lens in (PmLens.QUALITY, PmLens.VALUATION, PmLens.CATALYST)
     ]
-    return list(await asyncio.gather(*coros))
+    results = list(await asyncio.gather(*coros))
+    votes = [r[0] for r in results]
+    per_voter_ms = [r[1] for r in results]
+    return votes, per_voter_ms
 
 
 def make_pm(
@@ -617,8 +630,9 @@ def make_pm(
 
             t_start = time.perf_counter()
             votes: list[PmVote] = []
+            per_voter_ms: list[float] = []
             try:
-                votes = asyncio.run(
+                votes, per_voter_ms = asyncio.run(
                     _vote_parallel(
                         voter,
                         question=question,
@@ -685,18 +699,19 @@ def make_pm(
                 }
 
             # Spec T24: stamp parent span with parallel timing so the OTel
-            # collector surfaces the wall-clock savings.
-            # sequential_estimate = parallel_actual * 3 (three serial voter
-            # calls at the same per-call latency).  For cached hits the delta
-            # is near zero — an honest signal, not noise.
+            # collector surfaces the wall-clock savings.  sequential_estimate
+            # is the sum of per-voter elapsed times (measured, not multiplied)
+            # so cached/live mixes report the honest delta.
             parallel_elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+            sequential_estimate_ms = sum(per_voter_ms)
             span.set_attribute("pm.voter_count", 3)
             span.set_attribute("pm.parallel_ms", round(parallel_elapsed_ms, 2))
             span.set_attribute(
-                "pm.sequential_estimate_ms", round(parallel_elapsed_ms * 3, 2)
+                "pm.sequential_estimate_ms", round(sequential_estimate_ms, 2)
             )
             span.set_attribute(
-                "pm.latency_delta_ms", round(parallel_elapsed_ms * 2, 2)
+                "pm.latency_delta_ms",
+                round(sequential_estimate_ms - parallel_elapsed_ms, 2),
             )
 
             action, confidence, combined_rationale, fmode = aggregate_votes(votes)
