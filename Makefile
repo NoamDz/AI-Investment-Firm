@@ -38,6 +38,10 @@ check-determinism:
 red-team:
 	python -m firm.cli red-team
 
+# REGIME (optional) lets the caller scope `make eval` to a single regime
+# (e.g. `make eval REGIME=r1` for PR-speed CI). When unset, firm.cli eval
+# runs the full r1+r2+r3 sweep — preserving the historical default for
+# `make eval` callers that don't pass REGIME.
 eval:
 	FIRM_LLM_MODE=$${FIRM_LLM_MODE:-cached} \
 	FIRM_VCR_MODE=$${FIRM_VCR_MODE:-replay} \
@@ -45,4 +49,4 @@ eval:
 	FIRM_RANDOM_SEED=$${FIRM_RANDOM_SEED:-42} \
 	FIRM_HMAC_SECRET=$${FIRM_HMAC_SECRET:-$$(printf '00%.0s' {1..32})} \
 	FIRM_EVAL_SKIP_MISCONFIG=$${FIRM_EVAL_SKIP_MISCONFIG:-1} \
-	python -m firm.cli eval
+	python -m firm.cli eval $(if $(REGIME),--regime $(REGIME))
