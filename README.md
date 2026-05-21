@@ -2,6 +2,10 @@
 
 Multi-agent paper-trading firm. Take-home for Cato Networks — Agentic AI Engineer.
 
+[![PR CI](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/pr.yml/badge.svg)](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/pr.yml)
+[![Main CI](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/main.yml/badge.svg?branch=main)](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/main.yml)
+[![Release](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/release.yml/badge.svg)](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/release.yml)
+
 ## Quickstart (hybrid: GPU ingest on host → container runtime)
 
 Embedding the FinanceBench corpus is the only heavy step. We do it on the host so it
