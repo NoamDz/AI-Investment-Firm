@@ -145,6 +145,79 @@ to repopulate the cache before switching back to `cached` mode.
 
 ---
 
+## Re-recording eval cassettes
+
+`make eval` runs in REPLAY mode (no network) and depends on two committed
+artifacts: YAML cassettes under `tests/eval/cassettes/<regime>/` and price
+parquets under `data/eval/prices/`. Both are captured by a one-time
+operator-run script — `scripts/eval_capture.py` — which is the ONLY
+sanctioned way to (re)populate them.
+
+### When to re-record
+
+* After any prompt change that flows through the eval harness (system
+  prompts, voter rubrics, citation enforcement instructions).
+* After a model upgrade (e.g., Sonnet 4.6 → 4.7) — the cassette key is
+  model-aware, so a stale cassette manifests as a `CassetteMissError`.
+* When adding a new regime to `firm/eval/regimes.py`.
+* When the SPY / basket benchmark window in `firm/eval/regimes.py` changes.
+
+### Prerequisites
+
+* `ANTHROPIC_API_KEY` exported in the environment.
+* Working network access to `api.anthropic.com` + Yahoo Finance.
+* Estimated cost: ~$1-3 per regime (3 regimes total). Use `--dry-run` to
+  preview before spending budget.
+
+### Command
+
+```bash
+# Preview the plan first (no API calls, no key required):
+python scripts/eval_capture.py --regime all --dry-run
+
+# Then capture for real (will prompt for cost confirmation):
+python scripts/eval_capture.py --regime all
+
+# Or capture a single regime + skip the prompt for non-interactive runs:
+python scripts/eval_capture.py --regime r1 --yes
+```
+
+Each regime is launched in its own subprocess with `FIRM_LLM_MODE=record`,
+`FIRM_VCR_MODE=record`, and `FIRM_PRICES_MODE=record`. The subprocess
+boundary keeps env mutations from leaking across regimes.
+
+### What gets written
+
+| Path | Committed? | Notes |
+|------|-----------|-------|
+| `tests/eval/cassettes/<regime_id>/*.yaml` | YES | One YAML per unique `(model, system, messages, tools)` tuple. |
+| `data/eval/prices/<TICKER>.parquet` | YES | Adjusted closes from yfinance; one parquet per ticker (idempotent). |
+| `data/captured/<regime_id>/` | NO | Throwaway eval reports; safe to delete after verification. |
+
+### Verify
+
+After committing the cassettes + parquets, confirm replay-mode `make eval`
+succeeds without network:
+
+```bash
+# Optionally drop network access (Linux): unshare -n make eval
+make eval
+```
+
+Eval reports should land under `reports/eval/` with non-empty regime files
+and a populated `summary.md`.
+
+### DO NOT
+
+* **DO NOT** run `scripts/eval_capture.py` in CI. It would burn API budget
+  on every push and isn't deterministic across recordings.
+* **DO NOT** add a `make eval-capture` target. Capture is operator-triggered
+  by design — Makefile targets invite muscle-memory re-runs.
+* **DO NOT** commit `data/captured/`. Only the cassettes + parquets are
+  reproducibility-critical; the captured reports are byproducts.
+
+---
+
 ## Qdrant volume backup
 
 The Qdrant data is stored in the named Docker volume `qdrant_data`
