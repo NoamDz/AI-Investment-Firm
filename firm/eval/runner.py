@@ -124,10 +124,13 @@ def _format_header_dates(start: date, end: date) -> str:
     branch is kept for robustness so the template never has to think about
     date math.
     """
+    if start.year != end.year:
+        raise ValueError("cross-year windows not supported by _format_header_dates")
     if start.year == end.year and start.month == end.month:
         return f"{start.strftime('%b')} {start.day}–{end.day}, {start.year}"
-    # Cross-month (or cross-year) fallback. Year of ``start`` is the report
-    # year by convention; cross-year regimes aren't a configured shape.
+    # Cross-month fallback. Year of ``start`` is the report year by
+    # convention; cross-year regimes aren't a configured shape and are
+    # rejected above.
     return (
         f"{start.strftime('%b')} {start.day} – "
         f"{end.strftime('%b')} {end.day}, {start.year}"

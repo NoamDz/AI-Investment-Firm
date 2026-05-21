@@ -38,6 +38,7 @@ _GOLDEN_PATH = Path(__file__).resolve().parent / "fixtures" / "golden_regime_rep
 # Mirror of ``tests.eval.test_runner._REQUIRED_SECTION_HEADERS``. Duplicated
 # (rather than imported) so the contract is asserted independently — if
 # someone weakens the runner-side list this test still fails.
+# Keep in sync with tests/eval/test_runner.py:_REQUIRED_SECTION_HEADERS
 _REQUIRED_SECTION_HEADERS = (
     "EVAL REPORT — Replay smoke test across 3 regimes",
     "REGIME",
