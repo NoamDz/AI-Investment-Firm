@@ -1,0 +1,60 @@
+{# Multi-regime cross-cutting report (Plan 4 §T14, spec §9.7).
+
+   Rendered by T15's ``firm eval --regime all`` after every regime's
+   ``run_regime`` has completed. Loops over a list of regime-summary
+   dicts, then emits ONE aggregated PROCESS METRICS block + the
+   hard-coded NOT MEASURED block.
+
+   Context contract (T15 must produce):
+
+     regimes              : list[dict] — one entry per regime, each with:
+                              regime_number : int   (1-based)
+                              header_dates  : str   ("Mon dd–dd, YYYY")
+                              description   : str   ("earnings-heavy")
+                              perf          : dict  (same shape as regime.md.j2)
+     aggregated_metrics   : list[MetricResult] — cross-regime aggregation in
+                              spec §9.5 order. The labelling + formatting
+                              rules mirror regime.md.j2.
+
+   This template intentionally does NOT depend on the runner-side context
+   shape used by regime.md.j2 — T15 owns the wiring and may reshape per
+   regime before calling here.
+#}
+{%- set labels = {
+    "groundedness": "Groundedness",
+    "decision_discipline": "Decision discipline",
+    "citation_diversity": "Citation diversity",
+    "reversal_rate": "Reversal rate",
+    "risk_policy_compliance": "Privileged-action attempts",
+    "hitl_correctness": "HITL correctness",
+    "schema_rejections": "Schema rejections",
+    "red_team_pass": "Red-team pass",
+    "sufficiency_gate": "Sufficiency gate",
+    "failure_mode_coverage": "FailureMode coverage",
+} -%}
+{%- set pct_metrics = ("groundedness", "reversal_rate") -%}
+EVAL REPORT — Replay smoke test across 3 regimes
+{% for r in regimes %}
+REGIME {{ r.regime_number }}: {{ r.header_dates }} ({{ r.description }})
+  {{ "%-23s"|format("Total return:") }} {{ "%+.1f"|format(r.perf.total_return_pct) }}%
+  {{ "%-23s"|format("vs SPY (primary):") }} {{ "%+.1f"|format(r.perf.vs_spy_pp) }}pp (SPY: {{ "%+.1f"|format(r.perf.spy_return_pct) }}%)
+  {{ "%-23s"|format("vs equal-weight basket:") }} {{ "%+.1f"|format(r.perf.vs_basket_pp) }}pp (basket: {{ "%+.1f"|format(r.perf.basket_return_pct) }}%)
+  {{ "%-23s"|format("Per-trade returns:") }} {{ r.perf.per_trade_returns_str }}
+  {{ "%-23s"|format("Hit rate:") }} {{ r.perf.hit_rate_str }}
+{% endfor %}
+PROCESS METRICS (aggregated)
+{%- for m in aggregated_metrics %}
+{%- set label = labels.get(m.name, m.name) %}
+{%- if m.name in pct_metrics %}
+  {{ "%-30s"|format(label ~ ":") }} {{ "%.1f"|format(m.value) }}%
+{%- else %}
+  {{ "%-30s"|format(label ~ ":") }} {{ m.value }}
+{%- endif %}
+{%- endfor %}
+
+NOT MEASURED
+  - Investment quality / alpha — N too small
+  - Generalization beyond 3 declared regimes
+  - Real-world fill quality — paper sim
+  - Forward references inside chunks — known RAG limitation
+  - Long-horizon learning effects — journal too sparse

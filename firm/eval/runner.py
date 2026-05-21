@@ -115,6 +115,25 @@ def _load_template() -> Any:
     return env.get_template("regime.md.j2")
 
 
+def _format_header_dates(start: date, end: date) -> str:
+    """Format ``start..end`` as ``Mon dd–dd, YYYY`` (en-dash U+2013).
+
+    Same-month windows collapse to a single ``Mon`` prefix; cross-month
+    windows fall back to ``Mon dd – Mon dd, YYYY``. Days have no leading
+    zero. The 3 fixed regimes are all single-month, but the cross-month
+    branch is kept for robustness so the template never has to think about
+    date math.
+    """
+    if start.year == end.year and start.month == end.month:
+        return f"{start.strftime('%b')} {start.day}–{end.day}, {start.year}"
+    # Cross-month (or cross-year) fallback. Year of ``start`` is the report
+    # year by convention; cross-year regimes aren't a configured shape.
+    return (
+        f"{start.strftime('%b')} {start.day} – "
+        f"{end.strftime('%b')} {end.day}, {start.year}"
+    )
+
+
 def _parse_date_from_iso(ts: str) -> date:
     # Audit-log ts is a tz-aware ISO 8601 string emitted by AuditLog.append;
     # ``datetime.fromisoformat`` accepts that shape on Python 3.11+.
@@ -497,6 +516,7 @@ def run_regime(
         description=config.description,
         start_date=config.start_date.isoformat(),
         end_date=config.end_date.isoformat(),
+        header_dates=_format_header_dates(config.start_date, config.end_date),
         perf=perf,
         process_metrics=process_metrics,
         num_days=num_days,
