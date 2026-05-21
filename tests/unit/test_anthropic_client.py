@@ -300,6 +300,7 @@ def test_live_or_record_without_api_key_raises(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.vcr_replay
 def test_from_env_vcr_mode_wires_cassette_client(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
