@@ -7,9 +7,12 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from opentelemetry import trace
+
 from firm.core.clock import Clock
 from firm.core.models import Decision
 from firm.db.connection import get_conn
+from firm.obs import agent_span
 from firm.orchestrator.state import WorkingState
 
 
@@ -70,16 +73,33 @@ def make_reporter(
     *, reports_root: Path, clock: Clock, db_path: Path | None = None
 ) -> Callable[[WorkingState], dict[str, Any]]:
     def reporter(state: WorkingState) -> dict[str, Any]:
-        now = clock.now()
-        date_dir = reports_root / now.strftime("%Y-%m-%d")
-        date_dir.mkdir(parents=True, exist_ok=True)
-        path = date_dir / "decisions.jsonl"
-        payload: dict[str, Any] = {"ts": now.isoformat()}
-        for k, v in state.items():
-            payload[k] = _serialize_value(v)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, default=_json_default) + "\n")
-        if db_path is not None:
-            _persist_decisions_from_state(state, db_path, clock)
-        return {"report_path": str(path)}
+        # Wrap in ``agent.reporter`` so (a) the per-heartbeat span trail is
+        # complete and (b) ``get_current_span()`` below reports the trace_id
+        # we want to embed in the JSONL row.
+        with agent_span("reporter"):
+            now = clock.now()
+            date_dir = reports_root / now.strftime("%Y-%m-%d")
+            date_dir.mkdir(parents=True, exist_ok=True)
+            path = date_dir / "decisions.jsonl"
+            payload: dict[str, Any] = {"ts": now.isoformat()}
+            for k, v in state.items():
+                payload[k] = _serialize_value(v)
+            # T03 trace pointer: stamp the current OTel trace_id onto each
+            # row so an operator reading ``decisions.jsonl`` can ``jq`` against
+            # the matching ``traces/<date>/run-<run_id>.jsonl`` to recover the
+            # full span tree.  ``get_current_span()`` always returns a Span
+            # (INVALID_SPAN sentinel when no provider/span is active), so the
+            # only thing to check is ``trace_id != 0`` (0 == INVALID_SPAN).
+            # Falls back to "" so the JSONL schema stays stable when nothing
+            # is active (shouldn't happen in production).
+            ctx = trace.get_current_span().get_span_context()
+            if ctx.trace_id:
+                payload["trace_id"] = format(ctx.trace_id, "032x")
+            else:
+                payload["trace_id"] = ""
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, default=_json_default) + "\n")
+            if db_path is not None:
+                _persist_decisions_from_state(state, db_path, clock)
+            return {"report_path": str(path)}
     return reporter

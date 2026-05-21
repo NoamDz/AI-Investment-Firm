@@ -27,6 +27,7 @@ from firm.core.config import load_llm_config, load_policy, load_rag_config, load
 from firm.core.models import BuyPayload, SellPayload
 from firm.db.connection import get_conn
 from firm.db.migrations import init_db
+from firm.obs import agent_span, stamp_decision
 from firm.orchestrator.graph import build_graph
 from firm.orchestrator.state import WorkingState
 from firm.reconcile.boot import reconcile_on_boot, resolve_from_broker
@@ -279,21 +280,35 @@ def run(once: bool) -> None:
     pm = make_pm(voter=voter)
 
     def risk_node(state: WorkingState) -> dict[str, Any]:
-        proposal = state["pm_decision"]
-        if not isinstance(proposal.payload, (BuyPayload, SellPayload)):
-            # No trade to risk-check — pass the proposal through unchanged.
-            return {"risk_decision": proposal}
-        ticker = proposal.payload.ticker
-        quote = broker.get_quote(ticker)
-        positions = {p.ticker: p.shares for p in broker.list_positions()}
-        # TODO(Plan 2): wire live quote_age_seconds / trades_today / daily_pnl_pct; stubs disable those checks
-        decision = evaluate_risk(RiskInput(
-            proposal=proposal, quote_price=quote.price, quote_age_seconds=0,
-            cash=broker.get_cash(), positions=positions, sector_map=universe.sector_map,
-            trades_today=0, nav=broker.get_cash() + sum((p.shares * broker.get_quote(p.ticker).price for p in broker.list_positions()), Decimal("0")),
-            daily_pnl_pct=0.0, policy=policy,
-        ))
-        return {"risk_decision": decision}
+        # Wrap at the LangGraph-node layer (not inside ``evaluate_risk``, which
+        # is the pure-function deterministic kernel) so each heartbeat emits
+        # exactly one ``agent.risk`` span carrying ``failure_mode`` propagated
+        # from the produced Decision.
+        with agent_span("risk") as span:
+            proposal = state["pm_decision"]
+            if not isinstance(proposal.payload, (BuyPayload, SellPayload)):
+                # No trade to risk-check — pass the proposal through unchanged.
+                # Still stamp ``decision_id`` (and ``failure_mode`` when the
+                # upstream PM Decision carries one, e.g. REFUSE/ESCALATE) so
+                # dashboards filtering "spans with decision_id" do not silently
+                # drop heartbeats whose PM produced REFUSE/ESCALATE/HOLD.
+                stamp_decision(span, proposal.id, proposal.failure_mode)
+                return {"risk_decision": proposal}
+            ticker = proposal.payload.ticker
+            quote = broker.get_quote(ticker)
+            positions = {p.ticker: p.shares for p in broker.list_positions()}
+            # TODO(Plan 2): wire live quote_age_seconds / trades_today / daily_pnl_pct; stubs disable those checks
+            decision = evaluate_risk(RiskInput(
+                proposal=proposal, quote_price=quote.price, quote_age_seconds=0,
+                cash=broker.get_cash(), positions=positions, sector_map=universe.sector_map,
+                trades_today=0, nav=broker.get_cash() + sum((p.shares * broker.get_quote(p.ticker).price for p in broker.list_positions()), Decimal("0")),
+                daily_pnl_pct=0.0, policy=policy,
+            ))
+            # T03: propagate the deterministic failure_mode onto the span so
+            # dashboards can split RISK_LIMIT_BREACHED vs STALE_DATA vs the
+            # null/None happy path without joining back to the decisions row.
+            stamp_decision(span, decision.id, decision.failure_mode)
+            return {"risk_decision": decision}
 
     hitl = make_hitl(db_path=db, clock=clock)
     execution = make_execution(db_path=db, broker=broker, clock=clock)
@@ -321,7 +336,12 @@ def run(once: bool) -> None:
         # No checkpoint or completed checkpoint: start a fresh heartbeat.
         invoke_input = {}
 
-    final = graph.invoke(invoke_input, config=config)
+    # T03: wrap a single heartbeat in one outer ``agent.heartbeat`` span so
+    # every child node span (research/pm/risk/reporter + their llm/retrieval
+    # children) shares a single trace_id.  Without this each node becomes its
+    # own trace root and a heartbeat fragments into 4+ disjoint traces.
+    with agent_span("heartbeat"):
+        final = graph.invoke(invoke_input, config=config)
     click.echo(f"Heartbeat complete. Report: {final.get('report_path')}")
 
 

@@ -49,9 +49,15 @@ from firm.core.models import (
 from firm.grounding.judge import JudgeResponseError, JudgeSchemaError, SufficiencyJudge
 from firm.grounding.schema import SufficiencyResult
 from firm.llm.citations import CitedClaimExtractor
+from firm.obs import agent_span, llm_span, retrieval_span, stamp_decision
 from firm.rag.chunk import Chunk
 from firm.rag.retrieve import GroundedRetriever
 from firm.orchestrator.state import WorkingState
+
+
+# Provider literal used on every llm_span emitted from this module — lifted
+# to a constant so a future provider rename only changes one site.
+_PROVIDER_ANTHROPIC = "anthropic"
 
 
 # Default placeholder used when the judge errored before producing a result
@@ -163,232 +169,273 @@ def _make_grounded_research(
         )
     nonce_key: bytes = nonce_secret  # narrow Optional for mypy --strict inside closure.
 
+    # Pull each LLM call's model id directly off the collaborators so the
+    # ``llm_span`` attribute is the actual model that handled the request.
+    # ``_model`` is a leading-underscore implementation attribute; treating it
+    # as read-only from the agent layer keeps the LLM client interfaces
+    # unchanged (T03 must not restructure them).
+    extractor_model: str = getattr(extractor, "_model", "unknown")
+    judge_model: str = getattr(judge, "_model", "unknown")
+
     def research(state: WorkingState) -> dict[str, Any]:  # noqa: ARG001 -- reads clock, not heartbeat
-        # Step 1: deterministic ticker selection. Simplest stable rule.
-        ticker = universe.tickers[0]
-        question = _format_question(ticker)
-        now = clock.now()
+        # T03: CM form (not decorator) so REFUSE branches can stamp
+        # ``failure_mode`` and ``decision_id`` onto the agent span before
+        # returning.  Mirrors the pattern used by ``firm/cli.py`` risk_node.
+        with agent_span("research") as span:
+            # Step 1: deterministic ticker selection. Simplest stable rule.
+            ticker = universe.tickers[0]
+            question = _format_question(ticker)
+            now = clock.now()
 
-        # Step 2: retrieve. Empty → REFUSE / INSUFFICIENT_EVIDENCE.
-        retrieved = retriever.retrieve(question, as_of=now)
-        chunks: list[Chunk] = [rc.chunk for rc in retrieved]
-        chunks_dump: list[dict[str, Any]] = [c.model_dump() for c in chunks]
+            # Step 2: retrieve. Empty → REFUSE / INSUFFICIENT_EVIDENCE.
+            # The retriever is a ``GroundedRetriever`` (hybrid + rerank); the
+            # ``retrieval.hybrid`` operation name is the rollup the spec asks for
+            # ("1 span per retrieval stage").  Per-sub-stage spans (BM25, dense,
+            # rerank) belong inside the retriever implementation, not here.
+            with retrieval_span("hybrid"):
+                retrieved = retriever.retrieve(question, as_of=now)
+            chunks: list[Chunk] = [rc.chunk for rc in retrieved]
+            chunks_dump: list[dict[str, Any]] = [c.model_dump() for c in chunks]
 
-        decision_id = ulid_new()
-        nonce = sign_nonce(
-            nonce_key, decision_id=decision_id, timestamp=int(now.timestamp())
-        )
+            decision_id = ulid_new()
+            nonce = sign_nonce(
+                nonce_key, decision_id=decision_id, timestamp=int(now.timestamp())
+            )
 
-        if not chunks:
-            refuse_decision = Decision(
+            if not chunks:
+                refuse_decision = Decision(
+                    id=decision_id,
+                    decision_id_chain=[],
+                    action=ActionEnum.REFUSE,
+                    payload=RefusePayload(
+                        reason=f"no retrieval hits for {ticker} at {now.isoformat()}"
+                    ),
+                    rationale="retriever returned no chunks; cannot ground any claim",
+                    confidence=0.0,
+                    citations=[],
+                    falsification_condition=(
+                        f"{ticker} retrieval returns chunks at a later heartbeat"
+                    ),
+                    escalation_reason=None,
+                    failure_mode=FailureMode.INSUFFICIENT_EVIDENCE,
+                    metadata={"agent": "research", "ticker": ticker},
+                    nonce=nonce,
+                )
+                stamp_decision(
+                    span, refuse_decision.id, refuse_decision.failure_mode
+                )
+                return {
+                    "research_decision": refuse_decision,
+                    "retrieved_chunks": chunks_dump,
+                    "claims": [],
+                    "sufficiency_result": copy.deepcopy(_EMPTY_RETRIEVAL_SUFFICIENCY),
+                    "tool_call_ids": [],
+                }
+
+            # Step 3: extract cited claims.
+            with llm_span(_PROVIDER_ANTHROPIC, extractor_model):
+                claims = extractor.extract(query=question, chunks=chunks, as_of=now)
+            claims_dump: list[dict[str, Any]] = [c.model_dump() for c in claims]
+            # Surface tool_call_ids from the extractor (T24). The Protocol
+            # guarantees the attribute exists; copy defensively so downstream
+            # mutation cannot leak back into the extractor's state.
+            tool_call_ids: list[str] = list(extractor.last_tool_call_ids)
+
+            # Step 4: oldest-filing-age metadata (shared across branches).
+            metadata: dict[str, Any] = {"agent": "research", "ticker": ticker}
+            oldest_age = _compute_oldest_filing_age_days(chunks, now=now)
+            if oldest_age is not None:
+                metadata["oldest_filing_age_days"] = oldest_age
+
+            # Step 5: sufficiency gate.
+            # JudgeSchemaError (subclass) → REFUSE SCHEMA_VALIDATION_FAILED.
+            # JudgeResponseError           → REFUSE LLM_UNAVAILABLE.
+            # Catch ONLY these two; other exceptions propagate so a real
+            # bug is not silently masked. JudgeSchemaError must come first
+            # because it is a subclass of JudgeResponseError.
+            try:
+                with llm_span(_PROVIDER_ANTHROPIC, judge_model):
+                    sufficiency: SufficiencyResult = judge.assess(
+                        question=question, claims=claims
+                    )
+            except JudgeSchemaError as exc:
+                schema_validation_failed_decision = Decision(
+                    id=decision_id,
+                    decision_id_chain=[],
+                    action=ActionEnum.REFUSE,
+                    payload=RefusePayload(reason="sufficiency:schema_validation_failed"),
+                    rationale=f"sufficiency judge response failed schema validation: {exc!s}",
+                    confidence=0.0,
+                    citations=_build_citations(claims, chunks),
+                    falsification_condition=(
+                        f"sufficiency judge returns a conforming response for {ticker} at a later heartbeat"
+                    ),
+                    escalation_reason=None,
+                    failure_mode=FailureMode.SCHEMA_VALIDATION_FAILED,
+                    metadata=metadata,
+                    nonce=nonce,
+                )
+                stamp_decision(
+                    span,
+                    schema_validation_failed_decision.id,
+                    schema_validation_failed_decision.failure_mode,
+                )
+                return {
+                    "research_decision": schema_validation_failed_decision,
+                    "retrieved_chunks": chunks_dump,
+                    "claims": claims_dump,
+                    "sufficiency_result": copy.deepcopy(_SCHEMA_VALIDATION_FAILED_SUFFICIENCY),
+                    "tool_call_ids": tool_call_ids,
+                }
+            except JudgeResponseError as exc:
+                llm_unavailable_decision = Decision(
+                    id=decision_id,
+                    decision_id_chain=[],
+                    action=ActionEnum.REFUSE,
+                    payload=RefusePayload(reason="sufficiency:llm_unavailable"),
+                    rationale=f"sufficiency judge unavailable: {exc!s}",
+                    confidence=0.0,
+                    citations=_build_citations(claims, chunks),
+                    falsification_condition=(
+                        f"sufficiency judge succeeds for {ticker} at a later heartbeat"
+                    ),
+                    escalation_reason=None,
+                    failure_mode=FailureMode.LLM_UNAVAILABLE,
+                    metadata=metadata,
+                    nonce=nonce,
+                )
+                stamp_decision(
+                    span,
+                    llm_unavailable_decision.id,
+                    llm_unavailable_decision.failure_mode,
+                )
+                return {
+                    "research_decision": llm_unavailable_decision,
+                    "retrieved_chunks": chunks_dump,
+                    "claims": claims_dump,
+                    "sufficiency_result": copy.deepcopy(_LLM_UNAVAILABLE_SUFFICIENCY),
+                    "tool_call_ids": tool_call_ids,
+                }
+
+            sufficiency_dump: dict[str, Any] = sufficiency.model_dump(mode="json")
+            status = sufficiency.aggregate_status()
+            citations = _build_citations(claims, chunks)
+
+            # Step 6: branch on aggregate sufficiency status.
+            if status == "insufficient":
+                insufficient_decision = Decision(
+                    id=decision_id,
+                    decision_id_chain=[],
+                    action=ActionEnum.REFUSE,
+                    payload=RefusePayload(reason="sufficiency:insufficient"),
+                    rationale=(
+                        "sufficiency judge marked at least one claim UNSUPPORTED"
+                    ),
+                    confidence=0.0,
+                    citations=citations,
+                    falsification_condition=(
+                        f"{ticker} produces fully-supported claims at a later heartbeat"
+                    ),
+                    escalation_reason=None,
+                    failure_mode=FailureMode.INSUFFICIENT_EVIDENCE,
+                    metadata=metadata,
+                    nonce=nonce,
+                )
+                stamp_decision(
+                    span,
+                    insufficient_decision.id,
+                    insufficient_decision.failure_mode,
+                )
+                return {
+                    "research_decision": insufficient_decision,
+                    "retrieved_chunks": chunks_dump,
+                    "claims": claims_dump,
+                    "sufficiency_result": sufficiency_dump,
+                    "tool_call_ids": tool_call_ids,
+                }
+
+            if status == "partial":
+                # ESCALATE requires a proposed Buy/Sell payload (the HITL reviewer
+                # needs the action they would be approving).  Use the same default
+                # BUY(10 shares) shape as the happy path so the proposed action is
+                # consistent across both branches.
+                # TODO(T27): partial-evidence ESCALATE currently proposes the same default
+                # BUY shape as the happy path; when PM voters wire real sizing, this branch
+                # should either skip the proposed payload or compute a reduced size.
+                escalate_decision = Decision(
+                    id=decision_id,
+                    decision_id_chain=[],
+                    action=ActionEnum.ESCALATE,
+                    payload=EscalatePayload(
+                        proposed=BuyPayload(ticker=ticker, shares=Decimal("10")),
+                        reason="sufficiency:partial",
+                    ),
+                    rationale=(
+                        "sufficiency judge marked at least one claim PARTIAL; "
+                        "escalating to HITL review"
+                    ),
+                    confidence=0.4,
+                    citations=citations,
+                    falsification_condition=(
+                        f"{ticker} produces fully-supported claims at a later heartbeat"
+                    ),
+                    escalation_reason="sufficiency:partial",
+                    failure_mode=None,
+                    metadata=metadata,
+                    nonce=nonce,
+                )
+                stamp_decision(
+                    span, escalate_decision.id, escalate_decision.failure_mode
+                )
+                return {
+                    "research_decision": escalate_decision,
+                    "retrieved_chunks": chunks_dump,
+                    "claims": claims_dump,
+                    "sufficiency_result": sufficiency_dump,
+                    "tool_call_ids": tool_call_ids,
+                }
+
+            # status == "ok" → proceed with the original BUY / HOLD decision.
+            if claims:
+                payload: BuyPayload | HoldPayload = BuyPayload(
+                    ticker=ticker, shares=Decimal("10")
+                )
+                action = ActionEnum.BUY
+                rationale = " ".join(c.text for c in claims)
+                falsification_condition = (
+                    f"{claims[0].text} is contradicted by later filings"
+                )
+            else:
+                payload = HoldPayload(reason="no extractable claims")
+                action = ActionEnum.HOLD
+                rationale = "no claims extracted"
+                falsification_condition = (
+                    f"{ticker} reports materially different fundamentals next quarter"
+                )
+
+            decision = Decision(
                 id=decision_id,
                 decision_id_chain=[],
-                action=ActionEnum.REFUSE,
-                payload=RefusePayload(
-                    reason=f"no retrieval hits for {ticker} at {now.isoformat()}"
-                ),
-                rationale="retriever returned no chunks; cannot ground any claim",
-                confidence=0.0,
-                citations=[],
-                falsification_condition=(
-                    f"{ticker} retrieval returns chunks at a later heartbeat"
-                ),
-                escalation_reason=None,
-                failure_mode=FailureMode.INSUFFICIENT_EVIDENCE,
-                metadata={"agent": "research", "ticker": ticker},
-                nonce=nonce,
-            )
-            return {
-                "research_decision": refuse_decision,
-                "retrieved_chunks": chunks_dump,
-                "claims": [],
-                "sufficiency_result": copy.deepcopy(_EMPTY_RETRIEVAL_SUFFICIENCY),
-                "tool_call_ids": [],
-            }
-
-        # Step 3: extract cited claims.
-        claims = extractor.extract(query=question, chunks=chunks, as_of=now)
-        claims_dump: list[dict[str, Any]] = [c.model_dump() for c in claims]
-        # Surface tool_call_ids from the extractor (T24). The Protocol
-        # guarantees the attribute exists; copy defensively so downstream
-        # mutation cannot leak back into the extractor's state.
-        tool_call_ids: list[str] = list(extractor.last_tool_call_ids)
-
-        # Step 4: oldest-filing-age metadata (shared across branches).
-        metadata: dict[str, Any] = {"agent": "research", "ticker": ticker}
-        oldest_age = _compute_oldest_filing_age_days(chunks, now=now)
-        if oldest_age is not None:
-            metadata["oldest_filing_age_days"] = oldest_age
-
-        # Step 5: sufficiency gate.
-        # JudgeSchemaError (subclass) → REFUSE SCHEMA_VALIDATION_FAILED.
-        # JudgeResponseError           → REFUSE LLM_UNAVAILABLE.
-        # Catch ONLY these two; other exceptions propagate so a real
-        # bug is not silently masked. JudgeSchemaError must come first
-        # because it is a subclass of JudgeResponseError.
-        try:
-            sufficiency: SufficiencyResult = judge.assess(
-                question=question, claims=claims
-            )
-        except JudgeSchemaError as exc:
-            schema_validation_failed_decision = Decision(
-                id=decision_id,
-                decision_id_chain=[],
-                action=ActionEnum.REFUSE,
-                payload=RefusePayload(reason="sufficiency:schema_validation_failed"),
-                rationale=f"sufficiency judge response failed schema validation: {exc!s}",
-                confidence=0.0,
-                citations=_build_citations(claims, chunks),
-                falsification_condition=(
-                    f"sufficiency judge returns a conforming response for {ticker} at a later heartbeat"
-                ),
-                escalation_reason=None,
-                failure_mode=FailureMode.SCHEMA_VALIDATION_FAILED,
-                metadata=metadata,
-                nonce=nonce,
-            )
-            return {
-                "research_decision": schema_validation_failed_decision,
-                "retrieved_chunks": chunks_dump,
-                "claims": claims_dump,
-                "sufficiency_result": copy.deepcopy(_SCHEMA_VALIDATION_FAILED_SUFFICIENCY),
-                "tool_call_ids": tool_call_ids,
-            }
-        except JudgeResponseError as exc:
-            llm_unavailable_decision = Decision(
-                id=decision_id,
-                decision_id_chain=[],
-                action=ActionEnum.REFUSE,
-                payload=RefusePayload(reason="sufficiency:llm_unavailable"),
-                rationale=f"sufficiency judge unavailable: {exc!s}",
-                confidence=0.0,
-                citations=_build_citations(claims, chunks),
-                falsification_condition=(
-                    f"sufficiency judge succeeds for {ticker} at a later heartbeat"
-                ),
-                escalation_reason=None,
-                failure_mode=FailureMode.LLM_UNAVAILABLE,
-                metadata=metadata,
-                nonce=nonce,
-            )
-            return {
-                "research_decision": llm_unavailable_decision,
-                "retrieved_chunks": chunks_dump,
-                "claims": claims_dump,
-                "sufficiency_result": copy.deepcopy(_LLM_UNAVAILABLE_SUFFICIENCY),
-                "tool_call_ids": tool_call_ids,
-            }
-
-        sufficiency_dump: dict[str, Any] = sufficiency.model_dump(mode="json")
-        status = sufficiency.aggregate_status()
-        citations = _build_citations(claims, chunks)
-
-        # Step 6: branch on aggregate sufficiency status.
-        if status == "insufficient":
-            insufficient_decision = Decision(
-                id=decision_id,
-                decision_id_chain=[],
-                action=ActionEnum.REFUSE,
-                payload=RefusePayload(reason="sufficiency:insufficient"),
-                rationale=(
-                    "sufficiency judge marked at least one claim UNSUPPORTED"
-                ),
-                confidence=0.0,
+                action=action,
+                payload=payload,
+                rationale=rationale,
+                confidence=0.6 if claims else 0.3,
                 citations=citations,
-                falsification_condition=(
-                    f"{ticker} produces fully-supported claims at a later heartbeat"
-                ),
+                falsification_condition=falsification_condition,
                 escalation_reason=None,
-                failure_mode=FailureMode.INSUFFICIENT_EVIDENCE,
-                metadata=metadata,
-                nonce=nonce,
-            )
-            return {
-                "research_decision": insufficient_decision,
-                "retrieved_chunks": chunks_dump,
-                "claims": claims_dump,
-                "sufficiency_result": sufficiency_dump,
-                "tool_call_ids": tool_call_ids,
-            }
-
-        if status == "partial":
-            # ESCALATE requires a proposed Buy/Sell payload (the HITL reviewer
-            # needs the action they would be approving).  Use the same default
-            # BUY(10 shares) shape as the happy path so the proposed action is
-            # consistent across both branches.
-            # TODO(T27): partial-evidence ESCALATE currently proposes the same default
-            # BUY shape as the happy path; when PM voters wire real sizing, this branch
-            # should either skip the proposed payload or compute a reduced size.
-            escalate_decision = Decision(
-                id=decision_id,
-                decision_id_chain=[],
-                action=ActionEnum.ESCALATE,
-                payload=EscalatePayload(
-                    proposed=BuyPayload(ticker=ticker, shares=Decimal("10")),
-                    reason="sufficiency:partial",
-                ),
-                rationale=(
-                    "sufficiency judge marked at least one claim PARTIAL; "
-                    "escalating to HITL review"
-                ),
-                confidence=0.4,
-                citations=citations,
-                falsification_condition=(
-                    f"{ticker} produces fully-supported claims at a later heartbeat"
-                ),
-                escalation_reason="sufficiency:partial",
                 failure_mode=None,
                 metadata=metadata,
                 nonce=nonce,
             )
+
+            stamp_decision(span, decision.id, decision.failure_mode)
             return {
-                "research_decision": escalate_decision,
+                "research_decision": decision,
                 "retrieved_chunks": chunks_dump,
                 "claims": claims_dump,
                 "sufficiency_result": sufficiency_dump,
                 "tool_call_ids": tool_call_ids,
             }
-
-        # status == "ok" → proceed with the original BUY / HOLD decision.
-        if claims:
-            payload: BuyPayload | HoldPayload = BuyPayload(
-                ticker=ticker, shares=Decimal("10")
-            )
-            action = ActionEnum.BUY
-            rationale = " ".join(c.text for c in claims)
-            falsification_condition = (
-                f"{claims[0].text} is contradicted by later filings"
-            )
-        else:
-            payload = HoldPayload(reason="no extractable claims")
-            action = ActionEnum.HOLD
-            rationale = "no claims extracted"
-            falsification_condition = (
-                f"{ticker} reports materially different fundamentals next quarter"
-            )
-
-        decision = Decision(
-            id=decision_id,
-            decision_id_chain=[],
-            action=action,
-            payload=payload,
-            rationale=rationale,
-            confidence=0.6 if claims else 0.3,
-            citations=citations,
-            falsification_condition=falsification_condition,
-            escalation_reason=None,
-            failure_mode=None,
-            metadata=metadata,
-            nonce=nonce,
-        )
-
-        return {
-            "research_decision": decision,
-            "retrieved_chunks": chunks_dump,
-            "claims": claims_dump,
-            "sufficiency_result": sufficiency_dump,
-            "tool_call_ids": tool_call_ids,
-        }
 
     return research
 
@@ -402,26 +449,31 @@ def _make_legacy_stub_research(
     """Plan 1 deterministic stub. Preserved for backwards compatibility."""
 
     def research(state: WorkingState) -> dict[str, Any]:
-        prices = {t: broker.get_quote(t).price for t in universe.tickers}
-        chosen = min(prices, key=lambda t: prices[t])
-        decision = Decision(
-            id=ulid_new(),
-            decision_id_chain=[],
-            action=ActionEnum.BUY,
-            payload=BuyPayload(ticker=chosen, shares=Decimal("10")),
-            rationale=(
-                "deterministic stub: cheapest of universe at heartbeat "
-                f"{state.get('heartbeat_at')}"
-            ),
-            confidence=0.5,
-            citations=[],
-            falsification_condition=f"if {chosen} drops more than 5% by EOD",
-            escalation_reason=None,
-            failure_mode=None,
-            metadata={"agent": "research", "stub": True},
-            nonce="research-stub",
-        )
-        return {"research_decision": decision}
+        # T03: CM form so failure_mode/decision_id can be set on the span
+        # (legacy stub never produces a failure_mode, but decision_id is set
+        # for parity with the grounded path).
+        with agent_span("research") as span:
+            prices = {t: broker.get_quote(t).price for t in universe.tickers}
+            chosen = min(prices, key=lambda t: prices[t])
+            decision = Decision(
+                id=ulid_new(),
+                decision_id_chain=[],
+                action=ActionEnum.BUY,
+                payload=BuyPayload(ticker=chosen, shares=Decimal("10")),
+                rationale=(
+                    "deterministic stub: cheapest of universe at heartbeat "
+                    f"{state.get('heartbeat_at')}"
+                ),
+                confidence=0.5,
+                citations=[],
+                falsification_condition=f"if {chosen} drops more than 5% by EOD",
+                escalation_reason=None,
+                failure_mode=None,
+                metadata={"agent": "research", "stub": True},
+                nonce="research-stub",
+            )
+            stamp_decision(span, decision.id, decision.failure_mode)
+            return {"research_decision": decision}
 
     return research
 

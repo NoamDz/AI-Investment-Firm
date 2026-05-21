@@ -31,6 +31,7 @@ from typing import Iterator
 
 from opentelemetry.trace import Span
 
+from firm.core.models import FailureMode
 from firm.obs.tracer import get_tracer
 
 
@@ -38,6 +39,27 @@ def _record_exception(span: Span, exc: Exception) -> None:
     """Tag *span* with ``status=error`` and ``failure_mode=<class name>``."""
     span.set_attribute("status", "error")
     span.set_attribute("failure_mode", type(exc).__name__)
+
+
+def stamp_decision(
+    span: Span,
+    decision_id: str,
+    failure_mode: FailureMode | None = None,
+) -> None:
+    """Stamp ``decision_id`` and (if non-None) ``failure_mode`` on *span*.
+
+    Use at every ``agent_span`` return site so downstream filters by
+    ``decision_id`` work uniformly and ``failure_mode`` rollups split the
+    REFUSE/ESCALATE branches from the happy path without joining back to
+    the decisions row.
+
+    ``failure_mode`` accepts the canonical :class:`FailureMode` enum from
+    :mod:`firm.core.models`; the helper emits its ``.value`` (the wire
+    string) onto the span when non-None.
+    """
+    span.set_attribute("decision_id", decision_id)
+    if failure_mode is not None:
+        span.set_attribute("failure_mode", failure_mode.value)
 
 
 @contextmanager
@@ -131,5 +153,6 @@ __all__ = [
     "agent_span",
     "llm_span",
     "retrieval_span",
+    "stamp_decision",
     "tool_span",
 ]
