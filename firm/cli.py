@@ -401,11 +401,37 @@ def run(once: bool) -> None:
     click.echo(f"Heartbeat complete. Report: {final.get('report_path')}")
 
 
+def _is_test_environment() -> bool:
+    """Return True iff running inside a pytest session (PYTEST_CURRENT_TEST is set)."""
+    return "PYTEST_CURRENT_TEST" in os.environ
+
+
+def _check_dev_ack_gate(dev_ack: bool) -> None:
+    """Enforce the --dev-ack gate for non-test environments.
+
+    In test environments (pytest sets PYTEST_CURRENT_TEST) this is a no-op so
+    existing tests keep working without any flag.  In production the operator
+    must pass --dev-ack to acknowledge that the CLI is a developer-only escape
+    hatch; the production-correct path is the Slack /trading-hitl workflow.
+    """
+    if _is_test_environment():
+        return
+    if dev_ack:
+        return
+    click.echo(
+        "Use Slack /trading-hitl to approve in production. "
+        "Override with --dev-ack if you really mean it."
+    )
+    sys.exit(1)
+
+
 @cli.command()
 @click.argument("decision_id")
 @click.option("--approver", default="cli-user")
-def ack(decision_id: str, approver: str) -> None:
+@click.option("--dev-ack", is_flag=True, default=False, help="Developer override: bypass Slack gate.")
+def ack(decision_id: str, approver: str, dev_ack: bool) -> None:
     """Approve a queued HITL decision (Plan 1 stand-in for Slack)."""
+    _check_dev_ack_gate(dev_ack)
     mark_approved(db_path=_db_path(), decision_id=decision_id, approver=approver, clock=_resolve_clock())
     click.echo(f"approved: {decision_id}")
 
@@ -413,8 +439,10 @@ def ack(decision_id: str, approver: str) -> None:
 @cli.command()
 @click.argument("decision_id")
 @click.option("--approver", default="cli-user")
-def reject(decision_id: str, approver: str) -> None:
+@click.option("--dev-ack", is_flag=True, default=False, help="Developer override: bypass Slack gate.")
+def reject(decision_id: str, approver: str, dev_ack: bool) -> None:
     """Reject a queued HITL decision."""
+    _check_dev_ack_gate(dev_ack)
     mark_rejected(db_path=_db_path(), decision_id=decision_id, approver=approver, clock=_resolve_clock())
     click.echo(f"rejected: {decision_id}")
 
