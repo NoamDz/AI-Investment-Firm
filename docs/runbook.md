@@ -157,6 +157,73 @@ curl -s http://localhost:6333/collections/firm_chunks | python -m json.tool | gr
 
 ---
 
+## Restore from Litestream (SQLite)
+
+Litestream continuously replicates `data/firm.db` (and its WAL) to
+`data/litestream/firm/` via the `litestream` service in `docker-compose.yml`.
+This is the path of choice for SQLite recovery; the Qdrant volume backup
+above is a separate procedure for the vector store.
+
+### Listing available generations
+
+```bash
+docker compose run --rm litestream snapshots /data/firm.db
+```
+
+Each row is a generation + snapshot pair you can restore from.  The
+most recent generation appears at the top.
+
+### Restoring the latest snapshot
+
+```bash
+docker compose stop firm                  # avoid concurrent writers
+docker compose run --rm litestream \
+  restore -o /data/firm.restored.db /data/firm.db
+mv data/firm.restored.db data/firm.db     # promote into place
+docker compose start firm
+```
+
+After restart, `firm` opens the restored DB on its next connection.  The
+WAL/SHM files are recreated automatically.
+
+### Restoring to a specific point in time
+
+```bash
+docker compose run --rm litestream \
+  restore -o /data/firm.pit.db \
+  -timestamp 2024-03-13T14:30:00Z \
+  /data/firm.db
+```
+
+The replicator keeps 72 h of history (see `config/litestream.yml`).
+
+### Drill — verify replication is healthy
+
+```bash
+make litestream-drill
+```
+
+The drill (script in `scripts/litestream_drill.py`):
+
+1. Asserts `data/firm.db-wal` is under the 16 MB ceiling from
+   `config/litestream.yml` (catches a paused replicator before it
+   eats the disk).
+2. If a working litestream binary or docker is available, also runs
+   a synthetic replicate-then-restore cycle and asserts row counts
+   match.  Otherwise prints a `SKIPPED:` notice and exits 0.
+
+Run this in CI and on every operator on-call rotation.
+
+### When the drill fails
+
+| Failure              | Likely cause                               | Fix |
+|----------------------|--------------------------------------------|-----|
+| WAL oversized        | Replicator paused / crashed                | `docker compose restart litestream` |
+| Restore row mismatch | Replica corrupt or replication interrupted | Investigate via `docker compose logs litestream`; consider re-snapshotting from a clean state |
+| `SKIPPED:` in CI     | Docker daemon not in CI runner             | Acceptable for now; add docker-in-docker for stronger guarantee |
+
+---
+
 ## Known Limitations
 
 ### Forward-reference leakage in PIT-filtered RAG (spec §6.4)

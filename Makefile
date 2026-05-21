@@ -1,7 +1,7 @@
 # GnuWin32 Make defaults to cmd.exe; force bash so recipes use POSIX syntax.
 SHELL := bash
 
-.PHONY: install test demo demo-docker reconcile ingest report clean
+.PHONY: install test demo demo-docker reconcile ingest report clean litestream-drill
 
 install:
 	pip install -e ".[dev]"
@@ -25,6 +25,9 @@ ingest:
 
 report:
 	python -m firm.cli report --date $(DATE)
+
+litestream-drill:
+	python scripts/litestream_drill.py
 
 clean:
 	rm -rf data/firm.db data/firm.db-wal data/firm.db-shm data/reports data/litestream
