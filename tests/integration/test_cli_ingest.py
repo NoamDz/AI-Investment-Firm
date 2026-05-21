@@ -170,6 +170,7 @@ def _seed_llm_cache(db_path: Path, model: str) -> None:
             doc,
             target_tokens=_FIXTURE_CHUNK_TARGET_TOKENS,
             overlap_tokens=_FIXTURE_CHUNK_OVERLAP_TOKENS,
+            source="financebench",
         )
         if not chunks:
             # Safety fallback: synthesize one chunk so augment() fires.
@@ -183,6 +184,7 @@ def _seed_llm_cache(db_path: Path, model: str) -> None:
                     text=doc.html[:200],
                     char_span=(0, 200),
                     token_count=10,
+                    source="financebench",
                 )
             ]
         augmenter.augment(doc, list(chunks))

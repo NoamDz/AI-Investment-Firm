@@ -332,6 +332,7 @@ def _seed_augmentation_cache(db_path: Path) -> None:
             doc,
             target_tokens=_FIXTURE_CHUNK_TARGET_TOKENS,
             overlap_tokens=_FIXTURE_CHUNK_OVERLAP_TOKENS,
+            source="financebench",
         )
         if not chunks:
             chunks = [
@@ -344,6 +345,7 @@ def _seed_augmentation_cache(db_path: Path) -> None:
                     text=doc.html[:200],
                     char_span=(0, 200),
                     token_count=10,
+                    source="financebench",
                 )
             ]
         augmenter.augment(doc, list(chunks))
@@ -406,6 +408,7 @@ def _retrieve_aapl_chunks(qdrant_local_path: Path) -> list[Chunk]:
             doc_processed,
             target_tokens=_FIXTURE_CHUNK_TARGET_TOKENS,
             overlap_tokens=_FIXTURE_CHUNK_OVERLAP_TOKENS,
+            source="financebench",
         )
         all_texts.extend(c.text for c in chunks)
     if all_texts:

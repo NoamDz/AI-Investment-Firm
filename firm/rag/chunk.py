@@ -29,6 +29,7 @@ class Chunk(BaseModel):
     text: str
     char_span: tuple[int, int]
     token_count: int
+    source: str
     doc_summary: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -38,6 +39,7 @@ def chunk_document(
     *,
     target_tokens: int,
     overlap_tokens: int,
+    source: str,
 ) -> list[Chunk]:
     if target_tokens <= 0:
         raise ValueError("target_tokens must be positive")
@@ -84,6 +86,7 @@ def chunk_document(
                 text=window_text,
                 char_span=(char_start, char_end),
                 token_count=len(window_tokens),
+                source=source,
                 metadata=dict(doc.metadata),
             )
         )

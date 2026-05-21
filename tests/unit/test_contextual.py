@@ -87,6 +87,7 @@ def _make_chunks(doc: FilingDoc, n: int = 8) -> list[Chunk]:
             text=f"Chunk text {i}.",
             char_span=(i * 10, i * 10 + 10),
             token_count=3,
+            source="test",
         )
         for i in range(n)
     ]

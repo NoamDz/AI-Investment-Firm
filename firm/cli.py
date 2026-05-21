@@ -130,6 +130,7 @@ def _fit_bm25_sparse(rag_config: Any, sparse: Any) -> None:
             pre_doc_processed,
             target_tokens=rag_config.chunk.target_tokens,
             overlap_tokens=rag_config.chunk.overlap_tokens,
+            source="financebench",
         )
         all_texts.extend(c.text for c in chunks)
 
@@ -544,8 +545,16 @@ def _make_fixture_loader(fixture_path: str) -> Any:
     envvar="FIRM_INGEST_MAX_DOCS",
     help="Override corpus.financebench.max_docs from config.",
 )
-def ingest(config: str, max_docs: int | None) -> None:
-    """Ingest corpus into Qdrant. Idempotent — already-indexed docs are skipped."""
+@click.option(
+    "--source",
+    "source_name",
+    type=click.Choice(["financebench", "transcripts", "news", "all"], case_sensitive=False),
+    default="all",
+    show_default=True,
+    help="Which corpus source(s) to ingest. 'all' runs every configured source.",
+)
+def ingest(config: str, max_docs: int | None, source_name: str) -> None:
+    """Ingest one or more corpora into Qdrant. Idempotent — already-indexed docs are skipped."""
     from collections.abc import Iterator
 
     from firm.llm.anthropic_client import CachedAnthropicClient
@@ -555,9 +564,11 @@ def ingest(config: str, max_docs: int | None) -> None:
     from firm.rag.embed import BM25Sparse, NomicEmbedder
     from firm.rag.financebench import FinanceBenchSource
     from firm.rag.ingest import run_ingest
+    from firm.rag.news import NewsCorpusSource
     from firm.rag.preprocess import tables_to_prose
     from firm.rag.qdrant_store import VectorStore
-    from firm.rag.source import FilingDoc
+    from firm.rag.source import CorpusSource, FilingDoc
+    from firm.rag.transcripts import TranscriptsCorpusSource
 
     db = _db_path()
     init_db(db)
@@ -565,61 +576,86 @@ def ingest(config: str, max_docs: int | None) -> None:
 
     rag_config = load_rag_config(Path(config))
 
-    # Determine effective max_docs: CLI flag wins, else fall back to config.
-    effective_max_docs: int | None = (
-        max_docs if max_docs is not None else rag_config.corpus.financebench.max_docs
-    )
+    # -----------------------------------------------------------------------
+    # Build the list of sources to run, in fixed order (deterministic output).
+    # -----------------------------------------------------------------------
+    sources: list[CorpusSource] = []
 
-    # FinanceBenchSource — use fixture loader if env var is set.
-    fixture_env = os.environ.get("FIRM_FINANCEBENCH_FIXTURE")
-    if fixture_env:
-        source: FinanceBenchSource = FinanceBenchSource(
-            dataset_loader=_make_fixture_loader(fixture_env)
+    want_financebench = source_name in ("financebench", "all")
+    want_transcripts = source_name in ("transcripts", "all")
+    want_news = source_name in ("news", "all")
+
+    if want_financebench:
+        # Determine effective max_docs: CLI flag wins, else fall back to config.
+        effective_max_docs: int | None = (
+            max_docs if max_docs is not None else rag_config.corpus.financebench.max_docs
         )
-    else:
-        source = FinanceBenchSource()
+        # Use fixture loader if env var is set.
+        fixture_env = os.environ.get("FIRM_FINANCEBENCH_FIXTURE")
+        if fixture_env:
+            fb_source: FinanceBenchSource = FinanceBenchSource(
+                dataset_loader=_make_fixture_loader(fixture_env)
+            )
+        else:
+            fb_source = FinanceBenchSource()
 
-    # Optionally limit the number of docs via a wrapping source.
-    if effective_max_docs is not None:
-        _limit = effective_max_docs
+        if effective_max_docs is not None:
+            _limit = effective_max_docs
 
-        class _LimitedSource:
-            name: str = source.name
+            class _LimitedSource:
+                name: str = fb_source.name
 
-            def iter_docs(self) -> Iterator[FilingDoc]:
-                yield from itertools.islice(source.iter_docs(), _limit)
+                def iter_docs(self) -> Iterator[FilingDoc]:
+                    yield from itertools.islice(fb_source.iter_docs(), _limit)
 
-        run_source: Any = _LimitedSource()
-    else:
-        run_source = source
+            sources.append(_LimitedSource())
+        else:
+            sources.append(fb_source)
 
-    # Qdrant client and store.
+    if want_transcripts:
+        if rag_config.corpus.transcripts is not None:
+            sources.append(
+                TranscriptsCorpusSource(path=Path(rag_config.corpus.transcripts.path))
+            )
+        else:
+            click.echo(
+                "warning: --source transcripts requested but corpus.transcripts is not "
+                "configured in rag.yaml — skipping",
+                err=True,
+            )
+
+    if want_news:
+        news_cfg = rag_config.corpus.news
+        if news_cfg is not None and news_cfg.enabled:
+            # TODO: wire universe tickers in once firm.yaml exposes them via rag.yaml.
+            # For now, pass empty tickers list; the env gate (FIRM_NEWS_ENABLED) and
+            # the empty iter handle the no-op case gracefully.
+            sources.append(NewsCorpusSource(tickers=[], clock=clock))
+        # news is opt-in by design; skip silently when not configured or not enabled.
+
+    if not sources:
+        click.echo("No sources configured or selected — nothing to ingest.", err=True)
+        sys.exit(1)
+
+    # -----------------------------------------------------------------------
+    # Qdrant setup (shared collection across all sources).
+    # -----------------------------------------------------------------------
     qdrant_client = _make_qdrant_client()
     store = VectorStore(qdrant_client)
     collection = rag_config.qdrant.collection
     dense_dim = rag_config.embedding.dense_dim
     store.create_collection(collection, dense_dim=dense_dim)
 
+    # -----------------------------------------------------------------------
     # Embedders.
+    # -----------------------------------------------------------------------
     embedder = NomicEmbedder()
     sparse = BM25Sparse()
 
-    # BM25Sparse must be fitted before first transform() call.  Perform a
-    # pre-pass over the source to collect chunk texts, then fit on those.
-    # Only texts for docs not already in Qdrant are included (idempotency:
-    # already-indexed docs are skipped, so fitting on them is harmless but
-    # we match what the pipeline will actually encode).
+    # BM25 pre-pass: collect chunk texts from ALL selected sources so IDF is
+    # comparable across corpora. Fit once on the union.
     click.echo("Building BM25 vocabulary (pre-pass)...")
-    all_texts: list[str] = []
-    for pre_doc in run_source.iter_docs():
-        processed_html = tables_to_prose(pre_doc.html)
-        pre_doc_processed = pre_doc.model_copy(update={"html": processed_html})
-        chunks = chunk_document(
-            pre_doc_processed,
-            target_tokens=rag_config.chunk.target_tokens,
-            overlap_tokens=rag_config.chunk.overlap_tokens,
-        )
-        all_texts.extend(c.text for c in chunks)
+    all_texts: list[str] = _collect_chunk_texts(sources, rag_config, chunk_document, tables_to_prose)
     if all_texts:
         sparse.fit(all_texts)
     else:
@@ -634,25 +670,62 @@ def ingest(config: str, max_docs: int | None) -> None:
         model=rag_config.contextual.summary_model,
     )
 
-    result = run_ingest(
-        source=run_source,
-        store=store,
-        embedder=embedder,
-        sparse=sparse,
-        augmenter=augmenter,
-        db_path=db,
-        clock=clock,
-        rag_config=rag_config,
-    )
+    # -----------------------------------------------------------------------
+    # Per-source ingest — one run_ingest call per source.
+    # -----------------------------------------------------------------------
+    total_docs = 0
+    total_chunks = 0
+    any_failed = False
+
+    for src in sources:
+        result = run_ingest(
+            source=src,
+            store=store,
+            embedder=embedder,
+            sparse=sparse,
+            augmenter=augmenter,
+            db_path=db,
+            clock=clock,
+            rag_config=rag_config,
+        )
+        click.echo(
+            f"ingest {result.status}: corpus={result.corpus} "
+            f"docs_completed={result.docs_completed}/{result.docs_total} "
+            f"chunks_written={result.chunks_written}"
+        )
+        if result.status == "failed":
+            click.echo(f"error ({result.corpus}): {result.error}", err=True)
+            any_failed = True
+        total_docs += result.docs_completed
+        total_chunks += result.chunks_written
 
     click.echo(
-        f"ingest {result.status}: corpus={result.corpus} "
-        f"docs_completed={result.docs_completed}/{result.docs_total} "
-        f"chunks_written={result.chunks_written}"
+        f"total: {len(sources)} corpora, {total_docs} docs, {total_chunks} chunks"
     )
-    if result.status == "failed":
-        click.echo(f"error: {result.error}", err=True)
+    if any_failed:
         sys.exit(1)
+
+
+def _collect_chunk_texts(
+    sources: list[Any],
+    rag_config: Any,
+    chunk_document: Any,
+    tables_to_prose: Any,
+) -> list[str]:
+    """Pre-pass over all selected sources to collect chunk texts for BM25 fitting."""
+    all_texts: list[str] = []
+    for src in sources:
+        for pre_doc in src.iter_docs():
+            processed_html = tables_to_prose(pre_doc.html)
+            pre_doc_processed = pre_doc.model_copy(update={"html": processed_html})
+            chunks = chunk_document(
+                pre_doc_processed,
+                target_tokens=rag_config.chunk.target_tokens,
+                overlap_tokens=rag_config.chunk.overlap_tokens,
+                source=src.name,
+            )
+            all_texts.extend(c.text for c in chunks)
+    return all_texts
 
 
 def main() -> None:

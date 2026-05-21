@@ -89,6 +89,7 @@ class VectorStore:
                 "doc_id": chunk.doc_id,
                 "ticker": chunk.ticker,
                 "section": chunk.section,
+                "source": chunk.source,        # T21
                 "published_at": chunk.published_at.timestamp(),
                 "text": chunk.text,
                 "doc_summary": chunk.doc_summary,

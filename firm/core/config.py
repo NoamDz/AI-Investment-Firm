@@ -75,9 +75,15 @@ class TranscriptsCorpusConfig(BaseModel):
     max_docs: int | None = None
 
 
+class NewsCorpusConfig(BaseModel):
+    enabled: bool = False
+    max_docs: int | None = None
+
+
 class CorpusConfig(BaseModel):
     financebench: FinanceBenchCorpusConfig
     transcripts: TranscriptsCorpusConfig | None = None
+    news: NewsCorpusConfig | None = None
 
 
 class ChunkConfig(BaseModel):

@@ -17,7 +17,7 @@ def _make_client() -> QdrantClient:
     return QdrantClient(":memory:")
 
 
-def _make_chunk(chunk_id: str, ticker: str, published_at: datetime) -> Chunk:
+def _make_chunk(chunk_id: str, ticker: str, published_at: datetime, source: str = "test") -> Chunk:
     return Chunk(
         id=chunk_id,
         doc_id="test-doc",
@@ -27,6 +27,7 @@ def _make_chunk(chunk_id: str, ticker: str, published_at: datetime) -> Chunk:
         text=f"Text for {chunk_id}",
         char_span=(0, 20),
         token_count=5,
+        source=source,
     )
 
 
@@ -193,6 +194,7 @@ def test_upsert_stores_char_span_and_token_count_in_payload() -> None:
         text="payload reconstruction test",
         char_span=(13, 42),
         token_count=7,
+        source="test",
     )
 
     with warnings.catch_warnings():
@@ -230,6 +232,7 @@ def test_doc_exists() -> None:
         text="text-a",
         char_span=(0, 6),
         token_count=2,
+        source="test",
     )
 
     with warnings.catch_warnings():

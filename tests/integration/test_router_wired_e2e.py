@@ -160,6 +160,7 @@ def _make_chunk(ticker: str = "AAPL") -> Chunk:
         text=f"{ticker} reported strong revenue growth in the most recent quarter.",
         char_span=(0, 80),
         token_count=12,
+        source="test",
     )
 
 

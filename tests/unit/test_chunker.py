@@ -40,7 +40,7 @@ def _synthetic_text(approx_tokens: int) -> str:
 def test_chunk_target_size_within_tolerance() -> None:
     text = _synthetic_text(3000)
     doc = _make_doc(text)
-    chunks = chunk_document(doc, target_tokens=TARGET, overlap_tokens=OVERLAP)
+    chunks = chunk_document(doc, target_tokens=TARGET, overlap_tokens=OVERLAP, source="test")
 
     assert len(chunks) >= 2, "Expected multiple chunks for a ~3000-token document"
 
@@ -57,7 +57,7 @@ def test_chunk_target_size_within_tolerance() -> None:
 def test_chunk_overlap_present() -> None:
     text = _synthetic_text(3000)
     doc = _make_doc(text)
-    chunks = chunk_document(doc, target_tokens=TARGET, overlap_tokens=OVERLAP)
+    chunks = chunk_document(doc, target_tokens=TARGET, overlap_tokens=OVERLAP, source="test")
 
     assert len(chunks) >= 2
 
@@ -87,7 +87,7 @@ def test_chunk_preserves_published_at_and_metadata() -> None:
         html=text,
         metadata=extra_meta,
     )
-    chunks = chunk_document(doc, target_tokens=TARGET, overlap_tokens=OVERLAP)
+    chunks = chunk_document(doc, target_tokens=TARGET, overlap_tokens=OVERLAP, source="test")
 
     assert len(chunks) >= 1
     for idx, chunk in enumerate(chunks):
@@ -140,9 +140,9 @@ def test_chunker_rejects_doc_without_published_at() -> None:
 def test_chunker_rejects_overlap_geq_target() -> None:
     doc = _make_doc("hello " * 1000)
     with pytest.raises(ValueError, match="overlap_tokens"):
-        chunk_document(doc, target_tokens=64, overlap_tokens=64)
+        chunk_document(doc, target_tokens=64, overlap_tokens=64, source="test")
     with pytest.raises(ValueError, match="overlap_tokens"):
-        chunk_document(doc, target_tokens=64, overlap_tokens=128)
+        chunk_document(doc, target_tokens=64, overlap_tokens=128, source="test")
 
 
 def test_chunk_char_span_round_trips_on_repetitive_text() -> None:
@@ -161,7 +161,7 @@ def test_chunk_char_span_round_trips_on_repetitive_text() -> None:
         title="Repetitive Doc",
         html=repetitive_text,
     )
-    chunks = chunk_document(doc, target_tokens=512, overlap_tokens=64)
+    chunks = chunk_document(doc, target_tokens=512, overlap_tokens=64, source="test")
 
     assert len(chunks) >= 2, "Expected multiple chunks for a large repetitive document"
 

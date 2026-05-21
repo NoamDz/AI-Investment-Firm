@@ -6,6 +6,9 @@ corpus:
   # transcripts:
   #   path: data/transcripts.jsonl
   #   max_docs: null
+  # news:
+  #   enabled: false
+  #   max_docs: null
 
 chunk:
   target_tokens: 512
