@@ -36,7 +36,7 @@ locals {
 #   4. module "bedrock"        (T36, TODO)  — AgentCore runtime config + IAM
 #                                              role for the Reporter agent
 #                                              (§11.1).
-#   5. module "compute"        (T33, TODO)  — ECS Fargate cluster + task
+#   5. module "compute"        (T33, DONE)  — ECS Fargate cluster + task
 #                                              definition + service
 #                                              (consumes network + secrets).
 #   6. module "observability"  (T37, TODO)  — CloudWatch log groups + OTLP
@@ -54,4 +54,15 @@ module "network" {
   vpc_cidr     = var.vpc_cidr
   project_name = var.project_name
   env          = var.env
+}
+
+module "compute" {
+  source = "./modules/compute"
+
+  project_name               = var.project_name
+  env                        = var.env
+  ecs_task_cpu               = var.ecs_task_cpu
+  ecs_task_memory            = var.ecs_task_memory
+  private_subnet_ids         = module.network.private_subnet_ids
+  ecs_task_security_group_id = module.network.ecs_task_security_group_id
 }
