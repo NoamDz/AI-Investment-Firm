@@ -108,6 +108,18 @@ class CachedAnthropicClient:
     Implements the T9 :class:`firm.llm.client.AnthropicClient` Protocol via
     :meth:`complete`, and additionally exposes :meth:`messages_create` for
     callers that need the raw response dict (T18 cited-claim extraction).
+
+    Concurrency model
+    -----------------
+    The injected :class:`~firm.llm.cache.LlmCache` uses one SQLite connection
+    per thread, opened lazily via ``threading.local()``.  Reads (``cache.get``)
+    are lock-free; writes (``cache.put``, which occur only on RECORD-mode cache
+    misses) acquire a module-level ``threading.Lock`` so concurrent writers
+    across N threads do not surface ``"database is locked"`` SQLite errors.
+    The underlying DB is WAL-mode, so concurrent reads and a single write do
+    not block each other beyond the write lock.  This concurrency model is
+    stress-tested in ``tests/integration/test_cached_client_threadsafety.py``
+    with 50 parallel ``messages_create()`` calls across 10 threads.
     """
 
     def __init__(
