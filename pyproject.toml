@@ -29,6 +29,8 @@ dependencies = [
     "fastapi>=0.111",
     "python-multipart>=0.0.9",  # required by FastAPI for form parsing
     "slack-sdk>=3.27",
+    "python-dateutil>=2.9",  # relativedelta for rolling 12-month news window
+    "requests>=2.31",  # production HTTP client for news adapter
 ]
 
 [project.optional-dependencies]

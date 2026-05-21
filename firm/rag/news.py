@@ -18,9 +18,9 @@ import logging
 import os
 from collections.abc import Callable, Iterator
 from datetime import datetime
+from typing import Any
 
 from dateutil.relativedelta import relativedelta  # type: ignore[import-untyped]
-from typing import Any
 
 from firm.core.clock import Clock
 from firm.rag.source import FilingDoc
