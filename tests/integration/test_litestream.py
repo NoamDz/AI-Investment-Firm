@@ -3,17 +3,14 @@
 Test A: static structural validation of docker-compose.yml and
         config/litestream.yml (always runs, no Docker required).
 Test B: per-connection wal_autocheckpoint PRAGMA assertion (always runs).
-Test C: full docker compose up/stop integration (gated by FIRM_RUN_DOCKER_TESTS=true
-        and Docker availability — skipped in CI by default).
+
+The full docker-up + replication-catch-up scenario from the plan spec
+is exercised by `make litestream-drill` in T23, not here.
 """
 from __future__ import annotations
 
-import os
-import shutil
 from contextlib import closing
 from pathlib import Path
-
-import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -62,21 +59,6 @@ def test_wal_autocheckpoint_set_on_connection(tmp_path: Path):
         assert result == 1000
 
 
-# ---------------------------------------------------------------------------
-# Test C — Docker-dependent integration (skipped when Docker unavailable)
-# ---------------------------------------------------------------------------
-
-DOCKER_AVAILABLE = shutil.which("docker") is not None
-
-
-@pytest.mark.skipif(not DOCKER_AVAILABLE, reason="docker CLI not available")
-@pytest.mark.skipif(
-    os.environ.get("FIRM_RUN_DOCKER_TESTS") != "true",
-    reason="docker integration tests require FIRM_RUN_DOCKER_TESTS=true",
-)
-def test_litestream_catches_up_after_firm_stop(tmp_path: Path):
-    # Skip-by-default per spec: this test costs ~30s in cycle time and needs
-    # docker compose + a working network. Set FIRM_RUN_DOCKER_TESTS=true to
-    # run it locally; CI runs the structural test (test A) and the unit
-    # PRAGMA test (test B) instead.
-    pytest.skip("docker integration test — run manually with FIRM_RUN_DOCKER_TESTS=true")
+# The plan's `docker compose up firm litestream && stop firm && verify litestream
+# caught up` invariant is covered by `make litestream-drill` (T23), which restores
+# from the replica into a temp DB and asserts row counts match. No stub test here.
