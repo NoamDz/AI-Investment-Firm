@@ -2,9 +2,10 @@
 
 Runs each regime in *record* mode against the real Anthropic API + yfinance,
 writing YAML cassettes under ``tests/eval/cassettes/<regime_id>/`` and price
-parquets under ``data/prices_eval/<TICKER>.parquet``.  Operator-triggered
-only — must NEVER be wired into CI or a Makefile target; doing so would
-burn API budget on every push.
+parquets under ``data/prices_eval/<TICKER>.parquet`` (path is hard-coded by
+``firm.cli.eval_cmd``, not the ``benchmarks._default_prices_dir`` default).
+Operator-triggered only — must NEVER be wired into CI or a Makefile target;
+doing so would burn API budget on every push.
 
 Surface
 -------
@@ -39,10 +40,11 @@ import click
 # of the operator's CWD.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _CASSETTE_ROOT = _REPO_ROOT / "tests" / "eval" / "cassettes"
-# Mirror ``firm.eval.benchmarks._default_prices_dir`` — the subprocess writes
-# parquets to that location, so dry-run output MUST match or the operator will
-# look in the wrong directory.
-_PRICES_DIR = _REPO_ROOT / "data" / "eval" / "prices"
+# Mirror the explicit ``prices_dir=Path("data/prices_eval")`` that
+# ``firm.cli.eval_cmd`` passes to ``compute_spy_return`` / ``compute_basket_return``
+# (overrides the ``benchmarks._default_prices_dir`` default). Dry-run output and
+# the operator-facing reminder MUST match where parquets actually land.
+_PRICES_DIR = _REPO_ROOT / "data" / "prices_eval"
 _CAPTURED_ROOT = _REPO_ROOT / "data" / "captured"
 
 # Map --regime flag values to the canonical regime IDs accepted by
@@ -225,7 +227,10 @@ def main(regime_arg: str, dry_run: bool, yes_flag: bool) -> None:
         env = _build_subprocess_env(flag)
         args = _build_subprocess_args(flag)
         try:
-            subprocess.run(args, env=env, check=True)
+            # cwd=_REPO_ROOT anchors the subprocess so the relative prices_dir
+            # hard-coded in firm.cli.eval_cmd resolves under the repo root,
+            # not the operator's invoking shell CWD.
+            subprocess.run(args, env=env, check=True, cwd=str(_REPO_ROOT))
         except subprocess.CalledProcessError as exc:
             click.echo(
                 f"ERROR: eval subprocess for regime {regime_id} exited "

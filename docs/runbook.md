@@ -149,7 +149,7 @@ to repopulate the cache before switching back to `cached` mode.
 
 `make eval` runs in REPLAY mode (no network) and depends on two committed
 artifacts: YAML cassettes under `tests/eval/cassettes/<regime>/` and price
-parquets under `data/eval/prices/`. Both are captured by a one-time
+parquets under `data/prices_eval/`. Both are captured by a one-time
 operator-run script — `scripts/eval_capture.py` — which is the ONLY
 sanctioned way to (re)populate them.
 
@@ -191,7 +191,7 @@ boundary keeps env mutations from leaking across regimes.
 | Path | Committed? | Notes |
 |------|-----------|-------|
 | `tests/eval/cassettes/<regime_id>/*.yaml` | YES | One YAML per unique `(model, system, messages, tools)` tuple. |
-| `data/eval/prices/<TICKER>.parquet` | YES | Adjusted closes from yfinance; one parquet per ticker (idempotent). |
+| `data/prices_eval/<TICKER>.parquet` | YES | Adjusted closes from yfinance; one parquet per ticker (idempotent). |
 | `data/captured/<regime_id>/` | NO | Throwaway eval reports; safe to delete after verification. |
 
 ### Verify
