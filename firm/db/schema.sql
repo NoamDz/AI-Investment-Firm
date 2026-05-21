@@ -46,6 +46,8 @@ CREATE TABLE IF NOT EXISTS cash (
 );
 
 -- Decisions awaiting human approval. See spec §3.1, §8.4.
+-- NOTE: CREATE TABLE IF NOT EXISTS will NOT alter an existing table. This constraint
+-- applies to fresh DBs only. Delete data/firm.db to pick it up in dev.
 CREATE TABLE IF NOT EXISTS hitl_queue (
     decision_id     TEXT PRIMARY KEY,
     queued_at       TEXT NOT NULL,
@@ -53,6 +55,9 @@ CREATE TABLE IF NOT EXISTS hitl_queue (
     approver        TEXT,
     approval_nonce  TEXT,
     decided_at      TEXT,
+    -- approver must be supplied for decided rows; pending and timed_out rows may have
+    -- NULL approver — Slack/CLI always supplies it on approval/rejection (T14).
+    CHECK (status = 'pending' OR status = 'timed_out' OR approver IS NOT NULL),
     FOREIGN KEY (decision_id) REFERENCES decisions(id)
 );
 CREATE INDEX IF NOT EXISTS idx_hitl_queue_status ON hitl_queue(status);
