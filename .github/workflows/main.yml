@@ -1,0 +1,251 @@
+# ---------------------------------------------------------------------------
+# Main CI workflow (Plan 4 T28)
+#
+# Triggers on every push to `main` (post-merge) and on manual dispatch. This
+# is the "production-side" sibling of pr.yml: it re-runs the PR gates over
+# the merged state, then adds the things that only make sense after a merge
+# has landed:
+#   - eval-all       : full r1+r2+r3 sweep (not just r1)
+#   - terraform-plan : produces a tfplan.txt artifact for human review
+#   - docker-build-and-push : pushes the image to GHCR as :latest and :<sha>
+#
+# Artifacts produced: `terraform-plan` (tfplan.txt, 7-day retention).
+# GHCR images produced: ghcr.io/<owner>/<repo>:latest and :${{ github.sha }}.
+#
+# No wall-budget claim — post-merge CI is allowed to be slower than the PR
+# workflow. Per-job timeouts still apply so a stuck job fails fast.
+#
+# Job graph (all parallel, no inter-job deps — same pattern as pr.yml):
+#   lint                    (5 min)
+#   unit-tests              (10 min)
+#   requires-models         (10 min; continue-on-error, informational only)
+#   eval-all                (20 min; full r1+r2+r3 sweep)
+#   red-team                (5 min)
+#   terraform-validate      (3 min; skips gracefully until T31 lands infra/)
+#   terraform-plan          (5 min; skips gracefully until T31 lands infra/)
+#   docker-build-and-push   (10 min; pushes to GHCR)
+#
+# Action versions are pinned to MAJOR (e.g. @v4) for supply-chain hygiene.
+# ---------------------------------------------------------------------------
+name: Main CI
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref (e.g. rapid-fire merges) to free
+# runners. Group key differs from pr.yml so PR and main runs never fight.
+concurrency:
+  group: 'main-${{ github.ref }}'
+  cancel-in-progress: true
+
+# Default to read-only token; jobs that need more (e.g. docker-build-and-push
+# pushing to GHCR) opt in via their own job-level `permissions:` block.
+permissions:
+  contents: read
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Static checks: lint + type-check. Fast gate; runs in parallel with tests.
+  # -------------------------------------------------------------------------
+  lint:
+    name: lint (ruff + mypy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'pyproject.toml'
+      - name: Install dev extras
+        run: pip install -e ".[dev]"
+      - name: ruff check
+        run: ruff check .
+      - name: mypy firm/
+        run: mypy firm/
+
+  # -------------------------------------------------------------------------
+  # Unit + fast integration tests: every test NOT marked requires_models.
+  # -------------------------------------------------------------------------
+  unit-tests:
+    name: pytest (not requires_models)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'pyproject.toml'
+      - name: Install dev extras
+        run: pip install -e ".[dev]"
+      - name: pytest -m "not requires_models"
+        run: pytest -m "not requires_models" -q
+
+  # -------------------------------------------------------------------------
+  # Heavy tests gated on a downloaded model. Allowed to time out / fail —
+  # this job is informational; main-branch health does not depend on it.
+  # -------------------------------------------------------------------------
+  requires-models:
+    name: pytest (requires_models, soft)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'pyproject.toml'
+      - name: Install dev extras
+        run: pip install -e ".[dev]"
+      - name: pytest -m "requires_models"
+        run: pytest -m "requires_models" -q
+
+  # -------------------------------------------------------------------------
+  # Eval harness, FULL sweep (all regimes r1+r2+r3). Replaces pr.yml's
+  # eval-r1 gate — post-merge we want the complete picture, not just one
+  # regime. Also runs the determinism check on the produced reports/eval/
+  # tree (same as pr.yml).
+  #
+  # Wall budget bumped to 20 min to absorb ~3x the per-regime work; no
+  # 15-min ceiling on main.
+  # -------------------------------------------------------------------------
+  eval-all:
+    name: eval (all regimes) + determinism
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Fixture-grade HMAC secret (64 hex zeros) — mirrors
+      # scripts/eval_capture.py::_DEFAULT_HMAC_SECRET. NEVER a real secret;
+      # only used to satisfy HMAC verification during replay.
+      FIRM_HMAC_SECRET: '0000000000000000000000000000000000000000000000000000000000000000'
+      # Use recorded cassettes; the CI runner has no Anthropic API key.
+      FIRM_VCR_MODE: 'replay'
+      FIRM_LLM_MODE: 'cached'
+      FIRM_PRICES_MODE: 'replay'
+      FIRM_RANDOM_SEED: '42'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'pyproject.toml'
+      - name: Install dev extras
+        run: pip install -e ".[dev]"
+      - name: make eval REGIME=all
+        run: make eval REGIME=all
+      - name: scripts/check_reports_clean.sh
+        run: bash scripts/check_reports_clean.sh
+
+  # -------------------------------------------------------------------------
+  # Red-team suite: invariant-based adversarial tests over the 10 failure
+  # mode classes. Independent of unit-tests; runs in parallel.
+  # -------------------------------------------------------------------------
+  red-team:
+    name: red-team
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'pyproject.toml'
+      - name: Install dev extras
+        run: pip install -e ".[dev]"
+      - name: make red-team
+        run: make red-team
+
+  # -------------------------------------------------------------------------
+  # Terraform validate: lands properly once T31 creates infra/terraform/.
+  # Until then, skip gracefully so main isn't blocked on an absent dir.
+  # -------------------------------------------------------------------------
+  terraform-validate:
+    name: terraform validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: terraform -chdir=infra/terraform validate
+        run: |
+          if [ -d infra/terraform ]; then
+            terraform -chdir=infra/terraform init -backend=false
+            terraform -chdir=infra/terraform validate
+          else
+            echo "infra/terraform/ not yet created (lands in Plan 4 T31); skipping."
+          fi
+
+  # -------------------------------------------------------------------------
+  # Terraform plan: emits tfplan.txt as a 7-day-retention artifact so
+  # reviewers can eyeball post-merge infra deltas without re-running plan
+  # locally. Skips gracefully (no artifact produced) until T31 lands
+  # infra/terraform/.
+  #
+  # Upload step is gated on hashFiles('tfplan.txt') so it no-ops when the
+  # plan step skipped — cleaner than `if: always()` (which would try to
+  # upload a non-existent file and fail).
+  # -------------------------------------------------------------------------
+  terraform-plan:
+    name: terraform plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: terraform -chdir=infra/terraform plan
+        run: |
+          if [ -d infra/terraform ]; then
+            terraform -chdir=infra/terraform init -backend=false
+            terraform -chdir=infra/terraform plan -no-color -out=tfplan.binary
+            terraform -chdir=infra/terraform show -no-color tfplan.binary > tfplan.txt
+          else
+            echo "infra/terraform/ not yet created (lands in Plan 4 T31); skipping plan."
+          fi
+      - name: Upload tfplan.txt artifact
+        if: hashFiles('tfplan.txt') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: tfplan.txt
+          retention-days: 7
+
+  # -------------------------------------------------------------------------
+  # Build the production image and push to GHCR. Two tags:
+  #   - :latest          (always advances; convenience for `docker pull`)
+  #   - :${{ github.sha }} (immutable, pinnable from deploy manifests)
+  #
+  # Needs `packages: write` to push via GITHUB_TOKEN; keep `contents: read`
+  # minimal so the rest of the job stays least-privilege.
+  # -------------------------------------------------------------------------
+  docker-build-and-push:
+    name: docker build + push (GHCR)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: docker build + push
+        run: |
+          docker build . \
+            --tag 'ghcr.io/${{ github.repository }}:latest' \
+            --tag 'ghcr.io/${{ github.repository }}:${{ github.sha }}' \
+            --push
