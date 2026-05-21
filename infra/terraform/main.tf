@@ -24,21 +24,34 @@ locals {
 }
 
 # ---------------------------------------------------------------------------
-# TODO (Plan 4 T32–T37) — module composition. Each task adds one block here.
+# Module composition (Plan 4 T32–T37). Each task appends its own block.
 #
-#   1. module "network"        (T32) — VPC, public/private subnets, NAT, SGs.
-#   2. module "storage"        (T34) — RDS Postgres + S3 buckets (reports,
-#                                       traces, eval cassettes).
-#   3. module "secrets"        (T35) — Secrets Manager entries (HMAC, API
-#                                       keys, broker creds).
-#   4. module "bedrock"        (T36) — AgentCore runtime config + IAM role
-#                                       for the Reporter agent (§11.1).
-#   5. module "compute"        (T33) — ECS Fargate cluster + task definition
-#                                       + service (consumes network + secrets).
-#   6. module "observability"  (T37) — CloudWatch log groups + OTLP collector
-#                                       sidecar wiring + alarms.
+#   1. module "network"        (T32, DONE)  — VPC, public/private subnets,
+#                                              NAT, SGs.
+#   2. module "storage"        (T34, TODO)  — RDS Postgres + S3 buckets
+#                                              (reports, traces, eval
+#                                              cassettes).
+#   3. module "secrets"        (T35, TODO)  — Secrets Manager entries (HMAC,
+#                                              API keys, broker creds).
+#   4. module "bedrock"        (T36, TODO)  — AgentCore runtime config + IAM
+#                                              role for the Reporter agent
+#                                              (§11.1).
+#   5. module "compute"        (T33, TODO)  — ECS Fargate cluster + task
+#                                              definition + service
+#                                              (consumes network + secrets).
+#   6. module "observability"  (T37, TODO)  — CloudWatch log groups + OTLP
+#                                              collector sidecar wiring +
+#                                              alarms.
 #
 # Composition order above reflects dependency direction: network and storage
 # stand alone; secrets feeds compute; bedrock is self-contained; compute pulls
 # from network + secrets; observability wraps compute.
 # ---------------------------------------------------------------------------
+
+module "network" {
+  source = "./modules/network"
+
+  vpc_cidr     = var.vpc_cidr
+  project_name = var.project_name
+  env          = var.env
+}
