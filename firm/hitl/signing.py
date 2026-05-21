@@ -20,16 +20,23 @@ Any of the following causes ``verify`` to return ``False``:
 
 ``verify`` is **total** — it never raises on adversarial input; it returns False.
 
-Future extension
-----------------
-T13a will add dual-key rotation by wrapping ``sign``/``verify`` so that the
-verifier accepts signatures produced by either the current or the previous key.
-No changes to this module's API are expected.
+Dual-key rotation (T13a)
+------------------------
+``verify_with_rotation`` extends verification to accept signatures produced by
+either ``current_secret`` or a ``previous_secret`` that is still within its
+configurable grace window (default 24 hours).  The runbook (T29) documents the
+rotation procedure: set previous → set new → wait window → unset previous.
+
+Rotation events are logged at INFO level so audit trails can trace which key
+matched.  The existing ``verify`` function is unchanged.
 """
 from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
+
+_log = logging.getLogger(__name__)
 
 # Maximum age of a valid signature.  Older signatures are rejected as potential
 # replays even when the HMAC itself is valid.
@@ -153,3 +160,87 @@ def verify(
 
     except Exception:  # noqa: BLE001 — intentional total-function contract
         return False
+
+
+# ---------------------------------------------------------------------------
+# T13a: Dual-key rotation
+# ---------------------------------------------------------------------------
+
+_DEFAULT_GRACE_WINDOW_SECONDS: int = 86400  # 24 hours
+
+
+def verify_with_rotation(
+    *,
+    payload: dict[str, object],
+    signature: str,
+    current_secret: bytes,
+    previous_secret: bytes | None = None,
+    rotated_at: int | None = None,
+    now: int,
+    grace_window_seconds: int = _DEFAULT_GRACE_WINDOW_SECONDS,
+) -> bool:
+    """Verify a signature against ``current_secret``, falling back to
+    ``previous_secret`` if rotation is still within the grace window.
+
+    Returns ``True`` iff:
+
+    * signature verifies under ``current_secret``, **or**
+    * signature verifies under ``previous_secret`` **and**
+      ``previous_secret`` is not ``None`` **and**
+      ``rotated_at`` is not ``None`` **and**
+      ``now - rotated_at <= grace_window_seconds``.
+
+    The existing replay-window check inside :func:`verify` is applied for every
+    key tried, so an expired ``payload["ts"]`` is still rejected even when the
+    HMAC matches.
+
+    Parameters
+    ----------
+    payload:
+        Dict containing ``"decision_id"`` (str), ``"approver_id"`` (str), and
+        ``"ts"`` (int).
+    signature:
+        Hex-encoded HMAC digest to verify.
+    current_secret:
+        The active HMAC key.
+    previous_secret:
+        The key that was active before the most recent rotation.  ``None``
+        disables fallback entirely.
+    rotated_at:
+        Unix timestamp (integer seconds) when the rotation occurred.  ``None``
+        disables fallback even if ``previous_secret`` is set.
+    now:
+        Current Unix timestamp (integer seconds).
+    grace_window_seconds:
+        How long (in seconds) after ``rotated_at`` the previous key is still
+        accepted.  Defaults to 86400 (24 hours).
+
+    Returns
+    -------
+    bool
+        ``True`` only when at least one key produces a valid HMAC **and** the
+        timestamp is within its replay window.
+    """
+    # Always try the current key first.
+    if verify(payload=payload, signature=signature, secret=current_secret, now=now):
+        return True
+
+    # Fallback to previous key only when rotation metadata is complete and the
+    # grace window has not expired.
+    if (
+        previous_secret is not None
+        and rotated_at is not None
+        and (now - rotated_at) <= grace_window_seconds
+        and verify(payload=payload, signature=signature, secret=previous_secret, now=now)
+    ):
+        _log.info(
+            "Slack signature verified via previous key (rotation grace window active); "
+            "rotated_at=%d now=%d age=%ds window=%ds",
+            rotated_at,
+            now,
+            now - rotated_at,
+            grace_window_seconds,
+        )
+        return True
+
+    return False
