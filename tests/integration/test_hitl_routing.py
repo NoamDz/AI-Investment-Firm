@@ -83,7 +83,9 @@ def _build_graph(db: Path, clock: ReplayClock, broker: FakeBroker, tmp_path: Pat
         return {"risk_decision": escalate_decision}
 
     hitl = make_hitl(db_path=db, clock=clock)
-    execution = make_execution(db_path=db, broker=broker, clock=clock)
+    execution = make_execution(
+        db_path=db, broker=broker, clock=clock, nonce_secret=b"x" * 32
+    )
     reporter = make_reporter(reports_root=tmp_path / "reports", clock=clock, db_path=db)
 
     return (

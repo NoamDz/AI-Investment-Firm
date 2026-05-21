@@ -375,7 +375,9 @@ def run(once: bool) -> None:
             click.echo(f"[firm run] Slack notifier unavailable: {_exc}", err=True)
 
     hitl = make_hitl(db_path=db, clock=clock, notifier=_notifier)
-    execution = make_execution(db_path=db, broker=broker, clock=clock)
+    execution = make_execution(
+        db_path=db, broker=broker, clock=clock, nonce_secret=nonce_secret
+    )
     reporter = make_reporter(reports_root=_reports_root(), clock=clock, db_path=db)
 
     graph = build_graph(

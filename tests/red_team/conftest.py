@@ -376,7 +376,12 @@ def _run_execution(payload_text: str, ctx: RedTeamCtx) -> Decision | None:
     )
     _persist_decision_to_db(ctx.db_path, risk_decision, ctx.clock)
 
-    exe = make_execution(db_path=ctx.db_path, broker=ctx.broker, clock=ctx.clock)
+    exe = make_execution(
+        db_path=ctx.db_path,
+        broker=ctx.broker,
+        clock=ctx.clock,
+        nonce_secret=b"x" * 32,
+    )
     out = exe({"risk_decision": risk_decision, "hitl_required": False})
     # execution returns execution_result, not a Decision; return None (no Decision produced).
     return None

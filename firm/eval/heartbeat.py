@@ -309,7 +309,12 @@ def make_eval_heartbeat(
                 return {"risk_decision": decision}
 
         hitl = make_hitl(db_path=db_path, clock=boot_clock, notifier=None)
-        execution = make_execution(db_path=db_path, broker=broker, clock=boot_clock)
+        execution = make_execution(
+            db_path=db_path,
+            broker=broker,
+            clock=boot_clock,
+            nonce_secret=secret_bytes,
+        )
         scoped_reports = (
             reports_root if reports_root is not None else Path("data/reports")
         )

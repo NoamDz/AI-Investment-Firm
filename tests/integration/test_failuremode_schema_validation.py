@@ -239,7 +239,9 @@ def test_graph_propagates_refuse_schema_validation_failed_and_writes_no_broker_c
     assert risk_decision.action == ActionEnum.REFUSE
 
     # --- Step 3: Execution node ----------------------------------------------
-    execution_node = make_execution(db_path=db_path, broker=broker, clock=clock)
+    execution_node = make_execution(
+        db_path=db_path, broker=broker, clock=clock, nonce_secret=b"x" * 32
+    )
     exe_out = execution_node(
         {"risk_decision": risk_out["risk_decision"], "hitl_required": False}
     )

@@ -183,7 +183,9 @@ def test_graph_propagates_refuse_stale_data_and_writes_no_broker_call(
     )
 
     # --- Step 2: Execution node ----------------------------------------------
-    execution_node = make_execution(db_path=db_path, broker=stale_broker, clock=clock)
+    execution_node = make_execution(
+        db_path=db_path, broker=stale_broker, clock=clock, nonce_secret=b"x" * 32
+    )
     exe_out = execution_node(
         {"risk_decision": risk_out["risk_decision"], "hitl_required": False}
     )
