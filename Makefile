@@ -27,4 +27,4 @@ report:
 	python -m firm.cli report --date $(DATE)
 
 clean:
-	rm -rf data/firm.db data/firm.db-wal data/firm.db-shm data/reports
+	rm -rf data/firm.db data/firm.db-wal data/firm.db-shm data/reports data/litestream
