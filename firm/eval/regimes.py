@@ -9,12 +9,13 @@ Each carries the full 30-ticker universe loaded from config/universe.yaml.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from firm.core.config import load_universe
 
@@ -51,6 +52,37 @@ class RegimeConfig(BaseModel):
     end_date: date
     universe: tuple[str, ...] = Field(default_factory=tuple)
     seed_overrides: Mapping[str, int] = Field(default_factory=lambda: MappingProxyType({}))
+
+    @field_validator("seed_overrides", mode="after")
+    @classmethod
+    def _freeze_seed_overrides(cls, v: Mapping[str, int]) -> Mapping[str, int]:
+        # Pydantic coerces the input to a mutable dict; re-wrap so the model
+        # actually honors its frozen contract.
+        return MappingProxyType(dict(v))
+
+    @model_validator(mode="after")
+    def _end_after_start(self) -> "RegimeConfig":
+        if self.end_date < self.start_date:
+            raise ValueError(
+                f"end_date {self.end_date} must be >= start_date {self.start_date}"
+            )
+        return self
+
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> "RegimeConfig":
+        # MappingProxyType cannot be pickled, so Pydantic's default
+        # deepcopy (which deep-copies ``__dict__``) fails. All fields here
+        # are themselves immutable (str / date / tuple-of-str / frozen
+        # mapping of str→int), so it's safe to reconstruct via the public
+        # constructor; the field_validator re-wraps seed_overrides into a
+        # fresh MappingProxyType.
+        return RegimeConfig(
+            regime_id=self.regime_id,
+            description=self.description,
+            start_date=self.start_date,
+            end_date=self.end_date,
+            universe=self.universe,
+            seed_overrides=dict(self.seed_overrides),
+        )
 
 
 # ---------------------------------------------------------------------------

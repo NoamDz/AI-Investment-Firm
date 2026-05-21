@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import copy
-import dataclasses
 from datetime import date
+from types import MappingProxyType
 
 import pytest
+from pydantic import ValidationError
 
 from firm.eval.regimes import (
     ALL_REGIMES,
@@ -35,7 +36,6 @@ def _regime_to_dict(r: RegimeConfig) -> dict:
 
 def _regime_from_dict(d: dict) -> RegimeConfig:
     """Reconstruct a RegimeConfig from the dict produced by _regime_to_dict."""
-    from types import MappingProxyType
     return RegimeConfig(
         regime_id=d["regime_id"],
         description=d["description"],
@@ -126,3 +126,24 @@ def test_all_regimes_constant() -> None:
     assert R2_DRAWDOWN in ALL_REGIMES
     assert R3_QUIET in ALL_REGIMES
     assert isinstance(ALL_REGIMES, tuple)
+
+
+def test_seed_overrides_is_truly_immutable() -> None:
+    """seed_overrides must be a MappingProxyType, not a coerced dict."""
+    for regime in (R1_EARNINGS, R2_DRAWDOWN, R3_QUIET):
+        assert isinstance(regime.seed_overrides, MappingProxyType)
+        with pytest.raises(TypeError):
+            regime.seed_overrides["new_key"] = 99  # type: ignore[index]
+
+
+def test_regime_config_rejects_inverted_dates() -> None:
+    """end_date < start_date must raise ValidationError at construction time."""
+    with pytest.raises(ValidationError, match="must be >= start_date"):
+        RegimeConfig(
+            regime_id="bogus",
+            description="x",
+            start_date=date(2024, 8, 9),
+            end_date=date(2024, 8, 5),
+            universe=R1_EARNINGS.universe,
+            seed_overrides={},
+        )
