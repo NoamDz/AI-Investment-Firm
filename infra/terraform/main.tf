@@ -76,3 +76,12 @@ module "storage" {
   private_subnet_ids    = module.network.private_subnet_ids
   rds_security_group_id = module.network.rds_security_group_id
 }
+
+module "secrets" {
+  source = "./modules/secrets"
+
+  project_name = var.project_name
+  env          = var.env
+  # kms_key_deletion_window_days uses the module default (30) — maximum AWS
+  # recovery window; override via root tfvars only if tests need faster cleanup.
+}
