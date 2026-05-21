@@ -280,12 +280,15 @@ Span schema fields: `trace_id`, `span_id`, `parent_span_id`, `agent`, `operation
 jq 'select(.decision_id == "dec-abc123")' traces/2024-03-13/run-<run_id>.jsonl
 ```
 
-### All `agent.research` spans ordered by start time
+### All `agent.research` spans (longest first)
 
-`jq` operates on streaming JSONL; sort requires slurp:
+The exporter does not write a `start_time` field, and `span_id` is a random
+OTel-assigned 64-bit hex (not monotonic), so neither can be used to recover
+chronological order. JSONL line order reflects span-end order; for ranking
+by weight use `duration_ms`:
 
 ```bash
-jq -s '[.[] | select(.operation == "agent.research")] | sort_by(.span_id)' \
+jq -s '[.[] | select(.operation == "agent.research")] | sort_by(-.duration_ms)' \
   traces/2024-03-13/run-<run_id>.jsonl
 ```
 
