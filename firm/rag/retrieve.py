@@ -89,7 +89,7 @@ def _payload_to_chunk(payload: dict[str, Any]) -> Chunk:
         text=str(payload["text"]),
         char_span=char_span,
         token_count=int(payload["token_count"]),
-        source=str(payload.get("source", "")),
+        source=str(payload["source"]),
         doc_summary=payload.get("doc_summary"),
         metadata={},
     )

@@ -38,6 +38,7 @@ def _payload(
         "doc_id": chunk_id.split("::")[0],
         "ticker": "AAPL",
         "section": "body",
+        "source": "financebench",
         "published_at": when.timestamp(),
         "text": text,
         "doc_summary": doc_summary,

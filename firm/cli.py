@@ -654,6 +654,9 @@ def ingest(config: str, max_docs: int | None, source_name: str) -> None:
 
     # BM25 pre-pass: collect chunk texts from ALL selected sources so IDF is
     # comparable across corpora. Fit once on the union.
+    # NB: news source is iterated twice (pre-pass + run_ingest). With tickers=[]
+    # this is free; if T21+ wires real tickers, exclude news from the pre-pass
+    # so its TokenBucket budget isn't double-burned.
     click.echo("Building BM25 vocabulary (pre-pass)...")
     all_texts: list[str] = _collect_chunk_texts(sources, rag_config, chunk_document, tables_to_prose)
     if all_texts:
