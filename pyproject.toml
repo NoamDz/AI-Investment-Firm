@@ -15,6 +15,7 @@ dependencies = [
     "anthropic>=0.39",
     "qdrant-client>=1.11,<1.13",  # keep within one minor of the v1.11 server pinned in docker-compose
     "numpy>=1.26",
+    "jinja2>=3.1",
     "openpyxl>=3.1",
     "sentence-transformers>=3.0",
     "einops>=0.7",  # required by nomic-embed-text-v1.5 remote modeling code
