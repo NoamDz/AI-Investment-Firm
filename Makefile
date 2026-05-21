@@ -1,7 +1,7 @@
 # GnuWin32 Make defaults to cmd.exe; force bash so recipes use POSIX syntax.
 SHELL := bash
 
-.PHONY: install test demo demo-docker reconcile ingest report clean litestream-drill check-determinism
+.PHONY: install test demo demo-docker reconcile ingest report clean litestream-drill check-determinism red-team
 
 install:
 	pip install -e ".[dev]"
@@ -34,3 +34,6 @@ clean:
 
 check-determinism:
 	bash scripts/check_reports_clean.sh
+
+red-team:
+	python -m firm.cli red-team

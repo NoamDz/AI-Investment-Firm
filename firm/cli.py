@@ -766,6 +766,70 @@ def doctor(db_path_str: str | None, litestream_dir: str, rag_config_path_str: st
     sys.exit(non_ok)
 
 
+@cli.command(name="red-team")
+@click.option(
+    "--vcr-mode",
+    default="replay",
+    type=click.Choice(["replay", "record", "live"]),
+    show_default=True,
+    help="VCR cassette mode passed to FIRM_VCR_MODE.",
+)
+@click.option(
+    "--timeout",
+    default=60,
+    type=int,
+    show_default=True,
+    help="Soft wall-clock budget in seconds (warning only, not a hard fail).",
+)
+def red_team(vcr_mode: str, timeout: int) -> None:
+    """Run the red-team injection corpus (50 cases × 10 classes)."""
+    import time
+
+    import pytest
+
+    os.environ["FIRM_VCR_MODE"] = vcr_mode
+
+    # 10 per-class test files (T07) — enumerate explicitly to exclude schema/helper files.
+    test_files = [
+        "tests/red_team/test_direct_override.py",
+        "tests/red_team/test_role_hijack.py",
+        "tests/red_team/test_delimiter_break.py",
+        "tests/red_team/test_unicode_homoglyph.py",
+        "tests/red_team/test_encoded_payload.py",
+        "tests/red_team/test_indirect_tool_output.py",
+        "tests/red_team/test_multi_step_chain.py",
+        "tests/red_team/test_citation_forgery.py",
+        "tests/red_team/test_spoofed_approval.py",
+        "tests/red_team/test_confused_deputy.py",
+    ]
+
+    class _CountPlugin:
+        passed: int = 0
+        failed: int = 0
+        total: int = 0
+
+        def pytest_runtest_logreport(self, report: Any) -> None:
+            if report.when == "call":
+                self.total += 1
+                if report.outcome == "passed":
+                    self.passed += 1
+                else:
+                    self.failed += 1
+
+    plugin = _CountPlugin()
+    start = time.monotonic()
+    rc = pytest.main(["-q", *test_files], plugins=[plugin])
+    elapsed = time.monotonic() - start
+
+    click.echo(f"{plugin.passed}/{plugin.total} passed")
+    if elapsed > timeout:
+        click.echo(
+            f"WARN: suite took {elapsed:.1f}s > {timeout}s budget", err=True
+        )
+    if rc != 0 or plugin.passed != plugin.total:
+        sys.exit(1)
+
+
 def _collect_chunk_texts(
     sources: list[Any],
     rag_config: Any,
