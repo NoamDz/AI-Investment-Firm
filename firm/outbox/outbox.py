@@ -105,7 +105,7 @@ def place_order_via_outbox(
         # next heartbeat's recover_pending picks it up.
         payload_dump = decision.payload.model_dump(mode="json")
         last_exc: BaseException | None = None
-        for attempt in range(1, max_attempts + 1):  # noqa: B007 -- attempt unused; loop bounds the retry budget
+        for _ in range(max_attempts):
             try:
                 result = broker.submit(payload_dump, idempotency_key=key)
             except Exception as exc:  # noqa: BLE001 -- broker exceptions are opaque/3rd-party

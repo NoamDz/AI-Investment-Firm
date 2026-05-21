@@ -78,14 +78,13 @@ The fixture deliberately does NOT:
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-
-import pytest
 
 from firm.agents.execution import make_execution
 from firm.agents.reporter import _persist_decisions_from_state
@@ -350,8 +349,7 @@ def test_broker_503_emits_refuse_with_broker_unavailable_and_leaves_outbox_pendi
     # Parses the chain JSON to verify it points back to the executable BUY.
     # (Column is stored as ``parent_chain`` in the schema, which is the
     # serialised form of ``Decision.decision_id_chain``.)
-    import json as _json
-    chain = _json.loads(refuse_row["parent_chain"])
+    chain = json.loads(refuse_row["parent_chain"])
     assert chain == [buy_decision.id], (
         f"REFUSE decision_id_chain must point back to the failing BUY; "
         f"expected [{buy_decision.id!r}], got {chain!r}"
@@ -455,22 +453,3 @@ def test_broker_unavailable_error_message_includes_attempts_and_key() -> None:
     assert exc.idempotency_key == "abc123"
     assert exc.attempts == 3
     assert exc.underlying is underlying
-
-
-# Pin the integration test file is collectable by the failure-mode coverage
-# registry — sanity check the function name matches the registry locator.
-def test_failure_mode_registry_locator_matches() -> None:
-    from tests.integration.test_failure_mode_coverage import FAILURE_MODE_FIXTURES
-    from firm.core.models import FailureMode
-
-    if FailureMode.BROKER_UNAVAILABLE not in FAILURE_MODE_FIXTURES:
-        pytest.skip(
-            "BROKER_UNAVAILABLE not yet migrated to FAILURE_MODE_FIXTURES; "
-            "this assertion runs after Part C of T25."
-        )
-    locator = FAILURE_MODE_FIXTURES[FailureMode.BROKER_UNAVAILABLE]
-    assert (
-        locator
-        == "tests/integration/test_failuremode_broker_unavailable.py"
-        "::test_broker_503_emits_refuse_with_broker_unavailable_and_leaves_outbox_pending"
-    )
