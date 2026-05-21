@@ -1,0 +1,13 @@
+# Per-model rate card (USD per 1M tokens). Plan 3 T04 reads only the
+# ``profiles`` section here for cost-per-call computation; T06 will extend
+# this file with ``weights``, ``fallback_chain``, and per-profile
+# ``max_tokens`` / ``temperature``.
+profiles:
+  sonnet:
+    model_id: claude-sonnet-4-6
+    input_per_mtok_usd: 3.00
+    output_per_mtok_usd: 15.00
+  haiku:
+    model_id: claude-haiku-4-5
+    input_per_mtok_usd: 0.80
+    output_per_mtok_usd: 4.00

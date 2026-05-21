@@ -128,3 +128,16 @@ def load_rag_config(path: Path) -> RagConfig:
 
 def load_llm_config(path: Path) -> LlmConfig:
     return LlmConfig.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
+
+
+def load_router_config(path: Path) -> dict:
+    """Return ``config/router.yaml`` as a parsed dict.
+
+    The T04 cost helper reads the ``profiles`` subset only.  T06 will extend
+    the same file with ``weights`` / ``fallback_chain`` / per-profile
+    ``max_tokens`` / ``temperature`` — at which point this loader will gain
+    a Pydantic model.  For now it stays a plain dict so partial files (T04
+    only ships ``profiles``) don't trip validation.
+    """
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return raw if isinstance(raw, dict) else {}
