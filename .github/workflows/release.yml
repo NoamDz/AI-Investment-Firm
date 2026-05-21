@@ -1,0 +1,218 @@
+# ---------------------------------------------------------------------------
+# Release workflow (Plan 4 T29)
+#
+# Triggers:
+#   - push of a semver tag matching `v*.*.*` (e.g. v0.1.0, v1.2.3-rc1)
+#   - workflow_dispatch (manual fallback; accepts an optional `tag` input
+#     purely for documentation — the workflow always uses github.ref_name
+#     so a manual dispatch must still be invoked against the tag ref)
+#
+# Produces:
+#   - workflow artifact `firm-release-${{ github.ref_name }}` containing
+#     `firm-<VERSION>.zip` + `firm-<VERSION>.zip.sha256` (90-day retention)
+#   - a GitHub Release at the tag, with both files attached and a short
+#     auto-generated body listing the sha256 and the source commit
+#
+# Does NOT:
+#   - push to GHCR (main.yml already publishes :latest and :<sha> on every
+#     merge; a future task may extend that to :vX.Y.Z, but T29 stays out
+#     of the registry entirely)
+#   - apply terraform (infra changes flow through the regular PR/main
+#     gates; releasing the source tree is independent of any deploy)
+#   - sign the artifact (no Sigstore / no cosign in T29 scope)
+#
+# Job graph (sequential — releases prioritize correctness over speed):
+#   verify              (15 min)
+#   build-release-zip   (10 min; needs verify)
+#   create-release      (5 min;  needs build-release-zip)
+#
+# Action versions are pinned to MAJOR (e.g. @v4) for supply-chain hygiene,
+# matching pr.yml and main.yml.
+# ---------------------------------------------------------------------------
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Semver tag to release (e.g. v0.1.0). Informational only — workflow uses github.ref_name.'
+        required: false
+
+# Releases are NOT cancellable: a half-finished release (zip uploaded but
+# GitHub Release not created, or vice-versa) is worse than waiting for the
+# previous run to finish. Group per-ref so two different tags can still
+# release in parallel.
+concurrency:
+  group: 'release-${{ github.ref }}'
+  cancel-in-progress: false
+
+# Default to read-only token; create-release opts into `contents: write`
+# at the job level so the GitHub Release API can publish the tag.
+permissions:
+  contents: read
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Quick safety gate. Re-runs lint + unit tests + red-team on the tagged
+  # commit. The expectation is "main was already green when this tag was
+  # cut" — this job exists to catch the case where someone tagged a commit
+  # that bypassed the PR/main gates (e.g. a tag pushed from a fork or from
+  # an unmerged branch). Single job, bash-chained steps: if any step fails
+  # the whole release aborts before any artifact is produced.
+  # -------------------------------------------------------------------------
+  verify:
+    name: verify (lint + unit-tests + red-team)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'pyproject.toml'
+      - name: Install dev extras
+        run: pip install -e ".[dev]"
+      - name: ruff + mypy + pytest (not requires_models) + red-team
+        run: |
+          ruff check .
+          mypy firm/
+          pytest -m "not requires_models" -q
+          make red-team
+
+  # -------------------------------------------------------------------------
+  # Build the release artifact. Strategy:
+  #   1. `git archive` over the tagged ref — gives us a clean, deterministic
+  #      tree of everything tracked in git (so it naturally excludes .git/,
+  #      __pycache__/, .venv/, the bulky parquets under data/captured/ and
+  #      data/prices_eval/ which are gitignored, etc.).
+  #   2. Extract to a working dir, then add any committed-but-large
+  #      reports/ artifacts on top with `zip -ur`. `reports/` does not
+  #      exist today (skipped gracefully); when it does, this step picks
+  #      it up automatically.
+  #   3. Compute sha256 in the standard `<sha>  <filename>` two-column
+  #      format consumed by `sha256sum -c`.
+  #
+  # fetch-depth: 0 is required so `git archive` sees the full tree at
+  # the tagged commit (default depth=1 works for HEAD but breaks if the
+  # tag ever points elsewhere).
+  # -------------------------------------------------------------------------
+  build-release-zip:
+    name: build release zip
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [verify]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'pyproject.toml'
+      - name: Determine version from tag
+        id: version
+        run: |
+          # github.ref_name strips `refs/tags/` automatically (e.g. v0.1.0).
+          VERSION='${{ github.ref_name }}'
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Releasing VERSION=${VERSION}"
+      - name: Build firm-${{ steps.version.outputs.version }}.zip
+        run: |
+          VERSION='${{ steps.version.outputs.version }}'
+          ZIP="firm-${VERSION}.zip"
+          # git archive emits a clean tree of tracked files at the tag.
+          # Using zip format directly so we can `zip -ur` more in later.
+          # The `--prefix` keeps the archive root predictable for consumers
+          # who extract it; matches the conventional `<name>-<version>/`
+          # layout produced by tools like `python -m build --sdist`.
+          git archive --format=zip --prefix="firm-${VERSION}/" \
+            --output="${ZIP}" '${{ github.ref }}'
+          # Append committed `reports/` artifacts if the dir exists.
+          # Skipped gracefully today (dir does not yet exist).
+          if [ -d reports ]; then
+            echo "Appending reports/ to ${ZIP}"
+            # `zip -r` with --prefix-equivalent path so reports/ lands
+            # under firm-<VERSION>/reports/ inside the archive.
+            mkdir -p "_stage/firm-${VERSION}"
+            cp -r reports "_stage/firm-${VERSION}/reports"
+            (cd _stage && zip -ur "../${ZIP}" "firm-${VERSION}/reports")
+            rm -rf _stage
+          else
+            echo "reports/ not present; skipping."
+          fi
+          ls -lh "${ZIP}"
+      - name: Compute sha256
+        run: |
+          VERSION='${{ steps.version.outputs.version }}'
+          ZIP="firm-${VERSION}.zip"
+          # Two-column format (`<sha>  <filename>`) is what `sha256sum -c`
+          # consumes; keeps the checksum file directly verifiable.
+          sha256sum "${ZIP}" > "${ZIP}.sha256"
+          cat "${ZIP}.sha256"
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firm-release-${{ github.ref_name }}
+          path: |
+            firm-${{ steps.version.outputs.version }}.zip
+            firm-${{ steps.version.outputs.version }}.zip.sha256
+          retention-days: 90
+
+  # -------------------------------------------------------------------------
+  # Publish the GitHub Release. Downloads the artifact built in the
+  # previous job, then hands both files to softprops/action-gh-release.
+  #
+  # prerelease: contains(github.ref_name, '-') auto-flags pre-release
+  # tags like v1.0.0-rc1 / v0.2.0-beta.3. Plain semver (v1.0.0) has no
+  # dash and stays prerelease=false. The expression is unquoted so it
+  # evaluates to a boolean — quoting it would make every run prerelease.
+  #
+  # Needs `contents: write` to call the GitHub Releases API.
+  # -------------------------------------------------------------------------
+  create-release:
+    name: create GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [build-release-zip]
+    permissions:
+      contents: write
+    steps:
+      - name: Download release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: firm-release-${{ github.ref_name }}
+      - name: Assemble release body
+        id: body
+        run: |
+          VERSION='${{ github.ref_name }}'
+          ZIP="firm-${VERSION}.zip"
+          SHA="$(awk '{print $1}' "${ZIP}.sha256")"
+          # Multiline output via heredoc delimiter — the only safe way to
+          # push newline-bearing values into $GITHUB_OUTPUT.
+          {
+            echo 'body<<EOF'
+            echo "Source release for \`${VERSION}\`."
+            echo ''
+            echo "Artifact: \`${ZIP}\`"
+            echo "sha256: \`${SHA}\`"
+            echo ''
+            echo "Built from commit \`${{ github.sha }}\`."
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body: ${{ steps.body.outputs.body }}
+          files: |
+            firm-${{ github.ref_name }}.zip
+            firm-${{ github.ref_name }}.zip.sha256
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
