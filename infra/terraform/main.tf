@@ -31,9 +31,9 @@ locals {
 #   2. module "storage"        (T34, DONE)  — RDS Postgres + S3 buckets
 #                                              (reports, traces, eval
 #                                              cassettes).
-#   3. module "secrets"        (T35, TODO)  — Secrets Manager entries (HMAC,
+#   3. module "secrets"        (T35, DONE)  — Secrets Manager entries (HMAC,
 #                                              API keys, broker creds).
-#   4. module "bedrock"        (T36, TODO)  — AgentCore runtime config + IAM
+#   4. module "bedrock"        (T36, DONE)  — AgentCore runtime config + IAM
 #                                              role for the Reporter agent
 #                                              (§11.1).
 #   5. module "compute"        (T33, DONE)  — ECS Fargate cluster + task
@@ -84,4 +84,18 @@ module "secrets" {
   env          = var.env
   # kms_key_deletion_window_days uses the module default (30) — maximum AWS
   # recovery window; override via root tfvars only if tests need faster cleanup.
+}
+
+# bedrock depends on secrets: IAM grants reference exact secret ARNs and the
+# KMS CMK ARN produced by modules/secrets. Terraform infers the edge from the
+# module.secrets.* references below — no explicit depends_on needed.
+module "bedrock" {
+  source = "./modules/bedrock"
+
+  project_name         = var.project_name
+  env                  = var.env
+  hmac_secret_arn      = module.secrets.secret_arns["firm/firm_hmac_secret"]
+  hmac_secret_prev_arn = module.secrets.secret_arns["firm/firm_hmac_secret_prev"]
+  hmac_rotated_at_arn  = module.secrets.secret_arns["firm/firm_hmac_rotated_at"]
+  secrets_kms_key_arn  = module.secrets.kms_key_arn
 }
