@@ -42,6 +42,11 @@ red-team:
 # (e.g. `make eval REGIME=r1` for PR-speed CI). When unset, firm.cli eval
 # runs the full r1+r2+r3 sweep — preserving the historical default for
 # `make eval` callers that don't pass REGIME.
+#
+# The `$(if $(REGIME),...)` guard treats an empty assignment (`REGIME=`)
+# as falsy and emits no `--regime` flag — same as unset. Intentional: CI
+# callers can pass `REGIME=` to explicitly request the full sweep without
+# editing the recipe.
 eval:
 	FIRM_LLM_MODE=$${FIRM_LLM_MODE:-cached} \
 	FIRM_VCR_MODE=$${FIRM_VCR_MODE:-replay} \

@@ -7,19 +7,20 @@
 #   -> make eval REGIME=r1 -> scripts/check_reports_clean.sh
 #   -> make red-team -> terraform validate -> docker build (no push)
 #
-# Wall-clock budget: <=15 minutes, achieved by running jobs in parallel.
-# The longest single job (eval-r1 / docker-build) sets the wall time; per-job
-# timeout-minutes are tuned so a stuck job fails fast rather than burning the
-# 15-minute envelope.
+# Wall-clock budget: <=10 min wall via full job parallelism (within the
+# 15-min spec budget). Every job runs with no `needs:` dependencies, so
+# wall time = max(per-job timeout-minutes) = 10 min (unit-tests /
+# requires-models). Per-job timeouts are tuned so a stuck job fails fast
+# rather than burning the 15-minute envelope.
 #
-# Job graph:
-#   lint --(no deps)
-#   unit-tests --(no deps)
-#   requires-models --(no deps; continue-on-error, informational only)
-#   red-team --(no deps)
-#   terraform-validate --(no deps; skips gracefully until T31 lands infra/)
-#   docker-build --(no deps)
-#   eval-r1 --(needs: unit-tests)  # gate eval on green unit tests
+# Job graph (all parallel, no inter-job deps):
+#   lint                (5 min)
+#   unit-tests          (10 min)
+#   requires-models     (10 min; continue-on-error, informational only)
+#   eval-r1             (8 min)
+#   red-team            (5 min)
+#   terraform-validate  (3 min; skips gracefully until T31 lands infra/)
+#   docker-build        (8 min)
 #
 # Action versions are pinned to MAJOR (e.g. @v4) for supply-chain hygiene.
 # ---------------------------------------------------------------------------
@@ -100,12 +101,16 @@ jobs:
   # -------------------------------------------------------------------------
   # Eval harness, single regime (r1) for PR-speed. Also runs the
   # determinism check on the produced reports/eval/ tree.
+  #
+  # No `needs:` on unit-tests — runs fully in parallel to keep the wall
+  # budget at <=10 min. If unit-tests fail, the PR is already red; serializing
+  # eval behind it would push the worst-case chain to 18 min (over budget)
+  # without preventing any new class of failure.
   # -------------------------------------------------------------------------
   eval-r1:
     name: eval (regime r1) + determinism
     runs-on: ubuntu-latest
     timeout-minutes: 8
-    needs: unit-tests
     env:
       # Fixture-grade HMAC secret (64 hex zeros) — mirrors
       # scripts/eval_capture.py::_DEFAULT_HMAC_SECRET. NEVER a real secret;

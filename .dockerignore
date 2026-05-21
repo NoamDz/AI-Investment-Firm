@@ -1,0 +1,36 @@
+# Keep the build context small: the Dockerfile only COPYs pyproject.toml,
+# firm/, config/, scripts/, and data/precomputed/. Everything excluded
+# below would otherwise be tar-streamed to the daemon on every build.
+
+.git/
+.github/
+
+# Virtualenvs
+.venv/
+venv/
+
+# Python caches / build artefacts
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Test fixtures + recorded data (large, not needed in the image)
+tests/
+tests/eval/cassettes/
+data/
+!data/precomputed/
+
+# Editor / OS noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Node (only present if docs tooling is added later)
+node_modules/
