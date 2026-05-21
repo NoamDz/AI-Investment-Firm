@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -18,6 +18,12 @@ from firm.db.connection import get_conn
 class ReconcileResult:
     status: str  # 'ok' or 'mismatch'
     diff: dict[str, Any]
+    # Snapshot fields populated by reconcile_on_boot (additive — existing callers
+    # only use .status and .diff, so defaults ensure backward compatibility).
+    broker_positions: dict[str, Decimal] = field(default_factory=dict)
+    local_positions: dict[str, Decimal] = field(default_factory=dict)
+    broker_cash: Decimal = field(default_factory=lambda: Decimal("0"))
+    local_cash: Decimal = field(default_factory=lambda: Decimal("0"))
 
 
 def _local_positions(db_path: Path) -> dict[str, Decimal]:
@@ -63,7 +69,14 @@ def reconcile_on_boot(db_path: Path, broker: Broker, clock: Clock) -> ReconcileR
             ),
         )
     AuditLog(db_path, clock).append("reconcile.boot", {"status": status, "diff": diff})
-    return ReconcileResult(status=status, diff=diff)
+    return ReconcileResult(
+        status=status,
+        diff=diff,
+        broker_positions=broker_positions,
+        local_positions=local_positions,
+        broker_cash=broker_cash,
+        local_cash=local_cash,
+    )
 
 
 def resolve_from_broker(
