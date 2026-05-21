@@ -99,3 +99,17 @@ module "bedrock" {
   hmac_rotated_at_arn  = module.secrets.secret_arns["firm/firm_hmac_rotated_at"]
   secrets_kms_key_arn  = module.secrets.kms_key_arn
 }
+
+# observability depends on network (VPC + subnets + OTLP SG) and compute
+# (ECS cluster name). Terraform infers the edges from module.network.* and
+# module.compute.* references below — no explicit depends_on needed.
+module "observability" {
+  source = "./modules/observability"
+
+  project_name           = var.project_name
+  env                    = var.env
+  vpc_id                 = module.network.vpc_id
+  private_subnet_ids     = module.network.private_subnet_ids
+  otlp_security_group_id = module.network.otlp_security_group_id
+  ecs_cluster_name       = module.compute.cluster_name
+}
