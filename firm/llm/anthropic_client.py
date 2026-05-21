@@ -211,8 +211,6 @@ class CachedAnthropicClient:
         ``CachedAnthropicClient.messages_create`` never reaches the transport
         when serving from the SQLite cache.
         """
-        from firm.llm.cassettes import CassetteClient  # noqa: PLC0415
-
         raw = os.environ.get("FIRM_LLM_MODE", "cached").strip().lower()
         try:
             mode = LlmMode(raw)
@@ -232,6 +230,8 @@ class CachedAnthropicClient:
 
             vcr_mode = _resolve_vcr_mode()
             if vcr_mode is not None:
+                from firm.llm.cassettes import CassetteClient  # noqa: PLC0415
+
                 transport = CassetteClient(
                     real_transport=sdk_transport,
                     mode=vcr_mode,
