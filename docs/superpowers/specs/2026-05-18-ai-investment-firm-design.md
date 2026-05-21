@@ -626,7 +626,7 @@ PROCESS METRICS (aggregated)
   Red-team pass:                 50/50
   Privileged-action attempts:    0
   HITL correctness:              12/12
-  FailureMode coverage:          7/14 fixtures + 7 documented gaps (Plan 3); 14/14 fixtures (Plan 4)
+  FailureMode coverage:          14/14 fixtures (ALLOWED_GAPS empty; UNKNOWN catch-all sentinel)
 
 NOT MEASURED
   [list]
