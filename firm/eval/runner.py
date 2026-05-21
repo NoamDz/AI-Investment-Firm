@@ -189,12 +189,6 @@ def _query_rejection_count(db_path: Path) -> int:
     return int(row[0])
 
 
-def _query_cost_ledger_count(db_path: Path) -> int:
-    with closing(sqlite3.connect(str(db_path))) as conn:
-        row = conn.execute("SELECT COUNT(*) FROM cost_ledger").fetchone()
-    return int(row[0])
-
-
 def _query_triggered_failure_modes(db_path: Path) -> list[FailureMode]:
     with closing(sqlite3.connect(str(db_path))) as conn:
         cur = conn.execute(
@@ -259,10 +253,10 @@ def _decision_shims(rows: Sequence[Mapping[str, Any]]) -> list[_DecisionShim]:
                 if not isinstance(c, dict):
                     continue
                 span = c.get("span", (0, 1))
-                if isinstance(span, list):
-                    span_tuple = (int(span[0]), int(span[1])) if len(span) == 2 else (0, 1)
+                if isinstance(span, (list, tuple)) and len(span) == 2:
+                    span_tuple: tuple[int, int] = (int(span[0]), int(span[1]))
                 else:
-                    span_tuple = tuple(span) if isinstance(span, tuple) else (0, 1)
+                    span_tuple = (0, 1)
                 citations.append(
                     Citation(
                         source_id=str(c.get("source_id", "")),
@@ -447,7 +441,6 @@ def run_regime(
     fills_only: list[Fill] = [f for _, f in dated_fills]
     hitl_required = _query_hitl_rows(db_path)
     rejection_count = _query_rejection_count(db_path)
-    _ = _query_cost_ledger_count(db_path)  # T13 surfaces count only via DB; not in report
     triggered_failure_modes = _query_triggered_failure_modes(db_path)
 
     claims = _claims_from_decisions(decision_rows)
@@ -510,7 +503,7 @@ def run_regime(
         num_decisions=len(decision_rows),
         num_fills=len(fills_only),
     )
-    report_path = output_dir / f"{config.start_date.isoformat()}.md"
+    report_path = output_dir / f"{config.regime_id}.md"
     report_path.write_text(rendered, encoding="utf-8", newline="\n")
 
     return RegimeReport(

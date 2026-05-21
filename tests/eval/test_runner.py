@@ -10,15 +10,13 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import date
-from decimal import Decimal
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from firm.core.models import FailureMode
 from firm.eval.regimes import R1_EARNINGS
-from firm.eval.runner import RegimeReport, run_regime
+from firm.eval.runner import HeartbeatFn, RegimeReport, run_regime
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +142,7 @@ def _seed_db(db_path: Path) -> None:
         conn.close()
 
 
-def _stub_heartbeat_factory(call_log: list[date] | None = None) -> Any:
+def _stub_heartbeat_factory(call_log: list[date] | None = None) -> HeartbeatFn:
     """Return a stub HeartbeatFn that seeds once and records every call."""
     state = {"seeded": False}
 
