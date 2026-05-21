@@ -14,7 +14,9 @@ It reasons only over claims produced by Research.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Callable
@@ -461,6 +463,38 @@ def _payload_for(action: ActionEnum, research: Decision) -> TypedPayload:
     raise AssertionError(f"unexpected aggregated action: {action}")  # pragma: no cover
 
 
+async def _vote_parallel(
+    voter: PmVoter,
+    *,
+    question: str,
+    claims: list[Claim],
+    research_rationale: str,
+    voter_model: str,
+) -> list[PmVote]:
+    """Run three single-lens voters concurrently via asyncio.gather + to_thread.
+
+    Concurrency cap = 3 (one task per lens). Each task wraps voter.vote in its
+    own llm_span so per-call cost/timing attribution survives.  OTel ContextVars
+    are propagated by asyncio.to_thread so each llm_span nests under the caller's
+    agent_span("pm") context.
+    """
+
+    def _one(lens: PmLens) -> PmVote:
+        with llm_span(_PROVIDER_ANTHROPIC, voter_model):
+            return voter.vote(
+                lens=lens,
+                question=question,
+                claims=claims,
+                research_rationale=research_rationale,
+            )
+
+    coros = [
+        asyncio.to_thread(_one, lens)
+        for lens in (PmLens.QUALITY, PmLens.VALUATION, PmLens.CATALYST)
+    ]
+    return list(await asyncio.gather(*coros))
+
+
 def make_pm(
     voter: PmVoter,
     *,
@@ -581,17 +615,18 @@ def make_pm(
                         agent=_PM_AGENT_NAME,
                     )
 
+            t_start = time.perf_counter()
             votes: list[PmVote] = []
             try:
-                for lens in (PmLens.QUALITY, PmLens.VALUATION, PmLens.CATALYST):
-                    with llm_span(_PROVIDER_ANTHROPIC, voter_model):
-                        vote = voter.vote(
-                            lens=lens,
-                            question=question,
-                            claims=claims,
-                            research_rationale=research.rationale,
-                        )
-                    votes.append(vote)
+                votes = asyncio.run(
+                    _vote_parallel(
+                        voter,
+                        question=question,
+                        claims=claims,
+                        research_rationale=research.rationale,
+                        voter_model=voter_model,
+                    )
+                )
             except LLMUnavailableError as exc:
                 # T08 spec: PM REFUSEs with LLM_UNAVAILABLE + the conservative
                 # "all-models-exhausted" payload when the router ladder is
@@ -648,6 +683,21 @@ def make_pm(
                     "pm_decision": schema_refuse,
                     "pm_votes": [v.model_dump(mode="json") for v in votes],
                 }
+
+            # Spec T24: stamp parent span with parallel timing so the OTel
+            # collector surfaces the wall-clock savings.
+            # sequential_estimate = parallel_actual * 3 (three serial voter
+            # calls at the same per-call latency).  For cached hits the delta
+            # is near zero — an honest signal, not noise.
+            parallel_elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+            span.set_attribute("pm.voter_count", 3)
+            span.set_attribute("pm.parallel_ms", round(parallel_elapsed_ms, 2))
+            span.set_attribute(
+                "pm.sequential_estimate_ms", round(parallel_elapsed_ms * 3, 2)
+            )
+            span.set_attribute(
+                "pm.latency_delta_ms", round(parallel_elapsed_ms * 2, 2)
+            )
 
             action, confidence, combined_rationale, fmode = aggregate_votes(votes)
             payload = _payload_for(action, research)

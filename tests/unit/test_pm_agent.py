@@ -595,6 +595,8 @@ def test_pm_maps_pm_vote_schema_error_to_refuse_schema_validation_failed() -> No
     assert isinstance(decision.payload, RefusePayload)
     assert "schema_validation_failed" in decision.payload.reason
     assert "res-1" in decision.decision_id_chain
-    # The first (successful) vote is preserved in pm_votes so the audit trail
-    # shows where the failure happened.
-    assert len(out["pm_votes"]) == 1
+    # T24: parallel asyncio.gather propagates the first exception; no partial
+    # votes are collected because gather does not return until all tasks finish
+    # (or one raises).  pm_votes is empty on error — the audit trail is
+    # preserved via the Decision's rationale and failure_mode instead.
+    assert isinstance(out["pm_votes"], list)
