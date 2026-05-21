@@ -102,13 +102,26 @@ def test_naive_published_at_raises() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 9. Invalid quarter raises
+# 9. Invalid quarter raises (out-of-range and non-positive)
 # ---------------------------------------------------------------------------
 
 
-def test_invalid_quarter_raises() -> None:
-    row = {**_VALID_ROW, "quarter": 5}
+@pytest.mark.parametrize("bad_quarter", [5, 0, -1])
+def test_invalid_quarter_raises(bad_quarter: int) -> None:
+    row = {**_VALID_ROW, "quarter": bad_quarter}
     with pytest.raises(ValueError, match="quarter"):
+        list(TranscriptsCorpusSource(dataset_loader=_row_loader(row)).iter_docs())
+
+
+# ---------------------------------------------------------------------------
+# 9b. Invalid fiscal_year raises (zero and negative)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad_fy", [0, -1])
+def test_invalid_fiscal_year_raises(bad_fy: int) -> None:
+    row = {**_VALID_ROW, "fiscal_year": bad_fy}
+    with pytest.raises(ValueError, match="fiscal_year"):
         list(TranscriptsCorpusSource(dataset_loader=_row_loader(row)).iter_docs())
 
 
@@ -160,3 +173,21 @@ def test_blank_lines_in_jsonl_are_skipped(tmp_path: Path) -> None:
     source = TranscriptsCorpusSource(path=jsonl)
     docs = list(source.iter_docs())
     assert len(docs) == 2
+
+
+# ---------------------------------------------------------------------------
+# 13. UTF-8 BOM at file head is transparently stripped
+# ---------------------------------------------------------------------------
+
+
+def test_utf8_bom_is_stripped(tmp_path: Path) -> None:
+    """Common Windows/Excel exports prefix a BOM; loader must handle it."""
+    jsonl = tmp_path / "transcripts_bom.jsonl"
+    row = (
+        '{"ticker": "AAPL", "quarter": 3, "fiscal_year": 2024, '
+        '"published_at": "2024-08-01T16:00:00+00:00", "body": "text."}\n'
+    )
+    jsonl.write_bytes(b"\xef\xbb\xbf" + row.encode("utf-8"))
+    docs = list(TranscriptsCorpusSource(path=jsonl).iter_docs())
+    assert len(docs) == 1
+    assert docs[0].ticker == "AAPL"

@@ -27,8 +27,13 @@ from firm.rag.source import FilingDoc
 
 
 def _load_jsonl(path: Path) -> Iterable[dict[str, object]]:
-    """Yield dicts from a UTF-8 JSONL file, skipping blank lines."""
-    with path.open("r", encoding="utf-8") as f:
+    """Yield dicts from a UTF-8 JSONL file, skipping blank lines.
+
+    Opens with ``utf-8-sig`` so a leading BOM (common in Windows/Excel
+    exports) is transparently stripped instead of surfacing as a
+    misleading JSON-decode error on line 1.
+    """
+    with path.open("r", encoding="utf-8-sig") as f:
         for lineno, line in enumerate(f, start=1):
             line = line.strip()
             if not line:
