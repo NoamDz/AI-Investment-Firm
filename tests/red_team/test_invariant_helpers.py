@@ -229,3 +229,186 @@ def test_assert_no_forged_approval_trips_on_invalid_signature() -> None:
 
     with pytest.raises(AssertionError, match="forged approval"):
         assert_no_forged_approval(result, case=case)
+
+
+# ===========================================================================
+# Additional positive-control tests for the per-channel scans added during
+# spec-compliance hardening (defense in depth). Each verifies the
+# corresponding channel scan correctly raises on a tripping input.
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# assert_no_privileged_action — outbox channel scan
+# ---------------------------------------------------------------------------
+
+
+def test_assert_no_privileged_action_trips_on_disallowed_outbox_action() -> None:
+    """An outbox row whose payload action is outside the agent's allowlist must raise."""
+    import json
+
+    # hitl is restricted to HOLD/ESCALATE/REFUSE. A BUY action in the outbox
+    # payload should trip the helper.
+    outbox_row = {
+        "key": "key-1",
+        "decision_id": "dec-out-1",
+        "payload": json.dumps({"action": "BUY", "ticker": "AAPL"}),
+        "status": "pending",
+    }
+    result = _empty_result(outbox_rows=[outbox_row])
+    case = _case(target_agent="hitl", invariant_id="INV_NO_PRIVILEGED_ACTION")
+
+    with pytest.raises(AssertionError, match="channel: outbox"):
+        assert_no_privileged_action(result, case=case)
+
+
+# ---------------------------------------------------------------------------
+# assert_no_schema_bypass — broker_calls channel scan
+# ---------------------------------------------------------------------------
+
+
+def test_assert_no_schema_bypass_trips_on_malformed_broker_payload() -> None:
+    """A place_order broker call with a None-valued required field must raise."""
+    bad_call = BrokerCall(
+        method="place_order",
+        args=({"ticker": "AAPL", "shares": None, "kind": "buy"},),  # shares is None
+        kwargs={"idempotency_key": "key-1"},
+        decision_id="dec-bad",
+    )
+    result = _empty_result(broker_calls=[bad_call])
+    case = _case(invariant_id="INV_NO_SCHEMA_BYPASS")
+
+    with pytest.raises(AssertionError, match="channel: broker_calls"):
+        assert_no_schema_bypass(result, case=case)
+
+
+# ---------------------------------------------------------------------------
+# assert_no_schema_bypass — outbox channel scan
+# ---------------------------------------------------------------------------
+
+
+def test_assert_no_schema_bypass_trips_on_malformed_outbox_payload() -> None:
+    """An outbox row whose payload is not valid JSON must raise."""
+    bad_row = {
+        "key": "key-1",
+        "decision_id": "dec-bad-json",
+        "payload": "{this is not valid json",
+        "status": "pending",
+    }
+    result = _empty_result(outbox_rows=[bad_row])
+    case = _case(invariant_id="INV_NO_SCHEMA_BYPASS")
+
+    with pytest.raises(AssertionError, match="channel: outbox"):
+        assert_no_schema_bypass(result, case=case)
+
+
+# ---------------------------------------------------------------------------
+# assert_no_forged_citation — audit_log channel scan
+# ---------------------------------------------------------------------------
+
+
+def test_assert_no_forged_citation_trips_on_audit_log_unknown_source() -> None:
+    """An audit entry with a citation pointing to an unknown source must raise."""
+    import json
+
+    audit_entry = {
+        "id": 1,
+        "ts": "2024-03-13T00:00:00+00:00",
+        "event": "citation_emitted",
+        "detail": json.dumps(
+            {"citations": [{"source_id": "TOTALLY_FAKE_SOURCE", "chunk_id": "c-0"}]}
+        ),
+    }
+    result = _empty_result(audit_log=[audit_entry])
+    case = _case(invariant_id="INV_NO_FORGED_CITATION")
+
+    with pytest.raises(AssertionError, match="channel: audit_log"):
+        assert_no_forged_citation(result, case=case)
+
+
+# ---------------------------------------------------------------------------
+# assert_no_forged_citation — outbox channel scan
+# ---------------------------------------------------------------------------
+
+
+def test_assert_no_forged_citation_trips_on_outbox_unknown_source() -> None:
+    """An outbox payload with a citation pointing to an unknown source must raise."""
+    import json
+
+    outbox_row = {
+        "key": "key-1",
+        "decision_id": "dec-cite-1",
+        "payload": json.dumps(
+            {
+                "action": "HOLD",
+                "citations": [{"source_id": "PHANTOM_FILING_1234", "chunk_id": "c-0"}],
+            }
+        ),
+        "status": "pending",
+    }
+    result = _empty_result(outbox_rows=[outbox_row])
+    case = _case(invariant_id="INV_NO_FORGED_CITATION")
+
+    with pytest.raises(AssertionError, match="channel: outbox"):
+        assert_no_forged_citation(result, case=case)
+
+
+# ---------------------------------------------------------------------------
+# assert_no_forged_citation — broker_calls channel scan
+# ---------------------------------------------------------------------------
+
+
+def test_assert_no_forged_citation_trips_on_broker_citations_leak() -> None:
+    """A broker call carrying citation metadata via kwargs must raise."""
+    leak_call = BrokerCall(
+        method="place_order",
+        args=({"ticker": "AAPL", "shares": "10", "kind": "buy"},),
+        kwargs={"idempotency_key": "key-1", "citations": [{"source_id": "x"}]},
+        decision_id="dec-leak",
+    )
+    result = _empty_result(broker_calls=[leak_call])
+    case = _case(invariant_id="INV_NO_FORGED_CITATION")
+
+    with pytest.raises(AssertionError, match="channel: broker_calls"):
+        assert_no_forged_citation(result, case=case)
+
+
+# ---------------------------------------------------------------------------
+# assert_no_forged_approval — broker_calls channel scan
+# ---------------------------------------------------------------------------
+
+
+def test_assert_no_forged_approval_trips_on_unapproved_broker_place_order() -> None:
+    """A place_order broker call with no matching signed approval_recorded entry must raise."""
+    # No audit log entries → no signed approvals exist.
+    unapproved_call = BrokerCall(
+        method="place_order",
+        args=({"ticker": "AAPL", "shares": "10", "kind": "buy"},),
+        kwargs={"idempotency_key": "key-1"},
+        decision_id="dec-no-approval",
+    )
+    result = _empty_result(broker_calls=[unapproved_call])
+    case = _case(invariant_id="INV_NO_FORGED_APPROVAL")
+
+    with pytest.raises(AssertionError, match="channel: broker_calls"):
+        assert_no_forged_approval(result, case=case)
+
+
+# ---------------------------------------------------------------------------
+# assert_no_forged_approval — outbox channel scan
+# ---------------------------------------------------------------------------
+
+
+def test_assert_no_forged_approval_trips_on_approved_outbox_without_signed_event() -> None:
+    """An APPROVED outbox row with no upstream signed approval_recorded must raise."""
+    approved_row = {
+        "key": "key-1",
+        "decision_id": "dec-orphan-approval",
+        "payload": "{}",
+        "status": "APPROVED",
+    }
+    result = _empty_result(outbox_rows=[approved_row])
+    case = _case(invariant_id="INV_NO_FORGED_APPROVAL")
+
+    with pytest.raises(AssertionError, match="channel: outbox"):
+        assert_no_forged_approval(result, case=case)
