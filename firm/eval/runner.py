@@ -48,6 +48,7 @@ from firm.audit.log import AuditLog
 from firm.core.clock import ReplayClock
 from firm.core.models import Citation, Claim, FailureMode
 from firm.db.migrations import init_db
+from firm.eval._dates import format_header_dates as _format_header_dates
 from firm.eval.benchmarks import compute_basket_return, compute_spy_return
 from firm.eval.perf_metrics import Fill, compute_perf_metrics
 from firm.eval.process_metrics import (
@@ -113,28 +114,6 @@ def _load_template() -> Any:
         keep_trailing_newline=True,
     )
     return env.get_template("regime.md.j2")
-
-
-def _format_header_dates(start: date, end: date) -> str:
-    """Format ``start..end`` as ``Mon dd–dd, YYYY`` (en-dash U+2013).
-
-    Same-month windows collapse to a single ``Mon`` prefix; cross-month
-    windows fall back to ``Mon dd – Mon dd, YYYY``. Days have no leading
-    zero. The 3 fixed regimes are all single-month, but the cross-month
-    branch is kept for robustness so the template never has to think about
-    date math.
-    """
-    if start.year != end.year:
-        raise ValueError("cross-year windows not supported by _format_header_dates")
-    if start.year == end.year and start.month == end.month:
-        return f"{start.strftime('%b')} {start.day}–{end.day}, {start.year}"
-    # Cross-month fallback. Year of ``start`` is the report year by
-    # convention; cross-year regimes aren't a configured shape and are
-    # rejected above.
-    return (
-        f"{start.strftime('%b')} {start.day} – "
-        f"{end.strftime('%b')} {end.day}, {start.year}"
-    )
 
 
 def _parse_date_from_iso(ts: str) -> date:

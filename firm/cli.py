@@ -5,6 +5,7 @@ import functools
 import itertools
 import json
 import os
+import shutil
 import sys
 from contextlib import closing
 from datetime import datetime, time, timezone
@@ -13,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 import click
+
+from jinja2 import Environment, FileSystemLoader
 
 from firm.agents.execution import make_execution
 from firm.agents.hitl import make_hitl, mark_approved, mark_rejected
@@ -828,6 +831,173 @@ def red_team(vcr_mode: str, timeout: int) -> None:
         )
     if rc != 0 or plugin.failed > 0:
         sys.exit(1)
+
+
+_EVAL_DEFAULT_ENV: dict[str, str] = {
+    # Deterministic defaults for ``firm eval``. Set ONLY if the env var is
+    # unset — operator overrides win. The HMAC default is 64 hex zeros; it
+    # is fixture-grade and MUST NOT be used in production.
+    "FIRM_LLM_MODE": "cached",
+    "FIRM_VCR_MODE": "replay",
+    "FIRM_PRICES_MODE": "replay",
+    "FIRM_RANDOM_SEED": "42",
+    "FIRM_HMAC_SECRET": "0" * 64,
+}
+
+
+def _apply_eval_env_defaults() -> None:
+    """Set each :data:`_EVAL_DEFAULT_ENV` key iff the env var is unset.
+
+    Determinism for ``firm eval`` rests on cached LLM / replayed VCR /
+    replayed prices / pinned RNG seed. The CLI sets these once at entry
+    time so the heartbeat factory + run_regime never see drift between
+    calls within the same process.
+    """
+    for k, v in _EVAL_DEFAULT_ENV.items():
+        os.environ.setdefault(k, v)
+
+
+def _load_summary_template() -> Any:
+    """Load the ``summary.md.j2`` template from ``firm/reports/templates``."""
+    templates_dir = Path(__file__).resolve().parent / "reports" / "templates"
+    env = Environment(
+        loader=FileSystemLoader(str(templates_dir)),
+        autoescape=False,
+        keep_trailing_newline=True,
+    )
+    return env.get_template("summary.md.j2")
+
+
+@cli.command(name="eval")
+@click.option(
+    "--regime",
+    "regime_id",
+    type=click.Choice(["r1", "r2", "r3", "all"], case_sensitive=False),
+    default="all",
+    show_default=True,
+    help="Which regime to run (r1/r2/r3) or 'all' for the full sweep.",
+)
+@click.option(
+    "--output-dir",
+    "output_dir_str",
+    default=None,
+    show_default=True,
+    help="Where to write per-regime + summary reports (default: reports/eval).",
+)
+@click.option(
+    "--db-dir",
+    "db_dir_str",
+    default=None,
+    help="Where to write per-regime sqlite DBs (default: <output-dir>/_dbs).",
+)
+def eval_cmd(
+    regime_id: str, output_dir_str: str | None, db_dir_str: str | None
+) -> None:
+    """Run the eval harness on one or all regimes; write reports/eval/.
+
+    Idempotent: deleting the output directory and re-running produces
+    byte-identical files. Determinism is pinned by env-var defaults
+    (see :data:`_EVAL_DEFAULT_ENV`); operator overrides are respected.
+    """
+    from firm.eval.aggregate import build_summary_context
+    from firm.eval.heartbeat import make_eval_heartbeat
+    from firm.eval.regimes import (
+        ALL_REGIMES,
+        R1_EARNINGS,
+        R2_DRAWDOWN,
+        R3_QUIET,
+        RegimeConfig,
+    )
+    from firm.eval.runner import RegimeReport, run_regime
+
+    # Determinism defaults BEFORE any subsystem reads them.
+    _apply_eval_env_defaults()
+
+    # Resolve output + db dirs.
+    output_dir = (
+        Path(output_dir_str)
+        if output_dir_str
+        else Path("reports") / "eval"
+    )
+    db_dir = Path(db_dir_str) if db_dir_str else (output_dir / "_dbs")
+
+    # Redirect reporter side-effects into the eval-scoped artifacts dir so
+    # ``firm eval`` never mutates ``data/reports/`` from ``firm run``.
+    artifacts_root = output_dir / "_artifacts"
+    os.environ["FIRM_REPORTS_ROOT"] = str(artifacts_root)
+
+    # Idempotency: nuke + recreate output + db dirs so a second invocation
+    # starts from the same blank slate as the first.
+    for d in (output_dir, db_dir):
+        if d.exists():
+            shutil.rmtree(d)
+        d.mkdir(parents=True, exist_ok=True)
+    artifacts_root.mkdir(parents=True, exist_ok=True)
+
+    # Resolve the regime list.
+    regime_map: dict[str, RegimeConfig] = {
+        "r1": R1_EARNINGS,
+        "r2": R2_DRAWDOWN,
+        "r3": R3_QUIET,
+    }
+    if regime_id.lower() == "all":
+        regimes_to_run: list[RegimeConfig] = list(ALL_REGIMES)
+    else:
+        regimes_to_run = [regime_map[regime_id.lower()]]
+
+    # Per-regime: build a fresh heartbeat (so each regime's graph is
+    # constructed against its own DB path) and run.
+    #
+    # PriceCassetteMissError is swallowed: T15 ships before T17 populates
+    # data/prices_eval/*.parquet, and the spec's load-bearing assertion is
+    # byte-for-byte idempotency. We pass benchmarks=0.0 as a deterministic
+    # stub so re-runs are still byte-identical — once T17 lands the parquet
+    # files, the real benchmark math takes over automatically.
+    from firm.eval.benchmarks import PriceCassetteMissError
+
+    reports: list[RegimeReport] = []
+    for regime in regimes_to_run:
+        heartbeat = make_eval_heartbeat(
+            regime, reports_root=artifacts_root / regime.regime_id
+        )
+        try:
+            report = run_regime(
+                regime,
+                output_dir=output_dir,
+                db_path=db_dir / f"{regime.regime_id}.db",
+                heartbeat=heartbeat,
+                prices_dir=Path("data/prices_eval"),
+                final_marks={},
+            )
+        except PriceCassetteMissError as exc:
+            click.echo(
+                f"[firm eval] {regime.regime_id}: price cassettes missing "
+                f"({exc}); using deterministic 0.0 stub benchmarks. "
+                f"Populate data/prices_eval/ via scripts/eval_capture.py "
+                f"(T16) for real benchmarks.",
+                err=True,
+            )
+            report = run_regime(
+                regime,
+                output_dir=output_dir,
+                db_path=db_dir / f"{regime.regime_id}.db",
+                heartbeat=heartbeat,
+                spy_return=0.0,
+                basket_return=0.0,
+                final_marks={},
+            )
+        reports.append(report)
+
+    # Cross-regime summary.
+    template = _load_summary_template()
+    ctx = build_summary_context(reports)
+    rendered = template.render(**ctx)
+    summary_path = output_dir / "summary.md"
+    summary_path.write_bytes(rendered.encode("utf-8"))
+
+    click.echo(
+        f"Eval done. {len(reports)} regimes. Summary: {summary_path}"
+    )
 
 
 def _collect_chunk_texts(

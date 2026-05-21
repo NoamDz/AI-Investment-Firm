@@ -1,7 +1,7 @@
 # GnuWin32 Make defaults to cmd.exe; force bash so recipes use POSIX syntax.
 SHELL := bash
 
-.PHONY: install test demo demo-docker reconcile ingest report clean litestream-drill check-determinism red-team
+.PHONY: install test demo demo-docker reconcile ingest report clean litestream-drill check-determinism red-team eval
 
 install:
 	pip install -e ".[dev]"
@@ -37,3 +37,11 @@ check-determinism:
 
 red-team:
 	python -m firm.cli red-team
+
+eval:
+	FIRM_LLM_MODE=$${FIRM_LLM_MODE:-cached} \
+	FIRM_VCR_MODE=$${FIRM_VCR_MODE:-replay} \
+	FIRM_PRICES_MODE=$${FIRM_PRICES_MODE:-replay} \
+	FIRM_RANDOM_SEED=$${FIRM_RANDOM_SEED:-42} \
+	FIRM_HMAC_SECRET=$${FIRM_HMAC_SECRET:-$$(printf '00%.0s' {1..32})} \
+	python -m firm.cli eval
