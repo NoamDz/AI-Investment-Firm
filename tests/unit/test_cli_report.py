@@ -199,7 +199,6 @@ def test_report_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
     # xlsx: compare cell-for-cell via openpyxl (xlsx is not byte-stable due to zip timestamps).
     xlsx_after_run2 = (bundle_dir / "positions.xlsx").read_bytes()
-    wb1 = openpyxl.load_workbook(bundle_dir.parent / _REPORT_DATE / "positions.xlsx")
 
     def _cells(wb: openpyxl.Workbook) -> list[list[Any]]:
         result: list[list[Any]] = []
@@ -209,7 +208,6 @@ def test_report_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
                 result.append([cell.value for cell in row])
         return result
 
-    # Re-load both from bytes for a clean comparison.
     import io
     wb1 = openpyxl.load_workbook(io.BytesIO(xlsx_after_run1))
     wb2 = openpyxl.load_workbook(io.BytesIO(xlsx_after_run2))

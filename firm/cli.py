@@ -481,7 +481,8 @@ def report(date_str: str) -> None:
     broker = make_broker(clock=clock)
     init_db(db)
 
-    out_dir = _reports_root() / date_str
+    reports_root = _reports_root()
+    out_dir = reports_root / date_str
     out_dir.mkdir(parents=True, exist_ok=True)
 
     reconcile_block = render_reconcile_block(db_path=db, broker=broker, clock=clock)
@@ -491,7 +492,7 @@ def report(date_str: str) -> None:
         db_path=db,
         broker=broker,
         traces_path=out_dir / "traces.jsonl",  # reserved placeholder; T16 doesn't read it
-        reports_root=_reports_root(),
+        reports_root=reports_root,
         reconcile_block=reconcile_block,
     )
 
