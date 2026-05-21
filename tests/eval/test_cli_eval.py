@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +21,7 @@ from firm.cli import cli
 from firm.eval.aggregate import build_summary_context
 from firm.eval.heartbeat import HeartbeatFn, make_eval_heartbeat
 from firm.eval.process_metrics import MetricResult
-from firm.eval.regimes import R1_EARNINGS
+from firm.eval.regimes import R1_EARNINGS, RegimeConfig
 from firm.eval.runner import RegimeReport
 
 from tests.eval.test_runner import _seed_db
@@ -363,3 +363,209 @@ def test_build_summary_context_status_combiner() -> None:
 def test_build_summary_context_rejects_empty() -> None:
     with pytest.raises(ValueError, match="non-empty"):
         build_summary_context([])
+
+
+# ---------------------------------------------------------------------------
+# Test 8 — Fix 1 regression: per-day clock injection reaches downstream
+# components. On a 2-day regime, the audit_log rows written via the SHARED
+# boot_clock must have DIFFERENT ts dates — proving the mutation to
+# state["boot_clock"].set() propagates to every holder that closed over it.
+# ---------------------------------------------------------------------------
+
+
+def test_heartbeat_advances_clock_per_day(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two-day regime → two audit_log rows with DIFFERENT ts dates.
+
+    The bug we're guarding against: previously, the factory built a
+    single ``boot_clock`` at construction time and threaded it into
+    broker/audit/reporter — but the per-day ``_heartbeat`` only used a
+    NEW ``day_clock`` as a thread_id string. Every audit row's ``ts``
+    was therefore ``regime.start_date``, breaking T13's date-bucketing.
+
+    The fix: ``_heartbeat`` mutates the SHARED ``boot_clock`` via
+    :meth:`ReplayClock.set` per day, so every holder advances together.
+
+    Strategy: monkey-patch the heavy local imports inside
+    ``_build_graph_once`` so we build a tiny fake graph whose
+    ``invoke`` writes one audit row using the boot_clock the factory
+    handed it. Two day invocations → two rows; assert the dates differ.
+    """
+    from firm.audit.log import AuditLog
+    from firm.db.migrations import init_db
+
+    # Capture the boot_clock the factory builds + a list of clocks each
+    # downstream factory was handed. We assert all handed-out clocks are
+    # the SAME object (so mutation reaches everyone).
+    handed_out_clocks: list[Any] = []
+
+    class _FakeBroker:
+        def __init__(self, clock: Any) -> None:
+            handed_out_clocks.append(clock)
+            self._clock = clock
+
+    def _fake_make_broker(clock: Any = None) -> Any:
+        return _FakeBroker(clock)
+
+    class _FakeUniverse:
+        sector_map: dict[str, str] = {}
+
+    class _FakeRagConfig:
+        pass
+
+    class _FakePmCfg:
+        model = "stub-model"
+
+    class _FakeLlmConfig:
+        pm = _FakePmCfg()
+
+    def _fake_load_policy(_p: Path) -> Any:
+        return object()
+
+    def _fake_load_universe(_p: Path) -> Any:
+        return _FakeUniverse()
+
+    def _fake_load_rag_config(_p: Path) -> Any:
+        return _FakeRagConfig()
+
+    def _fake_load_llm_config(_p: Path) -> Any:
+        return _FakeLlmConfig()
+
+    def _fake_build_llm_stack(
+        _db: Path, clock: Any, _rag: Any, _llm: Any
+    ) -> tuple[Any, Any, Any, Any]:
+        handed_out_clocks.append(clock)
+        return (object(), object(), object(), object())
+
+    def _fake_make_monitor(clock: Any) -> Any:
+        handed_out_clocks.append(clock)
+        return lambda _s: {}
+
+    def _fake_make_research(*, clock: Any, **_kw: Any) -> Any:
+        handed_out_clocks.append(clock)
+        return lambda _s: {}
+
+    class _FakeVoter:
+        def __init__(self, **_kw: Any) -> None:
+            pass
+
+    class _FakeClient:
+        def __init__(self, **_kw: Any) -> None:
+            pass
+
+    def _fake_make_pm(**_kw: Any) -> Any:
+        return lambda _s: {}
+
+    def _fake_make_hitl(*, clock: Any, **_kw: Any) -> Any:
+        handed_out_clocks.append(clock)
+        return lambda _s: {}
+
+    def _fake_make_execution(*, clock: Any, **_kw: Any) -> Any:
+        handed_out_clocks.append(clock)
+        return lambda _s: {}
+
+    def _fake_make_reporter(*, clock: Any, db_path: Path, **_kw: Any) -> Any:
+        handed_out_clocks.append(clock)
+        return lambda _s: {}
+
+    # The fake graph writes one audit_log row per .invoke() call, using the
+    # SAME clock the factory handed to make_broker. If the per-day mutation
+    # works, two invokes produce two ts values bound to different dates.
+    class _FakeGraph:
+        def __init__(self, db_path: Path, clock: Any) -> None:
+            self._db_path = db_path
+            self._clock = clock
+
+        def get_state(self, _cfg: Any) -> Any:
+            class _S:
+                next = False
+            return _S()
+
+        def invoke(self, _inp: Any, *, config: Any = None) -> dict[str, Any]:
+            AuditLog(self._db_path, self._clock).append(
+                "broker.fill",
+                {
+                    "side": "buy",
+                    "ticker": "AAPL",
+                    "shares": "1",
+                    "fill_price": "100",
+                    "commission": "0",
+                },
+            )
+            return {}
+
+    captured_graph_args: dict[str, Any] = {}
+
+    def _fake_build_graph(*, db_path: Path, **_nodes: Any) -> Any:
+        # The boot_clock is the one passed to make_broker (first item).
+        clock = handed_out_clocks[0]
+        captured_graph_args["clock"] = clock
+        return _FakeGraph(db_path=db_path, clock=clock)
+
+    # Patch every local import _build_graph_once will perform.
+    monkeypatch.setattr("firm.broker.alpaca_paper.make_broker", _fake_make_broker)
+    monkeypatch.setattr("firm.core.config.load_policy", _fake_load_policy)
+    monkeypatch.setattr("firm.core.config.load_universe", _fake_load_universe)
+    monkeypatch.setattr("firm.core.config.load_rag_config", _fake_load_rag_config)
+    monkeypatch.setattr("firm.core.config.load_llm_config", _fake_load_llm_config)
+    monkeypatch.setattr("firm.cli._build_llm_stack", _fake_build_llm_stack)
+    monkeypatch.setattr("firm.agents.monitor.make_monitor", _fake_make_monitor)
+    monkeypatch.setattr("firm.agents.research.make_research", _fake_make_research)
+    monkeypatch.setattr("firm.agents.pm.PmVoter", _FakeVoter)
+    monkeypatch.setattr("firm.agents.pm.make_pm", _fake_make_pm)
+    monkeypatch.setattr(
+        "firm.llm.messages_client.RouterBackedMessagesClient", _FakeClient
+    )
+    monkeypatch.setattr("firm.agents.hitl.make_hitl", _fake_make_hitl)
+    monkeypatch.setattr("firm.agents.execution.make_execution", _fake_make_execution)
+    monkeypatch.setattr("firm.agents.reporter.make_reporter", _fake_make_reporter)
+    monkeypatch.setattr("firm.orchestrator.graph.build_graph", _fake_build_graph)
+
+    # Two-day regime config so we can observe per-day advancement.
+    cfg = RegimeConfig(
+        regime_id="test_2day",
+        description="per-day clock injection test",
+        start_date=date(2024, 3, 11),
+        end_date=date(2024, 3, 12),
+        universe=("AAPL",),
+    )
+
+    db_path = tmp_path / "test.db"
+    init_db(db_path)
+
+    hb = make_eval_heartbeat(
+        cfg,
+        reports_root=tmp_path / "artifacts",
+        nonce_secret=b"\x00" * 32,
+    )
+
+    # Invoke for day 1 and day 2.
+    hb(date(2024, 3, 11), db_path)
+    hb(date(2024, 3, 12), db_path)
+
+    # All downstream factories must have received the SAME ReplayClock
+    # instance (this is what makes per-day mutation propagate).
+    assert handed_out_clocks, "no downstream factory captured the boot_clock"
+    boot_clock = handed_out_clocks[0]
+    for c in handed_out_clocks[1:]:
+        assert c is boot_clock, (
+            "downstream factory received a different clock instance — "
+            "per-day .set() mutation would not propagate to it"
+        )
+    assert captured_graph_args["clock"] is boot_clock
+
+    # Read back the two broker.fill rows: their ts dates MUST differ.
+    with closing(sqlite3.connect(str(db_path))) as conn:
+        rows = list(
+            conn.execute(
+                "SELECT ts FROM audit_log WHERE event = 'broker.fill' ORDER BY id"
+            )
+        )
+    assert len(rows) == 2, f"expected 2 fill rows, got {len(rows)}"
+    ts_dates = [datetime.fromisoformat(r[0]).date() for r in rows]
+    assert ts_dates == [date(2024, 3, 11), date(2024, 3, 12)], (
+        f"per-day clock injection failed: ts dates were {ts_dates}, "
+        f"expected [2024-03-11, 2024-03-12]. The bug this guards against "
+        f"would produce two rows both bound to the regime start_date."
+    )

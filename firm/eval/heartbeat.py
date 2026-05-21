@@ -6,6 +6,16 @@ agent graph once, then invoke it with a per-day :class:`ReplayClock` so
 the LLM/RAG/router/broker stack writes its decisions + audit-log rows
 into the per-regime sqlite DB.
 
+Per-day clock injection
+-----------------------
+The graph is constructed ONCE on first call and the SAME ``ReplayClock``
+instance is threaded into broker / monitor / research / pm / risk / hitl /
+execution / reporter at construction time. Each subsequent call mutates
+the clock via :meth:`ReplayClock.set` so every downstream component (all
+holding the same reference) sees the new day. This avoids per-day graph
+rebuild (cheaper) and keeps audit-log ``ts``, ``broker.fill`` rows and
+reporter ``date_dir`` correctly bound to each day in the regime window.
+
 Determinism + missing-fixture handling
 --------------------------------------
 The eval harness's load-bearing assertion is **byte-for-byte idempotency
@@ -21,13 +31,22 @@ Errors that DO propagate (i.e. real bugs, not missing data):
   * any error raised during graph CONSTRUCTION (vs invocation) — a bad
     config should fail the whole eval run, not silently skip every day.
 
+Misconfig skip gate
+-------------------
+``_build_llm_stack`` raises :class:`click.ClickException` for missing
+``QDRANT_URL`` / missing API key / missing model config. By default these
+propagate (loud failure). For dev-mode runs where T16/T17 fixtures aren't
+in place yet, set ``FIRM_EVAL_SKIP_MISCONFIG=1`` to additionally treat
+``ClickException`` as skippable. The Makefile ``eval`` target sets this
+env var so ``make eval`` keeps working pre-T16/T17; the bare ``firm eval``
+invocation fails loudly on misconfig.
+
 The heartbeat never mutates process env vars per call. Callers (the CLI
 ``eval`` subcommand) must set ``FIRM_LLM_MODE`` / ``FIRM_VCR_MODE`` etc.
 once at entry time.
 """
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import Callable
 from datetime import date, datetime, time, timezone
@@ -56,29 +75,33 @@ _SKIPPABLE_REFS: tuple[tuple[str, str], ...] = (
     ("firm.eval.benchmarks", "PriceCassetteMissError"),
     ("firm.llm.cassettes", "CassetteMissError"),
     ("qdrant_client.http.exceptions", "UnexpectedResponse"),
-    # Construction errors from _build_llm_stack get wrapped as
-    # click.ClickException; we treat those as "fixtures not ready" too,
-    # because T15 ships before T16/T17 populate cassettes + price parquets.
-    # An unconfigured QDRANT_URL / missing models / missing API key are all
-    # legitimate "skip this run" signals during the dry idempotency check.
-    ("click.exceptions", "ClickException"),
 )
 
+# Misconfig (missing QDRANT_URL / API key / model config) surfaces from
+# _build_llm_stack as click.ClickException. By default we let it propagate
+# so operators see the loud failure. The dev-mode env var below opts into
+# treating it as skippable so ``make eval`` keeps working before T16/T17
+# populate cassettes + price parquets.
+_MISCONFIG_SKIP_REFS: tuple[tuple[str, str], ...] = (
+    ("click.exceptions", "ClickException"),
+)
+_MISCONFIG_SKIP_ENV = "FIRM_EVAL_SKIP_MISCONFIG"
+
 _cached_skippable: tuple[type[BaseException], ...] | None = None
+_cached_skippable_with_misconfig: tuple[type[BaseException], ...] | None = None
 
 
-def _resolve_skippable() -> tuple[type[BaseException], ...]:
-    """Import + cache the skippable exception classes.
+def _resolve_refs(
+    refs: tuple[tuple[str, str], ...],
+) -> tuple[type[BaseException], ...]:
+    """Import + return the exception classes named by *refs*.
 
     Modules that fail to import (e.g. ``qdrant_client`` absent) are
     silently dropped from the tuple — if the dep isn't installed the
     code path that would raise its error can't fire anyway.
     """
-    global _cached_skippable
-    if _cached_skippable is not None:
-        return _cached_skippable
     classes: list[type[BaseException]] = []
-    for mod_path, cls_name in _SKIPPABLE_REFS:
+    for mod_path, cls_name in refs:
         try:
             mod = __import__(mod_path, fromlist=[cls_name])
         except ImportError:
@@ -86,7 +109,21 @@ def _resolve_skippable() -> tuple[type[BaseException], ...]:
         cls = getattr(mod, cls_name, None)
         if isinstance(cls, type) and issubclass(cls, BaseException):
             classes.append(cls)
-    _cached_skippable = tuple(classes)
+    return tuple(classes)
+
+
+def _resolve_skippable() -> tuple[type[BaseException], ...]:
+    """Resolve the skip allow-list. Caches both env-on / env-off variants."""
+    global _cached_skippable, _cached_skippable_with_misconfig
+    if os.environ.get(_MISCONFIG_SKIP_ENV) == "1":
+        if _cached_skippable_with_misconfig is None:
+            _cached_skippable_with_misconfig = (
+                _resolve_refs(_SKIPPABLE_REFS)
+                + _resolve_refs(_MISCONFIG_SKIP_REFS)
+            )
+        return _cached_skippable_with_misconfig
+    if _cached_skippable is None:
+        _cached_skippable = _resolve_refs(_SKIPPABLE_REFS)
     return _cached_skippable
 
 
@@ -132,9 +169,14 @@ def make_eval_heartbeat(
          does before the per-day loop) before the heartbeat tries to
          talk to the DB.
 
-    Construction is then memoised — subsequent days reuse the same
-    broker/research/pm/risk/hitl/execution/reporter stack. This mirrors
-    ``firm.cli.run`` which builds the graph once per process.
+    Construction is memoised; the SAME ``ReplayClock`` instance is threaded
+    into every downstream component (broker / monitor / research / pm /
+    risk / hitl / execution / reporter). Each per-day invocation calls
+    :meth:`ReplayClock.set` to advance that single instance — every holder
+    immediately sees the new day's timestamp. This is materially cheaper
+    than per-day graph rebuild while still binding each day's audit-log
+    rows, ``broker.fill`` events and reporter ``date_dir`` to the correct
+    calendar date.
 
     Parameters
     ----------
@@ -150,7 +192,14 @@ def make_eval_heartbeat(
                     ``FIRM_HMAC_SECRET`` at first-call time.
     """
     # Mutable per-heartbeat state — captured by the returned closure.
-    state: dict[str, Any] = {"graph": None, "build_failed": False}
+    # ``boot_clock`` holds the SINGLE shared ReplayClock that downstream
+    # components close over; each day's _heartbeat call mutates it via
+    # .set() so every holder advances in lockstep.
+    state: dict[str, Any] = {
+        "graph": None,
+        "build_failed": False,
+        "boot_clock": None,
+    }
 
     def _build_graph_once(db_path: Path) -> Any:
         """Construct the agent graph on first invocation; reuse thereafter."""
@@ -180,13 +229,15 @@ def make_eval_heartbeat(
         from firm.orchestrator.graph import build_graph
         from firm.orchestrator.state import WorkingState
 
-        # Use the runner-installed clock as the construction-time clock; the
-        # per-day invocation rebinds via a fresh ReplayClock below.
+        # The SINGLE shared clock — every downstream component closes over
+        # this instance. _heartbeat mutates .set() per day so they all
+        # observe the new day's now() without needing to be rebuilt.
         boot_clock = ReplayClock(
             datetime.combine(
                 config.start_date, time(0, 0), tzinfo=timezone.utc
             )
         )
+        state["boot_clock"] = boot_clock
 
         broker = make_broker(clock=boot_clock)
         policy = load_policy(Path("config/policy.yaml"))
@@ -308,13 +359,17 @@ def make_eval_heartbeat(
             # Non-skippable construction error — propagate so CLI surfaces it.
             raise
 
-        # Per-day invocation: rebind the graph's clock by passing the
-        # ReplayClock through the LangGraph config (the agent layer reads
-        # the clock via WorkingState, not the graph constructor).
+        # Per-day invocation: mutate the shared boot_clock so every
+        # downstream component (broker, audit log, reporter, ...) observes
+        # the new day. ReplayClock instances are referenced — never copied
+        # — by the downstream make_* factories, so a single .set() advances
+        # them all at once.
+        day_dt = datetime.combine(day, time(0, 0), tzinfo=timezone.utc)
+        boot_clock = state["boot_clock"]
+        assert boot_clock is not None  # _build_graph_once sets this
+        boot_clock.set(day_dt)
+
         try:
-            day_clock = ReplayClock(
-                datetime.combine(day, time(0, 0), tzinfo=timezone.utc)
-            )
             from firm.obs import agent_span
 
             try:
@@ -323,7 +378,7 @@ def make_eval_heartbeat(
                 RunnableConfig = dict  # type: ignore[assignment,misc]
 
             graph_cfg: RunnableConfig = {
-                "configurable": {"thread_id": day_clock.now().isoformat()}
+                "configurable": {"thread_id": day_dt.isoformat()}
             }
             existing = graph.get_state(graph_cfg)
             invoke_input: dict[str, Any] | None = (
@@ -337,19 +392,6 @@ def make_eval_heartbeat(
         # All other exceptions propagate.
 
     return _heartbeat
-
-
-def _coerce_skip_detail(detail_json: str) -> dict[str, Any]:
-    """Decode a ``heartbeat.skipped`` audit-log detail back to a dict.
-
-    Test helper — the runner reads audit_log rows as raw strings; tests
-    that need to introspect the skip reason can use this rather than
-    re-rolling json.loads + isinstance checks.
-    """
-    obj = json.loads(detail_json)
-    if not isinstance(obj, dict):
-        raise ValueError("heartbeat.skipped detail is not a JSON object")
-    return obj
 
 
 __all__ = ["HeartbeatFn", "make_eval_heartbeat"]

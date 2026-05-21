@@ -24,6 +24,16 @@ Status combination across regimes uses the strictest verdict:
   * else all ``pass`` → ``pass``
   * else (e.g. all ``info``) → first regime's status
 
+.. warning::
+   The ``num/den`` aggregator sums numerators and denominators across
+   regimes (``1/1 + 100/100 → 101/101``), which masks per-regime trial-
+   count scale. A regime that runs 100 decisions and a regime that runs
+   1 decision contribute proportionally to the combined ratio rather
+   than equally — intentional, since the aggregated ratio represents
+   the global pass rate, but it means a single high-volume regime can
+   dominate the summary. Inspect per-regime reports for scale-sensitive
+   judgments.
+
 Ordering is fixed: the first regime's ``process_metrics`` ordering wins.
 This is the spec §9.5 order produced by :func:`compute_all_metrics`, but
 relying on the input order keeps the aggregator decoupled from that fact.
