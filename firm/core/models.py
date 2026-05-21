@@ -29,6 +29,8 @@ class FailureMode(StrEnum):
     TOOL_PERMISSION_DENIED = "tool_permission_denied"
     UNAPPROVED_HIGH_RISK = "unapproved_high_risk"
     BROKER_UNAVAILABLE = "broker_unavailable"
+    RECONCILIATION_DRIFT = "reconciliation_drift"
+    SIGNED_APPROVAL_INVALID = "signed_approval_invalid"
     UNKNOWN = "unknown"
 
 

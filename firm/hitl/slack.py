@@ -40,7 +40,9 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from firm.agents.hitl import mark_approved, mark_rejected
+from firm.audit.log import AuditLog
 from firm.core.clock import Clock
+from firm.core.models import FailureMode
 from firm.hitl.signing import verify as verify_internal
 
 logger = logging.getLogger(__name__)
@@ -197,6 +199,14 @@ def build_app(
             now=now_ts,
         )
         if not ok:
+            AuditLog(db_path, clock).append(
+                "hitl.signature_rejected",
+                {
+                    "decision_id": button.get("decision_id"),
+                    "approver_id": button.get("approver_id"),
+                    "failure_mode": FailureMode.SIGNED_APPROVAL_INVALID.value,
+                },
+            )
             return JSONResponse(
                 status_code=401,
                 content={"error": "invalid internal signature"},

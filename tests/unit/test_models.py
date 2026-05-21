@@ -10,8 +10,8 @@ from firm.core.models import (
 def test_failure_mode_values():
     assert FailureMode.UNCITED_CLAIM.value == "uncited_claim"
     assert FailureMode.BROKER_UNAVAILABLE.value == "broker_unavailable"
-    # 13 total values per spec §3.5
-    assert len(list(FailureMode)) == 13
+    # 15 total values: 13 original + RECONCILIATION_DRIFT + SIGNED_APPROVAL_INVALID (T25)
+    assert len(list(FailureMode)) == 15
 
 
 def test_action_enum_values():
