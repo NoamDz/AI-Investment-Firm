@@ -28,7 +28,7 @@ locals {
 #
 #   1. module "network"        (T32, DONE)  — VPC, public/private subnets,
 #                                              NAT, SGs.
-#   2. module "storage"        (T34, TODO)  — RDS Postgres + S3 buckets
+#   2. module "storage"        (T34, DONE)  — RDS Postgres + S3 buckets
 #                                              (reports, traces, eval
 #                                              cassettes).
 #   3. module "secrets"        (T35, TODO)  — Secrets Manager entries (HMAC,
@@ -65,4 +65,14 @@ module "compute" {
   ecs_task_memory            = var.ecs_task_memory
   private_subnet_ids         = module.network.private_subnet_ids
   ecs_task_security_group_id = module.network.ecs_task_security_group_id
+}
+
+module "storage" {
+  source = "./modules/storage"
+
+  project_name          = var.project_name
+  env                   = var.env
+  db_instance_class     = var.db_instance_class
+  private_subnet_ids    = module.network.private_subnet_ids
+  rds_security_group_id = module.network.rds_security_group_id
 }
