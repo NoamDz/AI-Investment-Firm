@@ -28,6 +28,7 @@ def test_init_db_creates_all_tables(tmp_path: Path) -> None:
         "llm_cache",
         "ingest_runs",
         "cost_ledger",
+        "news_cache",
     }
 
 

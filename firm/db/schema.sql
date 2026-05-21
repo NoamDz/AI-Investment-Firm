@@ -128,3 +128,17 @@ CREATE TABLE IF NOT EXISTS cost_ledger (
 );
 CREATE INDEX IF NOT EXISTS idx_cost_ledger_decision_id ON cost_ledger(decision_id);
 CREATE INDEX IF NOT EXISTS idx_cost_ledger_created_at ON cost_ledger(created_at);
+
+-- Per-(ticker, day) raw response cache for the news adapter. See Plan 3 §T20a.
+-- Prevents heartbeat retries from double-spending the upstream rate-limit
+-- quota; cached rows return the original JSON body byte-for-byte. day is the
+-- UTC YYYY-MM-DD partition of the request's "as-of" time (clock.now()).
+CREATE TABLE IF NOT EXISTS news_cache (
+    ticker       TEXT NOT NULL,
+    day          TEXT NOT NULL,
+    provider     TEXT NOT NULL,
+    response_json TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY (ticker, day, provider)
+);
+CREATE INDEX IF NOT EXISTS idx_news_cache_created ON news_cache(created_at);

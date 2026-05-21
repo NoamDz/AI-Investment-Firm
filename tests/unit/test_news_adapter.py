@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -101,6 +102,7 @@ def test_no_creds_returns_empty_iter(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_no_creds_logs_warning_once(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    monkeypatch.setenv("FIRM_NEWS_ENABLED", "true")
     monkeypatch.delenv("POLYGON_API_KEY", raising=False)
     monkeypatch.delenv("NEWSAPI_KEY", raising=False)
 
@@ -119,7 +121,10 @@ def test_no_creds_logs_warning_once(
 # ---------------------------------------------------------------------------
 
 
-def test_polygon_path_yields_filing_docs(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_polygon_path_yields_filing_docs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("FIRM_NEWS_ENABLED", "true")
     monkeypatch.setenv("POLYGON_API_KEY", "test_key")
     monkeypatch.delenv("NEWSAPI_KEY", raising=False)
 
@@ -127,6 +132,7 @@ def test_polygon_path_yields_filing_docs(monkeypatch: pytest.MonkeyPatch) -> Non
         tickers=["AAPL"],
         clock=_replay(),
         http_client=_make_stub(_POLYGON_RESPONSE_2),
+        db_path=tmp_path / "firm.db",
     )
     docs = list(source.iter_docs())
     assert len(docs) == 2
@@ -142,7 +148,10 @@ def test_polygon_path_yields_filing_docs(monkeypatch: pytest.MonkeyPatch) -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_newsapi_path_yields_filing_docs(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_newsapi_path_yields_filing_docs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("FIRM_NEWS_ENABLED", "true")
     monkeypatch.delenv("POLYGON_API_KEY", raising=False)
     monkeypatch.setenv("NEWSAPI_KEY", "test_key")
 
@@ -150,6 +159,7 @@ def test_newsapi_path_yields_filing_docs(monkeypatch: pytest.MonkeyPatch) -> Non
         tickers=["NVDA"],
         clock=_replay(),
         http_client=_make_stub(_NEWSAPI_RESPONSE_1),
+        db_path=tmp_path / "firm.db",
     )
     docs = list(source.iter_docs())
     assert len(docs) == 1
@@ -166,7 +176,10 @@ def test_newsapi_path_yields_filing_docs(monkeypatch: pytest.MonkeyPatch) -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_polygon_preferred_when_both_keys_set(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_polygon_preferred_when_both_keys_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("FIRM_NEWS_ENABLED", "true")
     monkeypatch.setenv("POLYGON_API_KEY", "poly_key")
     monkeypatch.setenv("NEWSAPI_KEY", "newsapi_key")
 
@@ -180,6 +193,7 @@ def test_polygon_preferred_when_both_keys_set(monkeypatch: pytest.MonkeyPatch) -
         tickers=["AAPL"],
         clock=_replay(),
         http_client=_capturing_stub,
+        db_path=tmp_path / "firm.db",
     )
     list(source.iter_docs())
 
@@ -195,7 +209,10 @@ def test_polygon_preferred_when_both_keys_set(monkeypatch: pytest.MonkeyPatch) -
 # ---------------------------------------------------------------------------
 
 
-def test_window_is_rolling_12_months(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_window_is_rolling_12_months(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("FIRM_NEWS_ENABLED", "true")
     monkeypatch.setenv("POLYGON_API_KEY", "test_key")
     monkeypatch.delenv("NEWSAPI_KEY", raising=False)
 
@@ -212,6 +229,7 @@ def test_window_is_rolling_12_months(monkeypatch: pytest.MonkeyPatch) -> None:
         tickers=["AAPL"],
         clock=ReplayClock(fixed=fixed_now),
         http_client=_capturing_stub,
+        db_path=tmp_path / "firm.db",
     )
     list(source.iter_docs())
 
@@ -232,8 +250,9 @@ def test_window_is_rolling_12_months(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_one_ticker_http_failure_does_not_abort_iteration(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    monkeypatch.setenv("FIRM_NEWS_ENABLED", "true")
     monkeypatch.setenv("POLYGON_API_KEY", "test_key")
     monkeypatch.delenv("NEWSAPI_KEY", raising=False)
 
@@ -247,6 +266,7 @@ def test_one_ticker_http_failure_does_not_abort_iteration(
         tickers=["AAPL", "NVDA"],
         clock=_replay(),
         http_client=_selective_stub,
+        db_path=tmp_path / "firm.db",
     )
     # Patch _POLYGON_ITEM_1 ticker field in results; item ticker doesn't matter
     # since we use polled ticker — just need 1 result from NVDA
@@ -260,7 +280,10 @@ def test_one_ticker_http_failure_does_not_abort_iteration(
 # ---------------------------------------------------------------------------
 
 
-def test_polygon_z_suffix_published_at_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_polygon_z_suffix_published_at_parses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("FIRM_NEWS_ENABLED", "true")
     monkeypatch.setenv("POLYGON_API_KEY", "test_key")
     monkeypatch.delenv("NEWSAPI_KEY", raising=False)
 
@@ -277,6 +300,7 @@ def test_polygon_z_suffix_published_at_parses(monkeypatch: pytest.MonkeyPatch) -
         tickers=["AAPL"],
         clock=_replay(),
         http_client=_make_stub({"results": [item]}),
+        db_path=tmp_path / "firm.db",
     )
     docs = list(source.iter_docs())
     assert len(docs) == 1
@@ -307,8 +331,11 @@ def test_implements_corpus_source_protocol(monkeypatch: pytest.MonkeyPatch) -> N
 # ---------------------------------------------------------------------------
 
 
-def test_empty_description_uses_title_as_html(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_empty_description_uses_title_as_html(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """When description is empty but title is not, title is used as html content."""
+    monkeypatch.setenv("FIRM_NEWS_ENABLED", "true")
     monkeypatch.setenv("POLYGON_API_KEY", "test_key")
     monkeypatch.delenv("NEWSAPI_KEY", raising=False)
 
@@ -325,6 +352,7 @@ def test_empty_description_uses_title_as_html(monkeypatch: pytest.MonkeyPatch) -
         tickers=["AAPL"],
         clock=_replay(),
         http_client=_make_stub({"results": [item]}),
+        db_path=tmp_path / "firm.db",
     )
     docs = list(source.iter_docs())
     assert len(docs) == 1
