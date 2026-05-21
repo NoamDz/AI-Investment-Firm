@@ -70,8 +70,14 @@ class FinanceBenchCorpusConfig(BaseModel):
     eval_holdout_file: str | None = None
 
 
+class TranscriptsCorpusConfig(BaseModel):
+    path: str = Field(min_length=1)
+    max_docs: int | None = None
+
+
 class CorpusConfig(BaseModel):
     financebench: FinanceBenchCorpusConfig
+    transcripts: TranscriptsCorpusConfig | None = None
 
 
 class ChunkConfig(BaseModel):
