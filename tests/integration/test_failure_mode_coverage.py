@@ -12,8 +12,8 @@ end-to-end fixture ships in Plan 4 with the red-team corpus.
 
 The following Plan 2-era modes have no triggering site in the source yet
 (enum-only) and are documented as allowed gaps pending future plan tasks:
-  PROMPT_INJECTION_DETECTED, HITL_TIMEOUT, UNGROUNDED_CLAIM,
-  TOOL_PERMISSION_DENIED, UNAPPROVED_HIGH_RISK, BROKER_UNAVAILABLE.
+  HITL_TIMEOUT, UNGROUNDED_CLAIM, TOOL_PERMISSION_DENIED,
+  UNAPPROVED_HIGH_RISK, BROKER_UNAVAILABLE.
 Each is registered in ALLOWED_GAPS below with a note; adding a triggering
 site will require moving it into FAILURE_MODE_FIXTURES.
 """
@@ -66,6 +66,11 @@ FAILURE_MODE_FIXTURES: dict[FailureMode, str] = {
         "tests/integration/test_hitl_invalid_signature_failure_mode.py"
         "::test_invalid_internal_signature_audit_logs_signed_approval_invalid"
     ),
+    # PROMPT_INJECTION_DETECTED: delimiter-break payload → REFUSE in PM sanitiser test.
+    FailureMode.PROMPT_INJECTION_DETECTED: (
+        "tests/integration/test_failuremode_prompt_injection.py"
+        "::test_pm_emits_refuse_with_prompt_injection_detected_on_tainted_claim"
+    ),
     # UNKNOWN: catch-all; no specific triggering fixture required.
     FailureMode.UNKNOWN: "<allowed gap — UNKNOWN is a catch-all, no triggering fixture required>",
 }
@@ -80,9 +85,6 @@ ALLOWED_GAPS: dict[FailureMode, str] = {
     # Plan 4 target: red-team corpus supplies end-to-end UNCITED_CLAIM fixture.
     FailureMode.UNCITED_CLAIM: "deferred to Plan 4 — tied to red-team corpus",
     # Plan 2-era modes without triggering sites yet (enum-only).
-    FailureMode.PROMPT_INJECTION_DETECTED: (
-        "enum-only — no triggering site in codebase yet; add fixture in future plan"
-    ),
     FailureMode.HITL_TIMEOUT: (
         "enum-only — no triggering site in codebase yet; add fixture in future plan"
     ),

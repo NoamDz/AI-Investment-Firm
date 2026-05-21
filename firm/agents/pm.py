@@ -49,6 +49,40 @@ from firm.orchestrator.state import WorkingState
 # to a constant so a future provider rename only changes one site.
 _PROVIDER_ANTHROPIC = "anthropic"
 
+# ---------------------------------------------------------------------------
+# T19 — PM-level prompt-injection sanitiser
+# ---------------------------------------------------------------------------
+
+# Known injection signatures. Each entry is already lower-cased so the
+# per-call check only needs to lower-case the *input* text once.
+_INJECTION_SIGNATURES: tuple[str, ...] = (
+    # Closing pseudo-XML role/tool tags used to fake conversation boundaries.
+    "</user>",
+    "</system>",
+    "</tool_output>",
+    # Opening tool-call tag fragment.
+    "<tool_call",
+    # End-of-document marker used to fake completion of the prior turn.
+    "[end of document]",
+    # Markdown section header simulating a new system prompt block.
+    "## system",
+    # Schema-bypass markers (both quote styles).
+    "schema_bypass",
+    '"override": true',
+    "'override': true",
+)
+
+
+def _detect_prompt_injection(text: str) -> bool:
+    """Return True when ``text`` matches a known prompt-injection signature.
+
+    Performs a single ``.lower()`` on the input and then checks each entry in
+    :data:`_INJECTION_SIGNATURES` (which are already lower-cased) using plain
+    substring membership — no regex backtracking, constant overhead per call.
+    """
+    lowered = text.lower()
+    return any(sig in lowered for sig in _INJECTION_SIGNATURES)
+
 # T08 escalation hook: PM default profile, and the profile used when the
 # sufficiency judge returned PARTIAL but a human ack overrode (so PM is
 # voting on a HITL-approved-but-marginal idea, where opus's deeper reasoning
@@ -603,6 +637,36 @@ def make_pm(
             claims: list[Claim] = [Claim.model_validate(c) for c in claims_dicts]
             # Use research.rationale as the question proxy (see docstring).
             question = research.rationale
+
+            # T19 — Prompt-injection gate: scan research rationale and every
+            # Claim text before any LLM call is made. Short-circuit to REFUSE
+            # with PROMPT_INJECTION_DETECTED if a signature matches.
+            _injection_texts = [research.rationale] + [c.text for c in claims]
+            if any(_detect_prompt_injection(t) for t in _injection_texts):
+                pm_decision_id = ulid_new()
+                injection_metadata: dict[str, Any] = {"agent": "pm"}
+                oldest_age = research.metadata.get("oldest_filing_age_days")
+                if oldest_age is not None:
+                    injection_metadata["oldest_filing_age_days"] = oldest_age
+                injection_refuse = Decision(
+                    id=pm_decision_id,
+                    decision_id_chain=[research.id],
+                    action=ActionEnum.REFUSE,
+                    payload=RefusePayload(reason="pm:prompt_injection_detected"),
+                    rationale=(
+                        "PM sanitiser detected prompt-injection signature in"
+                        " upstream claims or research rationale"
+                    ),
+                    confidence=0.0,
+                    citations=list(research.citations),
+                    falsification_condition=research.falsification_condition,
+                    escalation_reason=None,
+                    failure_mode=FailureMode.PROMPT_INJECTION_DETECTED,
+                    metadata=injection_metadata,
+                    nonce="pm",
+                )
+                stamp_decision(span, injection_refuse.id, injection_refuse.failure_mode)
+                return {"pm_decision": injection_refuse, "pm_votes": []}
 
             # T08 wiring: hoisted ahead of the voter loop so the same id is
             # used to bind the router client AND to stamp the emitted PM
