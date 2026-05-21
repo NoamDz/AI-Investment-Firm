@@ -12,7 +12,7 @@ end-to-end fixture ships in Plan 4 with the red-team corpus.
 
 The following Plan 2-era modes have no triggering site in the source yet
 (enum-only) and are documented as allowed gaps pending future plan tasks:
-  HITL_TIMEOUT, UNAPPROVED_HIGH_RISK, BROKER_UNAVAILABLE.
+  HITL_TIMEOUT, BROKER_UNAVAILABLE.
 Each is registered in ALLOWED_GAPS below with a note; adding a triggering
 site will require moving it into FAILURE_MODE_FIXTURES.
 """
@@ -81,6 +81,12 @@ FAILURE_MODE_FIXTURES: dict[FailureMode, str] = {
         "tests/integration/test_failuremode_tool_permission_denied.py"
         "::test_research_role_broker_call_rejected_with_tool_permission_denied_failure_mode"
     ),
+    # UNAPPROVED_HIGH_RISK: aged-out pending hitl_queue row keyed to a >3% NAV
+    # ESCALATE emits REFUSE with conservative-default disposition (Plan 4 T24).
+    FailureMode.UNAPPROVED_HIGH_RISK: (
+        "tests/integration/test_failuremode_unapproved_high_risk.py"
+        "::test_aged_pending_high_risk_hitl_row_emits_refuse_with_unapproved_high_risk_failure_mode"
+    ),
     # UNKNOWN: catch-all; no specific triggering fixture required.
     FailureMode.UNKNOWN: "<allowed gap — UNKNOWN is a catch-all, no triggering fixture required>",
 }
@@ -96,9 +102,6 @@ ALLOWED_GAPS: dict[FailureMode, str] = {
     FailureMode.UNCITED_CLAIM: "deferred to Plan 4 — tied to red-team corpus",
     # Plan 2-era modes without triggering sites yet (enum-only).
     FailureMode.HITL_TIMEOUT: (
-        "enum-only — no triggering site in codebase yet; add fixture in future plan"
-    ),
-    FailureMode.UNAPPROVED_HIGH_RISK: (
         "enum-only — no triggering site in codebase yet; add fixture in future plan"
     ),
     FailureMode.BROKER_UNAVAILABLE: (
