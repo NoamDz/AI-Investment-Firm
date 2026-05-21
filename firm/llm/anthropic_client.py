@@ -33,7 +33,7 @@ from opentelemetry import trace
 from firm.core.clock import Clock
 from firm.llm.cache import LlmCache, hash_prompt
 from firm.llm.client import CompletionResponse
-from firm.llm.cost import compute_cost_usd, get_router_config
+from firm.llm.cost import extract_cost_fields, get_router_config
 
 
 class LlmCacheMissError(Exception):
@@ -190,7 +190,7 @@ class CachedAnthropicClient:
             raw = json.loads(cached.response_json)
             assert isinstance(raw, dict)
             raw["_cache_hit"] = True
-            _stamp_llm_cost(raw, model=model, cache_hit=True)
+            _stamp_llm_cost(raw, model=model)
             return raw
 
         if self.mode == LlmMode.LIVE:
@@ -203,7 +203,7 @@ class CachedAnthropicClient:
                 temperature=temperature,
             )
             raw["_cache_hit"] = False
-            _stamp_llm_cost(raw, model=model, cache_hit=False)
+            _stamp_llm_cost(raw, model=model)
             return raw
 
         # RECORD: cache-first, then live + write.
@@ -212,7 +212,7 @@ class CachedAnthropicClient:
             raw = json.loads(cached.response_json)
             assert isinstance(raw, dict)
             raw["_cache_hit"] = True
-            _stamp_llm_cost(raw, model=model, cache_hit=True)
+            _stamp_llm_cost(raw, model=model)
             return raw
 
         raw = self._transport.messages_create(
@@ -235,7 +235,7 @@ class CachedAnthropicClient:
             output_tokens=output_tokens,
         )
         raw["_cache_hit"] = False
-        _stamp_llm_cost(raw, model=model, cache_hit=False)
+        _stamp_llm_cost(raw, model=model)
         return raw
 
     def complete(
@@ -305,7 +305,7 @@ class _LazyMissingTransport:
 
 
 def _stamp_llm_cost(
-    raw: dict[str, object], *, model: str, cache_hit: bool
+    raw: dict[str, object], *, model: str
 ) -> None:
     """Write token / cost attributes onto the currently active OTel span.
 
@@ -322,23 +322,27 @@ def _stamp_llm_cost(
     context — e.g. directly from a unit test or a startup probe.  This keeps
     the wrapper safe to call from any callsite without requiring a span to
     be active.
+
+    Implementation note: delegates to :func:`firm.llm.cost.extract_cost_fields`
+    so the (cache-hit / live) -> field-set mapping cannot drift from the T09
+    cost-ledger writer.  Cache-hit provenance is read from ``raw["_cache_hit"]``
+    directly; the caller attaches it before invoking this function.
     """
     span = trace.get_current_span()
     if not span.is_recording():
         return
 
-    usage_raw = raw.get("usage", {})
-    usage = usage_raw if isinstance(usage_raw, dict) else {}
-    input_tokens = int(usage.get("input_tokens", 0) or 0)
-    output_tokens = int(usage.get("output_tokens", 0) or 0)
+    fields = extract_cost_fields(raw, model=model, router_cfg=get_router_config())
 
-    if cache_hit:
-        span.set_attribute("cached_tokens", input_tokens + output_tokens)
-        span.set_attribute("cost_usd", 0.0)
+    if fields.cached_tokens is not None:
+        span.set_attribute("cached_tokens", fields.cached_tokens)
+        span.set_attribute("cost_usd", fields.cost_usd)
         return
 
-    router_cfg = get_router_config()
-    cost = compute_cost_usd(model, input_tokens, output_tokens, router_cfg)
-    span.set_attribute("input_tokens", input_tokens)
-    span.set_attribute("output_tokens", output_tokens)
-    span.set_attribute("cost_usd", cost)
+    # Live call branch — input/output tokens are ints (extract_cost_fields
+    # only nulls them on cache hit).
+    assert fields.input_tokens is not None
+    assert fields.output_tokens is not None
+    span.set_attribute("input_tokens", fields.input_tokens)
+    span.set_attribute("output_tokens", fields.output_tokens)
+    span.set_attribute("cost_usd", fields.cost_usd)

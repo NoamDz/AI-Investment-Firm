@@ -102,3 +102,24 @@ CREATE TABLE IF NOT EXISTS ingest_runs (
     status          TEXT NOT NULL CHECK (status IN ('running','completed','failed')),
     error           TEXT
 );
+
+-- Append-only per-LLM-call cost ledger. See Plan 3 §10.2 / T09.
+-- The router writes one row per successful call (cached or live); cached rows
+-- have input_tokens=NULL, output_tokens=NULL, cost_usd=0.0 and the cached
+-- token count goes into cached_tokens. Live rows have cached_tokens=NULL.
+-- Append-only: no UPDATE/DELETE path; the AUTOINCREMENT id keeps inserts
+-- monotonic. No FK on decision_id because a call may be logged before the
+-- enclosing decisions row is written (or for heartbeats with no Decision).
+CREATE TABLE IF NOT EXISTS cost_ledger (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    decision_id     TEXT NOT NULL,
+    agent           TEXT NOT NULL,
+    model           TEXT NOT NULL,
+    input_tokens    INTEGER,
+    output_tokens   INTEGER,
+    cached_tokens   INTEGER,
+    cost_usd        REAL NOT NULL,
+    created_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cost_ledger_decision_id ON cost_ledger(decision_id);
+CREATE INDEX IF NOT EXISTS idx_cost_ledger_created_at ON cost_ledger(created_at);

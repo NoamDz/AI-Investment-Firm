@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Protocol
 
 from firm.core.config import RouterConfig
 from firm.core.models import ProfileName, RouterFeatures
@@ -51,7 +52,29 @@ from firm.llm.anthropic_client import (
     CachedAnthropicClient,
     LlmCacheMissError,
 )
+from firm.llm.cost import extract_cost_fields, get_router_config
 from firm.obs import llm_span
+
+class LedgerWriterFn(Protocol):
+    """Contract for the per-call ledger writer injected into :class:`CostRouter`.
+
+    Matches the keyword args passed by :meth:`CostRouter._write_ledger_row`,
+    which are derived from :func:`firm.db.cost_ledger.write_cost_ledger_row`
+    minus the ``db_path`` and ``clock`` parameters (those are bound by the
+    caller into a :func:`functools.partial` before injection).
+    """
+
+    def __call__(
+        self,
+        *,
+        decision_id: str,
+        agent: str,
+        model: str,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        cached_tokens: int | None,
+        cost_usd: float,
+    ) -> None: ...
 
 
 class LLMUnavailableError(Exception):
@@ -80,6 +103,7 @@ class ProfileChoice:
 _PRIMARY_ATTEMPTS = 2
 _DOWNGRADE_ATTEMPTS = 1
 _DOWNGRADE_TOKEN_FRACTION = 0.5
+_TRUNCATE_DOCUMENT_FRACTION = 0.5
 
 
 class CostRouter:
@@ -96,9 +120,23 @@ class CostRouter:
         *,
         router_cfg: RouterConfig,
         anthropic_client: CachedAnthropicClient,
+        ledger_writer: LedgerWriterFn | None = None,
     ) -> None:
+        """Construct a cost router.
+
+        ``ledger_writer`` is the optional per-call cost-ledger sink (T09);
+        when ``None`` the router does not write rows (used by unit tests
+        that exercise routing alone). When provided, it is invoked once
+        after each successful underlying ``messages_create`` call with the
+        kwargs ``decision_id``, ``agent``, ``model``, ``input_tokens``,
+        ``output_tokens``, ``cached_tokens``, ``cost_usd``. Production
+        callers (T08 wiring) bind a partial of
+        :func:`firm.db.cost_ledger.write_cost_ledger_row` carrying the
+        ``db_path`` + ``clock``.
+        """
         self._router_cfg = router_cfg
         self._client = anthropic_client
+        self._ledger_writer = ledger_writer
 
     # ------------------------------------------------------------------
     # Routing
@@ -128,11 +166,20 @@ class CostRouter:
     def call_with_fallback(
         self,
         profile: ProfileName,
+        *,
         system: str,
         messages: list[dict[str, object]],
         tools: list[dict[str, object]] | None = None,
+        decision_id: str,
+        agent: str,
     ) -> dict[str, object]:
         """Dispatch one call through the fallback ladder rooted at *profile*.
+
+        ``decision_id`` and ``agent`` are required keyword args (T09):
+        every call traces back to a logical decision (or pre-decision
+        heartbeat id) and a named agent layer, which become columns on
+        the cost-ledger row written after a successful attempt. Required
+        rather than optional so callers cannot silently drop attribution.
 
         Returns the raw Anthropic response dict (with ``_cache_hit``
         attached by the lower layer). Raises :class:`LLMUnavailableError`
@@ -170,11 +217,11 @@ class CostRouter:
                 # fallback invocation.
                 if ladder_pos == 0 and sub_attempt == 1:
                     messages_for_attempt = _truncate_document_blocks(
-                        messages, fraction=0.5
+                        messages, fraction=_TRUNCATE_DOCUMENT_FRACTION
                     )
 
                 try:
-                    return self._invoke(
+                    raw = self._invoke(
                         profile_name=profile_name,
                         model_id=profile_cfg.model_id,
                         system=system,
@@ -193,6 +240,18 @@ class CostRouter:
                     attempt_idx += 1
                     # Fall through to the next sub_attempt or next ladder
                     # profile.
+                    continue
+
+                # Success path — write the per-call ledger row (T09).
+                # Only successful attempts are logged; failed-attempt
+                # attribution lives on the per-attempt OTel span (T03 / T04).
+                self._write_ledger_row(
+                    raw=raw,
+                    model=profile_cfg.model_id,
+                    decision_id=decision_id,
+                    agent=agent,
+                )
+                return raw
 
         # Ladder exhausted.
         tail = ", ".join(repr(e) for e in errors[-3:])
@@ -219,6 +278,33 @@ class CostRouter:
             seen.add(name)
             ladder.append(name)
         return tuple(ladder)
+
+    def _write_ledger_row(
+        self,
+        *,
+        raw: dict[str, object],
+        model: str,
+        decision_id: str,
+        agent: str,
+    ) -> None:
+        """Append one cost-ledger row for the successful attempt (T09).
+
+        No-op when no ``ledger_writer`` was injected. Uses
+        :func:`firm.llm.cost.extract_cost_fields` so the row matches the
+        per-attempt OTel span attributes exactly (no drift).
+        """
+        if self._ledger_writer is None:
+            return
+        fields = extract_cost_fields(raw, model=model, router_cfg=get_router_config())
+        self._ledger_writer(
+            decision_id=decision_id,
+            agent=agent,
+            model=model,
+            input_tokens=fields.input_tokens,
+            output_tokens=fields.output_tokens,
+            cached_tokens=fields.cached_tokens,
+            cost_usd=fields.cost_usd,
+        )
 
     def _lookup_profile(self, name: ProfileName):
         """Look up a profile by name; raise KeyError if absent.
@@ -335,5 +421,6 @@ def _truncate_document_blocks(
 __all__ = [
     "CostRouter",
     "LLMUnavailableError",
+    "LedgerWriterFn",
     "ProfileChoice",
 ]

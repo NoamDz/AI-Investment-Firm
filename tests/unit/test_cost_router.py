@@ -123,6 +123,27 @@ def _redirect_traces(tmp_path: Path, run_id: str) -> Path:
     return traces_root
 
 
+def _call(
+    router: CostRouter,
+    profile: str = "sonnet",
+    *,
+    system: str = "s",
+    messages: list[dict[str, object]] | None = None,
+    tools: list[dict[str, object]] | None = None,
+    decision_id: str = "test-decision-1",
+    agent: str = "test",
+) -> dict[str, object]:
+    """Helper that supplies the T09-required ``decision_id`` + ``agent``."""
+    return router.call_with_fallback(
+        profile,
+        system=system,
+        messages=messages if messages is not None else [{"role": "user", "content": "x"}],
+        tools=tools,
+        decision_id=decision_id,
+        agent=agent,
+    )
+
+
 def _messages_with_n_documents(n: int) -> list[dict[str, object]]:
     """Build a message list with *n* document content blocks plus a text block."""
     blocks: list[dict[str, object]] = []
@@ -213,11 +234,7 @@ def test_call_with_fallback_successful_primary_one_call(tmp_path: Path) -> None:
     client = _make_client(tmp_path, transport)
     router = CostRouter(router_cfg=cfg, anthropic_client=client)
 
-    raw = router.call_with_fallback(
-        "sonnet",
-        system="s",
-        messages=[{"role": "user", "content": "go"}],
-    )
+    raw = _call(router, messages=[{"role": "user", "content": "go"}])
     assert raw["_cache_hit"] is False
     assert raw["content"][0]["text"] == "primary-ok"
     assert len(transport.calls) == 1, "primary must not be retried on success"
@@ -242,11 +259,7 @@ def test_call_with_fallback_truncates_documents_and_retries_same_profile(tmp_pat
     router = CostRouter(router_cfg=cfg, anthropic_client=client)
 
     messages = _messages_with_n_documents(3)
-    raw = router.call_with_fallback(
-        "sonnet",
-        system="s",
-        messages=messages,
-    )
+    raw = _call(router, messages=messages)
     assert raw["content"][0]["text"] == "after-truncate"
     assert len(transport.calls) == 2, "expected primary + truncated-retry"
 
@@ -289,7 +302,7 @@ def test_call_with_fallback_downgrades_to_next_profile_with_halved_tokens(
     router = CostRouter(router_cfg=cfg, anthropic_client=client)
 
     messages = _messages_with_n_documents(2)
-    raw = router.call_with_fallback("sonnet", system="s", messages=messages)
+    raw = _call(router, messages=messages)
     assert raw["content"][0]["text"] == "downgrade-ok"
     assert len(transport.calls) == 3
 
@@ -327,9 +340,7 @@ def test_call_with_fallback_all_profiles_fail_raises_unavailable(tmp_path: Path)
     router = CostRouter(router_cfg=cfg, anthropic_client=client)
 
     with pytest.raises(LLMUnavailableError) as exc_info:
-        router.call_with_fallback(
-            "sonnet", system="s", messages=_messages_with_n_documents(2)
-        )
+        _call(router, messages=_messages_with_n_documents(2))
     msg = str(exc_info.value)
     assert "sonnet" in msg, msg
     # The tail of underlying error reprs should be embedded.
@@ -353,9 +364,7 @@ def test_call_with_fallback_cache_miss_is_not_retried(tmp_path: Path) -> None:
     router = CostRouter(router_cfg=cfg, anthropic_client=client)
 
     with pytest.raises(LlmCacheMissError):
-        router.call_with_fallback(
-            "sonnet", system="s", messages=[{"role": "user", "content": "x"}]
-        )
+        _call(router, messages=[{"role": "user", "content": "x"}])
     # Only the first call should have been attempted.
     assert len(transport.calls) == 1
 
@@ -383,9 +392,7 @@ def test_each_attempt_opens_its_own_llm_call_span(tmp_path: Path) -> None:
     # Wrap call in an outer llm_span("test","outer") — emulating T03's wiring
     # so each attempt's span is a child of the outer one.
     with llm_span("test", "outer"):
-        router.call_with_fallback(
-            "sonnet", system="s", messages=_messages_with_n_documents(2)
-        )
+        _call(router, messages=_messages_with_n_documents(2))
 
     spans = _read_spans(traces_root)
     llm_call_spans = [s for s in spans if s.get("operation") == "llm.call"]
@@ -404,3 +411,131 @@ def test_each_attempt_opens_its_own_llm_call_span(tmp_path: Path) -> None:
     models_seen = [s["model"] for s in attempt_spans]
     assert sonnet_model in models_seen
     assert haiku_model in models_seen
+
+
+# ---------------------------------------------------------------------------
+# 8. Cost-ledger injection — successful attempt writes exactly one row (T09)
+# ---------------------------------------------------------------------------
+
+
+def test_call_with_fallback_writes_ledger_row_per_attempt(tmp_path: Path) -> None:
+    """Only the SUCCESSFUL attempt produces a ledger row.
+
+    Spec wording: "The router writes one row per LLM call (cached or live)."
+    Failed transient attempts that trigger the fallback ladder are tracked on
+    per-attempt OTel spans (T03 / T04); the cost ledger keeps to one row per
+    *served* call so cost aggregations stay accurate.
+    """
+    cfg = load_router_config(Path("config/router.yaml"))
+    # 2 failures → succeeds on the third attempt (downgrade).
+    transport = _ScriptedTransport(
+        [
+            RuntimeError("primary-fail"),
+            RuntimeError("truncate-fail"),
+            _ok_response("downgrade-ok"),
+        ]
+    )
+    client = _make_client(tmp_path, transport)
+
+    writes: list[dict[str, object]] = []
+
+    def fake_ledger(**kwargs: object) -> None:
+        writes.append(kwargs)
+
+    router = CostRouter(
+        router_cfg=cfg,
+        anthropic_client=client,
+        ledger_writer=fake_ledger,
+    )
+
+    _call(router, messages=_messages_with_n_documents(2), decision_id="dec-42", agent="research")
+
+    assert len(writes) == 1, f"expected 1 ledger write (success only), got {writes}"
+    row = writes[0]
+    assert row["decision_id"] == "dec-42"
+    assert row["agent"] == "research"
+    # Successful attempt landed on the downgraded profile (haiku) per the script.
+    assert row["model"] == cfg.profiles["haiku"].model_id
+    # Live call → input/output populated, cached_tokens=None, cost_usd > 0
+    # (haiku has a non-zero rate card in config/router.yaml).
+    assert row["input_tokens"] == 10
+    assert row["output_tokens"] == 5
+    assert row["cached_tokens"] is None
+    assert isinstance(row["cost_usd"], float)
+    assert row["cost_usd"] > 0.0
+
+
+def test_call_with_fallback_writes_cached_row_when_cache_hit(tmp_path: Path) -> None:
+    """A cache-hit attempt is logged with cached_tokens populated and cost=0."""
+    cfg = load_router_config(Path("config/router.yaml"))
+    # Pre-populate the cache so the CACHED-mode call hits, then drive the
+    # router through CachedAnthropicClient (no transport needed in CACHED hit).
+    canned = {
+        "content": [{"type": "text", "text": "cached-hit"}],
+        "usage": {"input_tokens": 80, "output_tokens": 70},
+    }
+    cache = _make_cache(tmp_path)
+    from firm.llm.cache import hash_prompt
+
+    system = "s"
+    messages: list[dict[str, object]] = [{"role": "user", "content": "go"}]
+    cache.put(
+        prompt_hash=hash_prompt(system=system, messages=messages, tools=None),
+        model=cfg.profiles["sonnet"].model_id,
+        response_json=json.dumps(canned),
+        input_tokens=80,
+        output_tokens=70,
+    )
+    client = CachedAnthropicClient(
+        api_key=None,
+        cache=cache,
+        mode=LlmMode.CACHED,
+        clock=_make_clock(),
+        transport=None,
+    )
+
+    writes: list[dict[str, object]] = []
+
+    def fake_ledger(**kwargs: object) -> None:
+        writes.append(kwargs)
+
+    router = CostRouter(
+        router_cfg=cfg,
+        anthropic_client=client,
+        ledger_writer=fake_ledger,
+    )
+
+    raw = router.call_with_fallback(
+        "sonnet",
+        system=system,
+        messages=messages,
+        decision_id="dec-cached",
+        agent="pm",
+    )
+    assert raw["_cache_hit"] is True
+
+    assert len(writes) == 1
+    row = writes[0]
+    assert row["decision_id"] == "dec-cached"
+    assert row["agent"] == "pm"
+    # Cached row convention: input/output NULL, cached_tokens = sum, cost=0.0.
+    assert row["input_tokens"] is None
+    assert row["output_tokens"] is None
+    assert row["cached_tokens"] == 150
+    assert row["cost_usd"] == 0.0
+
+
+def test_call_with_fallback_without_ledger_writer_is_silent(tmp_path: Path) -> None:
+    """When no ledger_writer is injected the router does not crash and does not write.
+
+    Protects the existing-callsite contract: T07 tests pre-T09 constructed
+    CostRouter without a writer; that path must continue to work for any
+    caller that doesn't yet need the ledger (e.g. ad-hoc experiments).
+    """
+    cfg = load_router_config(Path("config/router.yaml"))
+    transport = _ScriptedTransport([_ok_response("ok")])
+    client = _make_client(tmp_path, transport)
+    router = CostRouter(router_cfg=cfg, anthropic_client=client)  # no writer
+    # No exception, returns the response.
+    raw = _call(router)
+    assert raw["content"][0]["text"] == "ok"
