@@ -12,10 +12,16 @@ with Python 3.11 + CUDA 12.4 (RTX 4060) + Docker Desktop.
 
 ```powershell
 # Python venv with GPU torch + project deps (skip if you already have a CUDA Python env)
+# IMPORTANT: Python 3.11.x specifically — 3.13 wheels are missing torch.SymInt and
+# break sentence_transformers. The package raises a clear error on 3.12+/3.10-.
 python -m venv .venv
 .\.venv\Scripts\activate
 pip install --index-url https://download.pytorch.org/whl/cu128 torch    # or whl/cpu
 pip install -e ".[dev]"
+
+# If `uv` is the cached resolver and you hit a "torch.SymInt missing" import error,
+# the cached venv is on the wrong Python. Recreate explicitly:
+#   uv venv --python 3.11 && uv pip install -e ".[dev]"
 
 # Anthropic key
 copy .env.example .env                  # then edit .env, set ANTHROPIC_API_KEY

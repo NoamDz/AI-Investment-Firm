@@ -635,6 +635,15 @@ NOT MEASURED
 
 Reviewer clones, runs `make replay`, sees one trading day reproduce identically.
 
+**Runtime vs. committed paths.** `sample_runs/<date>/` above is the *committed*
+reference artifact (one historical day, frozen, tracked in git). The *runtime*
+output path that the running firm writes to on every heartbeat is
+`data/reports/<date>/decisions.jsonl` — calendar-date-keyed, append-only,
+not committed. The two are intentionally distinct: one is a reproducibility
+snapshot, the other is rolling production output. Trace JSONL similarly
+splits: committed sample at `sample_runs/<date>/trace.jsonl`, runtime at
+`data/traces/<date>/run-<id>.jsonl`.
+
 ### 9.9 Inspect AI reference
 
 `docs/eval.md` references Inspect AI (UK AISI) as the framework we would adopt at production scale, with rationale for why we used a custom pytest harness for the take-home scope.
