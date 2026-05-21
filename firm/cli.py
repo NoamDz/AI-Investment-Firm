@@ -709,6 +709,56 @@ def ingest(config: str, max_docs: int | None, source_name: str) -> None:
         sys.exit(1)
 
 
+@cli.command()
+@click.option(
+    "--db",
+    "db_path_str",
+    default=None,
+    envvar="FIRM_DB_PATH",
+    help="Path to firm.db (defaults to data/firm.db).",
+)
+@click.option(
+    "--litestream-dir",
+    default="data/litestream/firm",
+    envvar="FIRM_LITESTREAM_DIR",
+    show_default=True,
+    help="Path to litestream file-replica directory.",
+)
+@click.option(
+    "--rag-config",
+    "rag_config_path_str",
+    default=None,
+    envvar="FIRM_RAG_CONFIG",
+    help="Path to rag.yaml (defaults to config/rag.yaml).",
+)
+def doctor(db_path_str: str | None, litestream_dir: str, rag_config_path_str: str | None) -> None:
+    """Print a one-line health check for each operational concern.
+
+    Exit code equals the number of non-OK checks (0 = fully healthy).
+    Ops wires this to a cron job and alerts on any non-zero exit.
+    """
+    from firm.ops.doctor import format_results, run_doctor
+
+    db = Path(db_path_str) if db_path_str else _db_path()
+    rag_cfg_path = Path(rag_config_path_str) if rag_config_path_str else _rag_config_path()
+    rag_config = load_rag_config(rag_cfg_path)
+    collection = rag_config.qdrant.collection
+
+    qdrant_client = _make_qdrant_client()
+    clock = _resolve_clock()
+
+    results = run_doctor(
+        db_path=db,
+        litestream_dir=Path(litestream_dir),
+        qdrant_client=qdrant_client,
+        collection_name=collection,
+        clock=clock,
+    )
+    click.echo(format_results(results))
+    non_ok = sum(1 for r in results if r.status != "OK")
+    sys.exit(non_ok)
+
+
 def _collect_chunk_texts(
     sources: list[Any],
     rag_config: Any,
