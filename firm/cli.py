@@ -1,6 +1,7 @@
 """CLI entry points. See spec §3.1, §3.8."""
 from __future__ import annotations
 
+import functools
 import itertools
 import json
 import os
@@ -23,10 +24,19 @@ from firm.agents.risk import RiskInput, evaluate_risk
 from firm.broker.alpaca_paper import make_broker
 from firm.broker.protocol import Broker
 from firm.core.clock import Clock, ReplayClock, WallClock
-from firm.core.config import load_llm_config, load_policy, load_rag_config, load_universe
+from firm.core.config import (
+    load_llm_config,
+    load_policy,
+    load_rag_config,
+    load_router_config,
+    load_universe,
+)
 from firm.core.models import BuyPayload, SellPayload
 from firm.db.connection import get_conn
+from firm.db.cost_ledger import write_cost_ledger_row
 from firm.db.migrations import init_db
+from firm.llm.messages_client import RouterBackedMessagesClient
+from firm.llm.router import CostRouter
 from firm.obs import agent_span, stamp_decision
 from firm.orchestrator.graph import build_graph
 from firm.orchestrator.state import WorkingState
@@ -128,15 +138,22 @@ def _fit_bm25_sparse(rag_config: Any, sparse: Any) -> None:
 
 def _build_llm_stack(
     db: Path, clock: Clock, rag_config: Any, llm_config: Any
-) -> tuple[Any, Any, Any]:
+) -> tuple[Any, Any, Any, CostRouter]:
     """Construct RAG + LLM components for the grounded research path.
 
-    Returns ``(retriever, extractor, judge)`` on success.  Any construction
-    failure (Qdrant unreachable, sentence-transformers model missing,
-    ``ANTHROPIC_API_KEY`` unset in LIVE/RECORD mode, etc.) is converted to a
-    :class:`click.ClickException` pointing the operator to ``make ingest`` and
-    ``make record``.  Silent fallback to the Plan 1 stub is intentionally
-    disallowed — a misconfigured production deployment must fail loudly.
+    Returns ``(retriever, extractor, judge, router)`` on success.  Any
+    construction failure (Qdrant unreachable, sentence-transformers model
+    missing, ``ANTHROPIC_API_KEY`` unset in LIVE/RECORD mode, etc.) is
+    converted to a :class:`click.ClickException` pointing the operator to
+    ``make ingest`` and ``make record``.  Silent fallback to the Plan 1
+    stub is intentionally disallowed — a misconfigured production
+    deployment must fail loudly.
+
+    T08: extractor + judge are constructed against router-backed adapters
+    (one each, never shared — see T08 spec) so the agent layer can rebind
+    them per heartbeat.  The router itself is wired with a partial of
+    :func:`write_cost_ledger_row` so each successful underlying call
+    appends a row to ``cost_ledger`` (T09).
 
     The PM voter is constructed unconditionally by the caller (it is cheap and
     has no external model dependencies at construction time).
@@ -153,6 +170,20 @@ def _build_llm_stack(
 
         llm_cache = LlmCache(db, clock)
         client = CachedAnthropicClient.from_env(cache=llm_cache, clock=clock)
+
+        # T08: build the cost router with a ledger writer bound to (db, clock).
+        # functools.partial keeps the LedgerWriterFn Protocol intact — the
+        # router invokes the partial with the per-call kwargs (decision_id,
+        # agent, model, tokens, cost) and the partial supplies the rest.
+        router_cfg = load_router_config(Path("config/router.yaml"))
+        ledger_writer = functools.partial(
+            write_cost_ledger_row, db_path=db, clock=clock
+        )
+        router = CostRouter(
+            router_cfg=router_cfg,
+            anthropic_client=client,
+            ledger_writer=ledger_writer,
+        )
 
         embedder = NomicEmbedder()
         sparse = BM25Sparse()
@@ -189,18 +220,24 @@ def _build_llm_stack(
         from firm.llm.citations import AnthropicCitationsExtractor
         from firm.grounding.judge import SufficiencyJudge
 
+        # T08: each collaborator gets its OWN RouterBackedMessagesClient so a
+        # bind() on the extractor's adapter cannot accidentally affect the
+        # judge (or vice-versa) within a single heartbeat. Cheap to allocate.
+        extractor_adapter = RouterBackedMessagesClient(router=router)
+        judge_adapter = RouterBackedMessagesClient(router=router)
+
         extractor = AnthropicCitationsExtractor(
-            client=client,
+            client=extractor_adapter,
             model=llm_config.research.model,
             max_tokens=llm_config.research.max_tokens,
             tools=tools,
         )
         judge = SufficiencyJudge(
-            client=client,
+            client=judge_adapter,
             model=llm_config.judge.model,
         )
 
-        return retriever, extractor, judge
+        return retriever, extractor, judge, router
 
     except Exception as exc:  # noqa: BLE001
         raise click.ClickException(
@@ -245,7 +282,9 @@ def run(once: bool) -> None:
     # Build the grounded LLM stack — hard-fails if any external dep is missing
     # (Qdrant unreachable, models absent, etc.) so misconfigured deployments
     # surface clearly instead of silently dropping to the Plan 1 stub.
-    retriever, extractor, judge = _build_llm_stack(db, clock, rag_config, llm_config)
+    retriever, extractor, judge, router = _build_llm_stack(
+        db, clock, rag_config, llm_config
+    )
 
     # nonce_secret is required for the grounded path; sourced from env.
     raw_secret = os.environ.get("FIRM_HMAC_SECRET")
@@ -268,16 +307,16 @@ def run(once: bool) -> None:
         extractor=extractor,
         judge=judge,
         nonce_secret=nonce_secret,
+        router=router,
+        db_path=db,
     )
 
-    # PM voter: always constructed (cheap, no external deps).
-    from firm.llm.cache import LlmCache
-    from firm.llm.anthropic_client import CachedAnthropicClient
-
-    llm_cache_pm = LlmCache(db, clock)
-    client_pm = CachedAnthropicClient.from_env(cache=llm_cache_pm, clock=clock)
-    voter = PmVoter(client=client_pm, model=llm_config.pm.model)
-    pm = make_pm(voter=voter)
+    # PM voter: cheap to construct (no external deps), and shares the
+    # T08 cost router with research so the cost-ledger writer is wired
+    # uniformly across both agents.
+    voter_adapter = RouterBackedMessagesClient(router=router)
+    voter = PmVoter(client=voter_adapter, model=llm_config.pm.model)
+    pm = make_pm(voter=voter, router=router)
 
     def risk_node(state: WorkingState) -> dict[str, Any]:
         # Wrap at the LangGraph-node layer (not inside ``evaluate_risk``, which

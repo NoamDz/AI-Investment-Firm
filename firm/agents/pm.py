@@ -30,12 +30,15 @@ from firm.core.models import (
     EscalatePayload,
     FailureMode,
     HoldPayload,
+    ProfileName,
     RefusePayload,
     SellPayload,
     TypedPayload,
 )
 from firm.llm.citations import AnthropicMessagesClient
+from firm.llm.messages_client import RouterBackedMessagesClient
 from firm.llm.prompts import pm_voter_system
+from firm.llm.router import CostRouter, LLMUnavailableError
 from firm.obs import agent_span, llm_span, stamp_decision
 from firm.orchestrator.state import WorkingState
 
@@ -43,6 +46,16 @@ from firm.orchestrator.state import WorkingState
 # Provider literal used on every llm_span emitted from this module — lifted
 # to a constant so a future provider rename only changes one site.
 _PROVIDER_ANTHROPIC = "anthropic"
+
+# T08 escalation hook: PM default profile, and the profile used when the
+# sufficiency judge returned PARTIAL but a human ack overrode (so PM is
+# voting on a HITL-approved-but-marginal idea, where opus's deeper reasoning
+# is worth the cost).
+_PM_DEFAULT_PROFILE: ProfileName = "sonnet"
+_PM_ESCALATED_PROFILE: ProfileName = "opus"
+
+# Agent name stamped on router-managed cost-ledger rows (T09).
+_PM_AGENT_NAME = "pm"
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +461,11 @@ def _payload_for(action: ActionEnum, research: Decision) -> TypedPayload:
     raise AssertionError(f"unexpected aggregated action: {action}")  # pragma: no cover
 
 
-def make_pm(voter: PmVoter) -> Callable[[WorkingState], dict[str, Any]]:
+def make_pm(
+    voter: PmVoter,
+    *,
+    router: CostRouter | None = None,
+) -> Callable[[WorkingState], dict[str, Any]]:
     """Build the PM node callable.
 
     For each heartbeat the node:
@@ -476,6 +493,17 @@ def make_pm(voter: PmVoter) -> Callable[[WorkingState], dict[str, Any]]:
     original question as its own field, and rationale is the closest
     available proxy.  Plan 3 may surface the question on working state
     explicitly so the PM voter receives it verbatim.
+
+    ``router`` (T08): when provided AND the voter's client is a
+    :class:`RouterBackedMessagesClient`, each heartbeat binds the voter's
+    client to a profile (sonnet by default; opus only when the sufficiency
+    judge returned ``partial`` AND ``state["human_override_ack"]`` is truthy
+    — see TODO below). When ``router`` is ``None``, the voter calls its
+    client directly with no routing layer (pre-T08 behavior).
+
+    Catches :class:`LLMUnavailableError` raised by the voter loop and emits
+    a REFUSE Decision with ``failure_mode=LLM_UNAVAILABLE`` and a
+    conservative "all-models-exhausted" payload (T08 spec).
     """
 
     # Read the model id off the voter so each ``llm.call`` span records the
@@ -524,6 +552,35 @@ def make_pm(voter: PmVoter) -> Callable[[WorkingState], dict[str, Any]]:
             # Use research.rationale as the question proxy (see docstring).
             question = research.rationale
 
+            # T08 wiring: hoisted ahead of the voter loop so the same id is
+            # used to bind the router client AND to stamp the emitted PM
+            # Decision below. Ledger rows written by the router during
+            # voting then attribute back to this exact PM Decision id.
+            pm_decision_id = ulid_new()
+
+            if router is not None:
+                # Opus escalation hook: PARTIAL sufficiency + human-ack
+                # override means we're voting on a HITL-approved marginal
+                # idea, where opus's deeper reasoning is worth the cost.
+                # TODO(T13): ``human_override_ack`` is populated by the
+                # HITL approval flow (Section C T13/T14). The branch is
+                # dormant today; the synthetic-state test in
+                # tests/integration/test_router_wired_e2e.py exercises it.
+                sufficiency_status = state.get("sufficiency_status")
+                human_ack = state.get("human_override_ack")
+                profile: ProfileName = (
+                    _PM_ESCALATED_PROFILE
+                    if sufficiency_status == "partial" and bool(human_ack)
+                    else _PM_DEFAULT_PROFILE
+                )
+                voter_client = getattr(voter, "_client", None)
+                if isinstance(voter_client, RouterBackedMessagesClient):
+                    voter_client.bind(
+                        profile=profile,
+                        decision_id=pm_decision_id,
+                        agent=_PM_AGENT_NAME,
+                    )
+
             votes: list[PmVote] = []
             try:
                 for lens in (PmLens.QUALITY, PmLens.VALUATION, PmLens.CATALYST):
@@ -535,6 +592,35 @@ def make_pm(voter: PmVoter) -> Callable[[WorkingState], dict[str, Any]]:
                             research_rationale=research.rationale,
                         )
                     votes.append(vote)
+            except LLMUnavailableError as exc:
+                # T08 spec: PM REFUSEs with LLM_UNAVAILABLE + the conservative
+                # "all-models-exhausted" payload when the router ladder is
+                # exhausted. Distinct rationale string so dashboards can
+                # split router exhaustion from PmVoteSchemaError-driven
+                # SCHEMA_VALIDATION_FAILED REFUSEs.
+                exhausted_metadata: dict[str, Any] = {"agent": "pm"}
+                oldest_age = research.metadata.get("oldest_filing_age_days")
+                if oldest_age is not None:
+                    exhausted_metadata["oldest_filing_age_days"] = oldest_age
+                router_refuse = Decision(
+                    id=pm_decision_id,
+                    decision_id_chain=[research.id],
+                    action=ActionEnum.REFUSE,
+                    payload=RefusePayload(reason="all-models-exhausted"),
+                    rationale=f"all model profiles exhausted: {exc!s}",
+                    confidence=0.0,
+                    citations=list(research.citations),
+                    falsification_condition=research.falsification_condition,
+                    escalation_reason=None,
+                    failure_mode=FailureMode.LLM_UNAVAILABLE,
+                    metadata=exhausted_metadata,
+                    nonce="pm",
+                )
+                stamp_decision(span, router_refuse.id, router_refuse.failure_mode)
+                return {
+                    "pm_decision": router_refuse,
+                    "pm_votes": [v.model_dump(mode="json") for v in votes],
+                }
             except PmVoteSchemaError as exc:
                 # Mirror research.py's JudgeSchemaError path: surface as a REFUSE
                 # Decision with SCHEMA_VALIDATION_FAILED so a single malformed
@@ -544,7 +630,7 @@ def make_pm(voter: PmVoter) -> Callable[[WorkingState], dict[str, Any]]:
                 if oldest_age is not None:
                     schema_metadata["oldest_filing_age_days"] = oldest_age
                 schema_refuse = Decision(
-                    id=ulid_new(),
+                    id=pm_decision_id,
                     decision_id_chain=[research.id],
                     action=ActionEnum.REFUSE,
                     payload=RefusePayload(reason="pm:schema_validation_failed"),
@@ -578,7 +664,7 @@ def make_pm(voter: PmVoter) -> Callable[[WorkingState], dict[str, Any]]:
             )
 
             decision = Decision(
-                id=ulid_new(),
+                id=pm_decision_id,
                 decision_id_chain=[research.id],
                 action=action,
                 payload=payload,

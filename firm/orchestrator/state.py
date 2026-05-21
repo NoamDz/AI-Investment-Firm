@@ -31,6 +31,15 @@ class WorkingState(TypedDict, total=False):
     # no tools were invoked.
     tool_call_ids: list[str]
     pm_votes: list[dict[str, Any]]
+    # Plan 3 §T08: sufficiency status + human-ack override drive the PM
+    # router's opus-escalation hook.  ``sufficiency_status`` carries the
+    # aggregate status string ("ok"|"partial"|"insufficient") so PM can
+    # check it without re-running aggregate_status() over the dict dump.
+    # ``human_override_ack`` is populated by the HITL approval flow
+    # (Section C T13/T14) to signal that a PARTIAL-sufficiency decision
+    # was approved despite the gate.
+    sufficiency_status: str
+    human_override_ack: bool
     hitl_required: bool
     hitl_approved: bool | None
     execution_result: dict[str, Any]   # OrderResult-as-dict

@@ -541,13 +541,17 @@ def _seed_extractor_cache(db_path: Path, chunks: list[Chunk]) -> list[Claim]:
         tools=call["tools"],
     )
     cache = LlmCache(db_path=db_path, clock=_FIXTURE_CLOCK)
-    cache.put(
-        prompt_hash=prompt_hash,
-        model=call["model"],
-        response_json=json.dumps(response_dict),
-        input_tokens=100,
-        output_tokens=50,
-    )
+    # T08: hash_prompt is model-independent; seed under all router-eligible models
+    # so the test doesn't depend on the router's runtime choice.
+    _ROUTER_MODELS = ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-7"]
+    for model_id in _ROUTER_MODELS:
+        cache.put(
+            prompt_hash=prompt_hash,
+            model=model_id,
+            response_json=json.dumps(response_dict),
+            input_tokens=100,
+            output_tokens=50,
+        )
 
     # Return the Claims the canned response would produce.
     return [
@@ -621,13 +625,17 @@ def _seed_judge_cache(db_path: Path, claims: list[Claim]) -> None:
         tools=call["tools"],
     )
     cache = LlmCache(db_path=db_path, clock=_FIXTURE_CLOCK)
-    cache.put(
-        prompt_hash=prompt_hash,
-        model=call["model"],
-        response_json=json.dumps(response_dict),
-        input_tokens=50,
-        output_tokens=30,
-    )
+    # T08: hash_prompt is model-independent; seed under all router-eligible models
+    # so the test doesn't depend on the router's runtime choice.
+    _ROUTER_MODELS = ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-7"]
+    for model_id in _ROUTER_MODELS:
+        cache.put(
+            prompt_hash=prompt_hash,
+            model=model_id,
+            response_json=json.dumps(response_dict),
+            input_tokens=50,
+            output_tokens=30,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -690,13 +698,17 @@ def _seed_pm_voter_cache(db_path: Path, claims: list[Claim]) -> None:
             messages=call["messages"],
             tools=call["tools"],
         )
-        cache.put(
-            prompt_hash=prompt_hash,
-            model=call["model"],
-            response_json=json.dumps(response_dict),
-            input_tokens=60,
-            output_tokens=20,
-        )
+        # T08: hash_prompt is model-independent; seed under all router-eligible models
+        # so the test doesn't depend on the router's runtime choice.
+        _ROUTER_MODELS = ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-7"]
+        for model_id in _ROUTER_MODELS:
+            cache.put(
+                prompt_hash=prompt_hash,
+                model=model_id,
+                response_json=json.dumps(response_dict),
+                input_tokens=60,
+                output_tokens=20,
+            )
 
 
 # ---------------------------------------------------------------------------
