@@ -227,7 +227,7 @@ hitl:
 
 **Cross-references.** §5.5 (crash recovery test), §5.7 (boot reconciliation halts on broker drift), §10.2 (LLM fallback ladder), §3.7 (stale-data thresholds).
 
-**CI invariant.** `tests/integration/test_partial_failure.py` injects each failure above and asserts: (a) the correct `FailureMode` is emitted, (b) no order reaches the broker, (c) graph state is recoverable from checkpoint. Wired to the `FailureMode coverage` invariant (§9.5).  As of Plan 3, the invariant is satisfied by a hybrid registry: 7 enum values have end-to-end triggering fixtures, the remaining 7 are listed in `ALLOWED_GAPS` with documented deferral reasons, plus the `UNKNOWN` sentinel.  Plan 4 promotes the deferrals to full fixtures, ending at 14/14 first-class coverage (15 enum values minus the catch-all `UNKNOWN`).
+**CI invariant.** `tests/integration/test_partial_failure.py` injects each failure above and asserts: (a) the correct `FailureMode` is emitted, (b) no order reaches the broker, (c) graph state is recoverable from checkpoint. Wired to the `FailureMode coverage` invariant (§9.5).  The registry has 14/14 first-class triggering fixtures + 1 `UNKNOWN` catch-all sentinel; `ALLOWED_GAPS` is empty by design (Plan 4 T26).
 
 ---
 

@@ -82,6 +82,7 @@ this fixture.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
@@ -182,13 +183,14 @@ def _emit_hitl_timeout_for_unreached_escalations(
             ("hitl.slack_notify_failed",),
         ).fetchall()
         for audit_row in audit_rows:
-            import json  # local to keep import surface minimal
-
             detail = json.loads(audit_row["detail"])
             escalate_id = detail["decision_id"]
             # Only emit a HITL_TIMEOUT REFUSE if the queue row is still
             # 'pending' — an operator may have CLI-acked through an
             # alternate channel since the notify_failed event was logged.
+            # (N+1 fine here because audit_log has <=O(escalations)
+            # notify-failed rows; production reaper should rewrite as a
+            # single JOIN.)
             queue_row = conn.execute(
                 "SELECT status FROM hitl_queue WHERE decision_id = ?",
                 (escalate_id,),
