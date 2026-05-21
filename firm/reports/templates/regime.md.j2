@@ -1,0 +1,26 @@
+{# T13 placeholder template — T14 will replace this with the full spec §9.7
+   styled report. Every section header listed in §9.7 appears verbatim here
+   so the T13 section-coverage assertion holds across the swap. #}
+EVAL REPORT — Replay smoke test across 3 regimes
+
+REGIME: {{ regime_id }} ({{ start_date }} → {{ end_date }}, {{ description }})
+  Calendar days:          {{ num_days }}
+  Decisions:              {{ num_decisions }}
+  Fills:                  {{ num_fills }}
+  Total return:           {{ "%+.1f"|format(perf.total_return_pct) }}%
+  vs SPY (primary):       {{ "%+.1f"|format(perf.vs_spy_pp) }}pp (SPY: {{ "%+.1f"|format(perf.spy_return_pct) }}%)
+  vs equal-weight basket: {{ "%+.1f"|format(perf.vs_basket_pp) }}pp (basket: {{ "%+.1f"|format(perf.basket_return_pct) }}%)
+  Per-trade returns:      {{ perf.per_trade_returns_str }}
+  Hit rate:               {{ perf.hit_rate_str }}
+
+PROCESS METRICS (aggregated)
+{%- for m in process_metrics %}
+  {{ m.name }}: {{ m.value }} (threshold: {{ m.threshold }}, status: {{ m.status }})
+{%- endfor %}
+
+NOT MEASURED
+  - Investment quality / alpha — N too small
+  - Generalization beyond 3 declared regimes
+  - Real-world fill quality — paper sim
+  - Forward references inside chunks — known RAG limitation
+  - Long-horizon learning effects — journal too sparse
