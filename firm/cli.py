@@ -7,7 +7,7 @@ import json
 import os
 import sys
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, time, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -41,6 +41,9 @@ from firm.obs import agent_span, stamp_decision
 from firm.orchestrator.graph import build_graph
 from firm.orchestrator.state import WorkingState
 from firm.reconcile.boot import reconcile_on_boot, resolve_from_broker
+from firm.reports.daily import render_daily_report
+from firm.reports.reconcile_block import render_reconcile_block
+from firm.reports.xlsx import write_positions_xlsx
 
 try:
     from langchain_core.runnables import RunnableConfig
@@ -459,6 +462,48 @@ def reconcile() -> None:
     click.echo(f"status: {result.status}")
     if result.diff:
         click.echo(f"diff: {result.diff}")
+
+
+@cli.command()
+@click.option("--date", "date_str", required=True, help="Report date in YYYY-MM-DD format.")
+def report(date_str: str) -> None:
+    """Generate the daily report bundle for the given date."""
+    # Parse and validate date.
+    try:
+        parsed_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise click.BadParameter(
+            f"Expected YYYY-MM-DD, got: {date_str!r}", param_hint="'--date'"
+        ) from exc
+
+    db = _db_path()
+    clock = _resolve_clock()
+    broker = make_broker(clock=clock)
+    init_db(db)
+
+    out_dir = _reports_root() / date_str
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    reconcile_block = render_reconcile_block(db_path=db, broker=broker, clock=clock)
+
+    render_daily_report(
+        date=parsed_date,
+        db_path=db,
+        broker=broker,
+        traces_path=out_dir / "traces.jsonl",  # reserved placeholder; T16 doesn't read it
+        reports_root=_reports_root(),
+        reconcile_block=reconcile_block,
+    )
+
+    as_of = datetime.combine(parsed_date, time.max, tzinfo=timezone.utc)
+    write_positions_xlsx(
+        path=out_dir / "positions.xlsx",
+        broker=broker,
+        db_path=db,
+        as_of=as_of,
+    )
+
+    click.echo(f"Report bundle written: {out_dir}")
 
 
 def _make_qdrant_client() -> "Any":
