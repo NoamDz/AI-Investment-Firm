@@ -10,6 +10,7 @@ import sqlite3
 import time
 from contextlib import closing
 from dataclasses import dataclass
+from datetime import timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
@@ -137,10 +138,19 @@ def check_last_replication(litestream_dir: Path) -> CheckResult:
 
 
 def check_qdrant_points(
-    qdrant_client: QdrantCountable,
+    qdrant_client: "QdrantCountable | None",
     collection_name: str,
+    qdrant_error: str | None = None,
 ) -> CheckResult:
-    """Check 4: Total point count in the named Qdrant collection."""
+    """Check 4: Total point count in the named Qdrant collection.
+
+    When ``qdrant_client`` is None (construction failed in the caller),
+    returns a FAIL immediately using the provided ``qdrant_error`` detail.
+    """
+    if qdrant_client is None:
+        detail = f"client unavailable: {qdrant_error}" if qdrant_error else "client unavailable"
+        return CheckResult(name="qdrant_points", status="FAIL", detail=detail)
+
     try:
         count = qdrant_client.count(collection_name=collection_name).count
     except Exception as exc:  # noqa: BLE001
@@ -161,7 +171,7 @@ def check_cost_ledger_today(db_path: Path, clock: Clock) -> CheckResult:
 
     Uses ``clock.now()`` for determinism in tests — no wall-clock dependency.
     """
-    today_utc = clock.now().strftime("%Y-%m-%d")
+    today_utc = clock.now().astimezone(timezone.utc).strftime("%Y-%m-%d")
     midnight_iso = f"{today_utc}T00:00:00+00:00"
 
     with closing(sqlite3.connect(str(db_path))) as conn:
@@ -186,16 +196,17 @@ def run_doctor(
     *,
     db_path: Path,
     litestream_dir: Path,
-    qdrant_client: QdrantCountable,
+    qdrant_client: "QdrantCountable | None",
     collection_name: str,
     clock: Clock,
+    qdrant_error: str | None = None,
 ) -> list[CheckResult]:
     """Run all five health checks in the canonical order and return results."""
     return [
         check_wal_size(db_path),
         check_last_checkpoint_age(db_path),
         check_last_replication(litestream_dir),
-        check_qdrant_points(qdrant_client, collection_name),
+        check_qdrant_points(qdrant_client, collection_name, qdrant_error),
         check_cost_ledger_today(db_path, clock),
     ]
 

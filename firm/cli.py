@@ -740,17 +740,24 @@ def doctor(db_path_str: str | None, litestream_dir: str, rag_config_path_str: st
     from firm.ops.doctor import format_results, run_doctor
 
     db = Path(db_path_str) if db_path_str else _db_path()
+    init_db(db)
     rag_cfg_path = Path(rag_config_path_str) if rag_config_path_str else _rag_config_path()
     rag_config = load_rag_config(rag_cfg_path)
     collection = rag_config.qdrant.collection
 
-    qdrant_client = _make_qdrant_client()
+    try:
+        qdrant_client: "Any | None" = _make_qdrant_client()
+        qdrant_error: str | None = None
+    except Exception as exc:
+        qdrant_client = None
+        qdrant_error = f"{type(exc).__name__}: {exc}"
     clock = _resolve_clock()
 
     results = run_doctor(
         db_path=db,
         litestream_dir=Path(litestream_dir),
         qdrant_client=qdrant_client,
+        qdrant_error=qdrant_error,
         collection_name=collection,
         clock=clock,
     )

@@ -9,6 +9,8 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 from firm.core.clock import ReplayClock
 from firm.db.migrations import init_db
 from firm.ops.doctor import (
@@ -139,66 +141,95 @@ def test_checkpoint_age_ok_fresh_wal(tmp_path: Path) -> None:
     assert result.status == "OK"
 
 
-def test_checkpoint_age_warn(tmp_path: Path) -> None:
-    """WAL file with mtime 7 minutes ago → WARN (5 <= age < 30)."""
-    db = tmp_path / "firm.db"
-    conn = sqlite3.connect(str(db))
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("CREATE TABLE t (x INTEGER)")
-    # Insert to ensure WAL pages exist so log != 0 after checkpoint.
-    conn.execute("INSERT INTO t VALUES (1)")
-    conn.commit()
-    conn.close()
+def test_checkpoint_age_warn(tmp_path: Path, monkeypatch: "pytest.MonkeyPatch") -> None:
+    """WAL with mtime 7 minutes ago + log_pages pinned > 0 → WARN."""
+    import os as _os
+    import firm.ops.doctor as _doc
 
-    wal = Path(str(db) + "-wal")
-    if not wal.exists():
-        wal.write_bytes(b"\x00" * 100)
-
-    # Set WAL mtime to 7 minutes ago.
-    stale = time.time() - 7 * 60
-    import os
-    os.utime(str(wal), (stale, stale))
-
-    # Patch check to treat all log pages as non-zero by writing synthetic WAL.
-    # We can verify WARN indirectly since our WAL has recent page writes but
-    # stale mtime → the mtime path fires.
-    # Force log_pages > 0: write a non-trivial WAL so PASSIVE doesn't fully checkpoint.
-    result = check_last_checkpoint_age(db)
-    # If fully checkpointed log==0 the check returns OK (age=0); that's acceptable.
-    # We assert the function returns a valid CheckResult regardless.
-    assert result.name == "last_checkpoint_age"
-    assert result.status in {"OK", "WARN", "FAIL"}
-
-
-def test_checkpoint_age_fail(tmp_path: Path) -> None:
-    """Synthetic WAL with mtime 35 minutes ago → FAIL (age >= 30 min)."""
     db = tmp_path / "firm.db"
     db.write_bytes(b"")
     wal = Path(str(db) + "-wal")
     wal.write_bytes(b"\x00" * 100)
 
-    stale = time.time() - 35 * 60
-    import os
-    os.utime(str(wal), (stale, stale))
+    fake_now = 1_000_000.0
+    mtime_7m_ago = fake_now - 7 * 60  # 420 s ago → WARN (300 ≤ age < 1800)
 
-    # Patch: we can't easily force log>0 through PASSIVE without real pages,
-    # so bypass by writing a DB that the PASSIVE PRAGMA will find no pages for.
-    # Use a real SQLite DB so the PRAGMA doesn't error.
-    conn = sqlite3.connect(str(db))
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.close()
+    monkeypatch.setattr(_doc, "time", type("_T", (), {"time": staticmethod(lambda: fake_now)})())
+    monkeypatch.setattr(_os.path, "getmtime", lambda _p: mtime_7m_ago)
 
-    # Re-plant stale WAL (connect may have re-created it).
-    if not wal.exists():
-        wal.write_bytes(b"\x00" * 100)
-    os.utime(str(wal), (stale, stale))
+    # Patch sqlite3.connect so PASSIVE checkpoint returns log_pages > 0.
+    import sqlite3 as _sqlite3
+
+    class _FakeRow:
+        def __getitem__(self, i: int) -> int:
+            return [0, 5, 3][i]  # busy=0, log=5, checkpointed=3
+
+    class _FakeCursor:
+        def execute(self, _sql: str) -> "_FakeCursor":
+            return self
+        def fetchone(self) -> _FakeRow:
+            return _FakeRow()
+
+    class _FakeConn:
+        def execute(self, sql: str) -> "_FakeCursor":
+            return _FakeCursor()
+        def close(self) -> None:
+            pass
+        def __enter__(self) -> "_FakeConn":
+            return self
+        def __exit__(self, *a: object) -> None:
+            pass
+
+    monkeypatch.setattr(_sqlite3, "connect", lambda _p: _FakeConn())
 
     result = check_last_checkpoint_age(db)
-    # The DB is checkpointed (log==0), so age=0 → OK is the technically correct
-    # outcome here.  We test that the function runs without error; the FAIL
-    # threshold is exercised in the golden test via direct mocking.
-    assert result.name == "last_checkpoint_age"
-    assert result.status in {"OK", "WARN", "FAIL"}
+    assert result.status == "WARN", f"expected WARN, got {result.status}: {result.detail}"
+    assert result.detail == "420s"
+
+
+def test_checkpoint_age_fail(tmp_path: Path, monkeypatch: "pytest.MonkeyPatch") -> None:
+    """WAL with mtime 35 minutes ago + log_pages pinned > 0 → FAIL."""
+    import os as _os
+    import firm.ops.doctor as _doc
+
+    db = tmp_path / "firm.db"
+    db.write_bytes(b"")
+    wal = Path(str(db) + "-wal")
+    wal.write_bytes(b"\x00" * 100)
+
+    fake_now = 1_000_000.0
+    mtime_35m_ago = fake_now - 35 * 60  # 2100 s ago → FAIL (≥ 1800 s)
+
+    monkeypatch.setattr(_doc, "time", type("_T", (), {"time": staticmethod(lambda: fake_now)})())
+    monkeypatch.setattr(_os.path, "getmtime", lambda _p: mtime_35m_ago)
+
+    import sqlite3 as _sqlite3
+
+    class _FakeRow:
+        def __getitem__(self, i: int) -> int:
+            return [0, 5, 3][i]
+
+    class _FakeCursor:
+        def execute(self, _sql: str) -> "_FakeCursor":
+            return self
+        def fetchone(self) -> _FakeRow:
+            return _FakeRow()
+
+    class _FakeConn:
+        def execute(self, sql: str) -> "_FakeCursor":
+            return _FakeCursor()
+        def close(self) -> None:
+            pass
+        def __enter__(self) -> "_FakeConn":
+            return self
+        def __exit__(self, *a: object) -> None:
+            pass
+
+    monkeypatch.setattr(_sqlite3, "connect", lambda _p: _FakeConn())
+
+    result = check_last_checkpoint_age(db)
+    assert result.status == "FAIL", f"expected FAIL, got {result.status}: {result.detail}"
+    assert result.detail == "2100s"
 
 
 # ---------------------------------------------------------------------------
