@@ -74,6 +74,37 @@ Unknown values fall back silently to `cached`.
 
 ---
 
+## `FIRM_VCR_MODE` semantics
+
+Set via environment variable alongside `FIRM_LLM_MODE`. Controls the cassette
+layer that sits between the SQLite cache and the live Anthropic SDK.
+
+| Mode | Behaviour |
+|------|-----------|
+| `live` | Cassette layer is a pass-through; calls the real Anthropic SDK. Default if unset. |
+| `record` | Pass-through to the real SDK + writes `.yaml` cassettes under `FIRM_CASSETTE_DIR` (default `tests/eval/cassettes/`). Use to seed cassette files before flipping to `replay`. |
+| `replay` | Reads cassettes only; raises `CassetteMissError` on miss. Used by tests and `make eval`. |
+
+**`FIRM_CASSETTE_DIR`** — path to the cassette directory (default:
+`tests/eval/cassettes/` relative to the repo root). Override when running
+record-mode tests against a scratch directory.
+
+**Interaction with `FIRM_LLM_MODE`:** the cassette layer only engages when
+`FIRM_LLM_MODE` is `live` or `record`.  In `cached` mode the transport is
+never reached, so `FIRM_VCR_MODE` has no effect.
+
+Examples:
+
+```bash
+# Re-record cassettes after a prompt change
+FIRM_LLM_MODE=record FIRM_VCR_MODE=record make eval
+
+# Replay cassettes in CI (no network calls)
+FIRM_LLM_MODE=live FIRM_VCR_MODE=replay make eval
+```
+
+---
+
 ## `llm_cache` table
 
 Schema (from `firm/db/schema.sql`):

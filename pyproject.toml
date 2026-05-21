@@ -50,7 +50,10 @@ firm = "firm.cli:main"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
-markers = ["requires_models: tests that need a downloaded model"]
+markers = [
+    "requires_models: tests that need a downloaded model",
+    "vcr_replay: replay-mode integration tests using recorded LLM cassettes",
+]
 
 [tool.ruff]
 line-length = 100

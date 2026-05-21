@@ -27,6 +27,7 @@ from firm.llm.anthropic_client import (
     LlmCacheMissError,
     LlmMode,
 )
+from firm.llm.cassettes import CassetteClient, CassetteMissError
 from firm.llm.cache import LlmCache, hash_prompt
 
 
@@ -296,4 +297,33 @@ def test_live_or_record_without_api_key_raises(tmp_path: Path) -> None:
             mode=LlmMode.LIVE,
             clock=clock,
             transport=None,
+        )
+
+
+def test_from_env_vcr_mode_wires_cassette_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """from_env() with FIRM_LLM_MODE=live + FIRM_VCR_MODE=replay wraps the
+    SDK transport in a CassetteClient; messages_create raises CassetteMissError
+    because tmp_path has no cassettes."""
+    cache = _make_cache(tmp_path)
+    clock = ReplayClock(datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc))
+
+    monkeypatch.setenv("FIRM_LLM_MODE", "live")
+    monkeypatch.setenv("FIRM_VCR_MODE", "replay")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
+    monkeypatch.setenv("FIRM_CASSETTE_DIR", str(tmp_path))
+
+    client = CachedAnthropicClient.from_env(cache=cache, clock=clock)
+
+    # The transport must be a CassetteClient (not raw SDK transport).
+    assert isinstance(client._transport, CassetteClient)
+
+    # Replay with no cassettes must raise CassetteMissError.
+    with pytest.raises(CassetteMissError):
+        client.messages_create(
+            model="claude-haiku-4-5",
+            system="test system",
+            messages=[{"role": "user", "content": "hello"}],
+            max_tokens=10,
         )
