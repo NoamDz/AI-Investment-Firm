@@ -202,11 +202,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
+      # dev tfvars: main-branch plan previews the dev env; prod plans are
+      # gated separately (T44 path-to-production). var.env has no default
+      # in variables.tf, so -var-file is required to satisfy it in CI.
       - name: terraform -chdir=infra/terraform plan
         run: |
           if [ -d infra/terraform ]; then
             terraform -chdir=infra/terraform init -backend=false
-            terraform -chdir=infra/terraform plan -no-color -out=tfplan.binary
+            terraform -chdir=infra/terraform plan -no-color -var-file=envs/dev.tfvars -out=tfplan.binary
             terraform -chdir=infra/terraform show -no-color tfplan.binary > tfplan.txt
           else
             echo "infra/terraform/ not yet created (lands in Plan 4 T31); skipping plan."
