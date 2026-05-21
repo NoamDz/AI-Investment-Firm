@@ -485,6 +485,11 @@ async def _vote_parallel(
         cost of the i-th voter's call (in the same order as ``votes``) so
         the caller can stamp the OTel parent span with a measurement-based
         sequential-estimate instead of a multiplicative guess.
+
+        Order guarantee: ``asyncio.gather`` preserves submission order, so
+        ``results[i]`` always corresponds to ``coros[i]`` — and therefore
+        ``votes[i]`` and ``per_voter_ms[i]`` align with the lens at index
+        ``i`` in the QUALITY / VALUATION / CATALYST list below.
     """
 
     def _one(lens: PmLens) -> tuple[PmVote, float]:
