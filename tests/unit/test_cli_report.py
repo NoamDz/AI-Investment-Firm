@@ -4,7 +4,8 @@ Covers:
 1. test_report_writes_bundle — happy path: daily_report.md + positions.xlsx written.
 2. test_report_is_idempotent — re-running overwrites; byte-for-byte md, cell-for-cell xlsx.
 3. test_report_bad_date_format — non-zero exit + helpful error for invalid date.
-4. test_sample_run_bundle_committed — CI invariant: sample_runs/2024-03-13/ files exist.
+4. test_sample_run_bundle_committed — CI invariant: all three regime sample bundles exist.
+5. test_sample_run_decisions_trace_linkage — schema + trace_id linkage for all three samples.
 """
 from __future__ import annotations
 
@@ -243,21 +244,81 @@ def test_report_bad_date_format(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 # ---------------------------------------------------------------------------
 
 
+_SAMPLE_RUN_DATES: tuple[str, ...] = ("2024-03-13", "2024-08-07", "2023-11-08")
+
+
 def test_sample_run_bundle_committed() -> None:
-    """All three sample bundle files must be committed under sample_runs/2024-03-13/."""
-    sample_dir = Path(__file__).parent.parent.parent / "sample_runs" / "2024-03-13"
+    """All sample bundle files must be committed for every regime midpoint date."""
+    sample_root = Path(__file__).parent.parent.parent / "sample_runs"
 
-    assert (sample_dir / "daily_report.md").exists(), (
-        f"Missing sample_runs/2024-03-13/daily_report.md (sample_dir={sample_dir})"
-    )
-    assert (sample_dir / "positions.xlsx").exists(), (
-        f"Missing sample_runs/2024-03-13/positions.xlsx (sample_dir={sample_dir})"
-    )
-    assert (sample_dir / "decisions.jsonl").exists(), (
-        f"Missing sample_runs/2024-03-13/decisions.jsonl (sample_dir={sample_dir})"
-    )
+    for date_str in _SAMPLE_RUN_DATES:
+        sample_dir = sample_root / date_str
+        assert (sample_dir / "daily_report.md").exists(), (
+            f"Missing sample_runs/{date_str}/daily_report.md (sample_dir={sample_dir})"
+        )
+        assert (sample_dir / "positions.xlsx").exists(), (
+            f"Missing sample_runs/{date_str}/positions.xlsx (sample_dir={sample_dir})"
+        )
+        assert (sample_dir / "decisions.jsonl").exists(), (
+            f"Missing sample_runs/{date_str}/decisions.jsonl (sample_dir={sample_dir})"
+        )
+        assert (sample_dir / "trace.jsonl").exists(), (
+            f"Missing sample_runs/{date_str}/trace.jsonl (sample_dir={sample_dir})"
+        )
 
-    # Verify xlsx is actually loadable (not a corrupt placeholder).
-    wb = openpyxl.load_workbook(sample_dir / "positions.xlsx")
-    assert "Positions" in wb.sheetnames, "positions.xlsx missing Positions sheet"
-    assert "P&L" in wb.sheetnames, "positions.xlsx missing P&L sheet"
+        wb = openpyxl.load_workbook(sample_dir / "positions.xlsx")
+        assert "Positions" in wb.sheetnames, (
+            f"sample_runs/{date_str}/positions.xlsx missing Positions sheet"
+        )
+        assert "P&L" in wb.sheetnames, (
+            f"sample_runs/{date_str}/positions.xlsx missing P&L sheet"
+        )
+
+
+def test_sample_run_decisions_trace_linkage() -> None:
+    """Every decision's trace_id must appear in the matching trace.jsonl."""
+    sample_root = Path(__file__).parent.parent.parent / "sample_runs"
+    required_decision_keys = {"ts", "research_decision", "trace_id"}
+    required_research_keys = {
+        "id",
+        "action",
+        "payload",
+        "rationale",
+        "confidence",
+        "failure_mode",
+    }
+
+    for date_str in _SAMPLE_RUN_DATES:
+        sample_dir = sample_root / date_str
+
+        decisions: list[dict[str, Any]] = [
+            json.loads(line)
+            for line in (sample_dir / "decisions.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert decisions, f"sample_runs/{date_str}/decisions.jsonl is empty"
+
+        for row in decisions:
+            missing = required_decision_keys - row.keys()
+            assert not missing, (
+                f"sample_runs/{date_str}/decisions.jsonl row missing keys {missing}"
+            )
+            research = row["research_decision"]
+            missing_research = required_research_keys - research.keys()
+            assert not missing_research, (
+                f"sample_runs/{date_str}/decisions.jsonl research_decision "
+                f"missing keys {missing_research}"
+            )
+
+        trace_ids: set[str] = set()
+        for line in (sample_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            span = json.loads(line)
+            trace_ids.add(span["trace_id"])
+
+        for row in decisions:
+            assert row["trace_id"] in trace_ids, (
+                f"sample_runs/{date_str}: decision {row['research_decision']['id']} "
+                f"trace_id={row['trace_id']} not found in trace.jsonl"
+            )
