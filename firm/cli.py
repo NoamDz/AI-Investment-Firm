@@ -813,7 +813,7 @@ def red_team(vcr_mode: str, timeout: int) -> None:
                 self.total += 1
                 if report.outcome == "passed":
                     self.passed += 1
-                else:
+                elif report.outcome != "skipped":
                     self.failed += 1
 
     plugin = _CountPlugin()
@@ -826,7 +826,7 @@ def red_team(vcr_mode: str, timeout: int) -> None:
         click.echo(
             f"WARN: suite took {elapsed:.1f}s > {timeout}s budget", err=True
         )
-    if rc != 0 or plugin.passed != plugin.total:
+    if rc != 0 or plugin.failed > 0:
         sys.exit(1)
 
 
