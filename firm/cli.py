@@ -349,7 +349,24 @@ def run(once: bool) -> None:
             stamp_decision(span, decision.id, decision.failure_mode)
             return {"risk_decision": decision}
 
-    hitl = make_hitl(db_path=db, clock=clock)
+    # Build Slack notifier if bot token is present; silent skip otherwise.
+    _slack_token = os.environ.get("FIRM_SLACK_BOT_TOKEN")
+    _notifier = None
+    if _slack_token:
+        try:
+            from slack_sdk import WebClient as _WebClient  # lazy import — only bites when env requests Slack
+            from firm.hitl.notify import SlackNotifier as _SlackNotifier
+            _notifier = _SlackNotifier(
+                web_client=_WebClient(token=_slack_token),
+                channel=policy.hitl.slack_channel,
+                approver_id=policy.hitl.slack_approver_id,
+                clock=clock,
+                internal_secret=nonce_secret,
+            )
+        except Exception as _exc:
+            click.echo(f"[firm run] Slack notifier unavailable: {_exc}", err=True)
+
+    hitl = make_hitl(db_path=db, clock=clock, notifier=_notifier)
     execution = make_execution(db_path=db, broker=broker, clock=clock)
     reporter = make_reporter(reports_root=_reports_root(), clock=clock, db_path=db)
 

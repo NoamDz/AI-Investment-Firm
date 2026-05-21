@@ -135,7 +135,7 @@ def build_app(
         # ------------------------------------------------------------------
         # Step 2: parse form body, extract payload JSON.
         # ------------------------------------------------------------------
-        from urllib.parse import parse_qs, unquote_plus  # local import to keep top-level clean
+        from urllib.parse import parse_qs  # local import to keep top-level clean
 
         parsed = parse_qs(raw_body_str)
         if "payload" not in parsed:

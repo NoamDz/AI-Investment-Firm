@@ -11,3 +11,5 @@ limits:
 hitl:
   trade_threshold_pct: 0.03
   escalate_new_ticker: true
+  slack_channel: "#trading-hitl"
+  slack_approver_id: "U_PLACEHOLDER"

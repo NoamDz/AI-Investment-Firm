@@ -25,6 +25,8 @@ class PolicyLimits(BaseModel):
 class HitlConfig(BaseModel):
     trade_threshold_pct: float = Field(ge=0, le=1.0)
     escalate_new_ticker: bool
+    slack_channel: str = Field(min_length=1)
+    slack_approver_id: str = Field(min_length=1)
 
 
 class PolicyConfig(BaseModel):
