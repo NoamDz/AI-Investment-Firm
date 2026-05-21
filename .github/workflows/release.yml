@@ -3,13 +3,14 @@
 #
 # Triggers:
 #   - push of a semver tag matching `v*.*.*` (e.g. v0.1.0, v1.2.3-rc1)
-#   - workflow_dispatch (manual fallback; accepts an optional `tag` input
-#     purely for documentation — the workflow always uses github.ref_name
-#     so a manual dispatch must still be invoked against the tag ref)
+#   - workflow_dispatch (manual fallback; the `tag` input lets an operator
+#     dispatch from any branch — e.g. `main` — and still build/release
+#     against a real tag. On tag-push runs the input is empty and the
+#     workflow falls back to github.ref_name.)
 #
 # Produces:
-#   - workflow artifact `firm-release-${{ github.ref_name }}` containing
-#     `firm-<VERSION>.zip` + `firm-<VERSION>.zip.sha256` (90-day retention)
+#   - workflow artifact `firm-release-<TAG_REF>` containing
+#     `firm-<TAG_REF>.zip` + `firm-<TAG_REF>.zip.sha256` (90-day retention)
 #   - a GitHub Release at the tag, with both files attached and a short
 #     auto-generated body listing the sha256 and the source commit
 #
@@ -38,7 +39,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Semver tag to release (e.g. v0.1.0). Informational only — workflow uses github.ref_name.'
+        description: 'Semver tag to release (e.g. v0.1.0). Required when dispatching manually; ignored on tag-push.'
         required: false
 
 # Releases are NOT cancellable: a half-finished release (zip uploaded but
@@ -53,6 +54,23 @@ concurrency:
 # at the job level so the GitHub Release API can publish the tag.
 permissions:
   contents: read
+
+# Pin the shell explicitly. GHA Linux defaults to `bash --noprofile --norc
+# -eo pipefail`; naming it here documents the contract and lets future
+# steps add `set -u` etc. without surprises.
+defaults:
+  run:
+    shell: bash
+
+# Single source of truth for "which tag are we releasing".
+#   - tag-push run:        inputs.tag is unset/empty -> falls back to github.ref_name (e.g. v0.1.0)
+#   - manual dispatch run: operator supplies `tag` -> we use that (works even
+#     when dispatched against `main` or another non-tag ref)
+# Every downstream step references env.TAG_REF instead of github.ref_name
+# so a manual dispatch from `main` with tag=v0.1.0 still produces
+# firm-v0.1.0.zip (not firm-main.zip).
+env:
+  TAG_REF: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   # -------------------------------------------------------------------------
@@ -108,7 +126,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }}
+          # Resolve to a tag ref regardless of how we were triggered.
+          # tag-push: env.TAG_REF == github.ref_name (e.g. v0.1.0)
+          # manual:   env.TAG_REF == inputs.tag      (e.g. v0.1.0)
+          # Prefixing `refs/tags/` makes the checkout pin to the tag
+          # rather than a same-named branch if one ever exists.
+          ref: refs/tags/${{ env.TAG_REF }}
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
@@ -118,8 +141,7 @@ jobs:
       - name: Determine version from tag
         id: version
         run: |
-          # github.ref_name strips `refs/tags/` automatically (e.g. v0.1.0).
-          VERSION='${{ github.ref_name }}'
+          VERSION='${{ env.TAG_REF }}'
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Releasing VERSION=${VERSION}"
       - name: Build firm-${{ steps.version.outputs.version }}.zip
@@ -132,7 +154,7 @@ jobs:
           # who extract it; matches the conventional `<name>-<version>/`
           # layout produced by tools like `python -m build --sdist`.
           git archive --format=zip --prefix="firm-${VERSION}/" \
-            --output="${ZIP}" '${{ github.ref }}'
+            --output="${ZIP}" "refs/tags/${VERSION}"
           # Append committed `reports/` artifacts if the dir exists.
           # Skipped gracefully today (dir does not yet exist).
           if [ -d reports ]; then
@@ -158,7 +180,7 @@ jobs:
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: firm-release-${{ github.ref_name }}
+          name: firm-release-${{ env.TAG_REF }}
           path: |
             firm-${{ steps.version.outputs.version }}.zip
             firm-${{ steps.version.outputs.version }}.zip.sha256
@@ -168,7 +190,7 @@ jobs:
   # Publish the GitHub Release. Downloads the artifact built in the
   # previous job, then hands both files to softprops/action-gh-release.
   #
-  # prerelease: contains(github.ref_name, '-') auto-flags pre-release
+  # prerelease: contains(env.TAG_REF, '-') auto-flags pre-release
   # tags like v1.0.0-rc1 / v0.2.0-beta.3. Plain semver (v1.0.0) has no
   # dash and stays prerelease=false. The expression is unquoted so it
   # evaluates to a boolean — quoting it would make every run prerelease.
@@ -186,11 +208,11 @@ jobs:
       - name: Download release artifact
         uses: actions/download-artifact@v4
         with:
-          name: firm-release-${{ github.ref_name }}
+          name: firm-release-${{ env.TAG_REF }}
       - name: Assemble release body
         id: body
         run: |
-          VERSION='${{ github.ref_name }}'
+          VERSION='${{ env.TAG_REF }}'
           ZIP="firm-${VERSION}.zip"
           SHA="$(awk '{print $1}' "${ZIP}.sha256")"
           # Multiline output via heredoc delimiter — the only safe way to
@@ -208,11 +230,11 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
+          tag_name: ${{ env.TAG_REF }}
+          name: ${{ env.TAG_REF }}
           body: ${{ steps.body.outputs.body }}
           files: |
-            firm-${{ github.ref_name }}.zip
-            firm-${{ github.ref_name }}.zip.sha256
+            firm-${{ env.TAG_REF }}.zip
+            firm-${{ env.TAG_REF }}.zip.sha256
           draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(env.TAG_REF, '-') }}
