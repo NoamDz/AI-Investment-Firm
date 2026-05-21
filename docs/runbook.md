@@ -224,6 +224,128 @@ Run this in CI and on every operator on-call rotation.
 
 ---
 
+## Slack approval flow
+
+### Required configuration
+
+| Source | Key | Purpose |
+|--------|-----|---------|
+| `.env` | `FIRM_SLACK_BOT_TOKEN` | OAuth bot token for outbound `chat.postMessage` notifications |
+| `config/policy.yaml` | `hitl.slack_channel` | Channel ID where approval messages are posted |
+| `config/policy.yaml` | `hitl.slack_approver_id` | Slack user ID who must click Approve/Reject |
+
+The `POST /slack/interactive` endpoint is served by the FastAPI app in `firm/hitl/slack.py`.
+
+### Signature verification
+
+Every inbound request is verified at two levels:
+
+1. **Slack outer HMAC** (`X-Slack-Signature` header): `v0=HMAC-SHA256(slack_signing_secret, "v0:{X-Slack-Request-Timestamp}:{raw_body}")`. Requests older than 300 seconds are rejected (replay-window protection).
+
+2. **Internal button HMAC** (`sig` field inside the button `value` JSON): proves our notifier constructed the button payload. Uses `firm.hitl.signing.sign/verify` over `"{decision_id}|{approver_id}|{ts}"`.
+
+### Audit log entries
+
+On **successful approval**: `hitl_queue.status` flips to `approved`; no explicit audit_log entry — the status column is the record.
+
+On **signature failure**: `audit_log.event = 'hitl.signature_rejected'` with `detail.failure_mode = 'signed_approval_invalid'`.
+
+Query recent rejections:
+
+```bash
+sqlite3 data/firm.db "SELECT ts, detail FROM audit_log WHERE event='hitl.signature_rejected' ORDER BY ts DESC LIMIT 10"
+```
+
+### Dev fallback
+
+When Slack is unavailable or during development, approve via CLI:
+
+```bash
+python -m firm.cli ack <DECISION_ID> --dev-ack
+```
+
+The `--dev-ack` flag is required outside a pytest session; without it the CLI exits 1 with a reminder to use the Slack workflow. `reject` accepts the same flag.
+
+---
+
+## Trace inspection (`jq` recipes)
+
+Traces are written to `traces/<YYYY-MM-DD>/run-<run_id>.jsonl` (one JSON object per line, one line per completed span). The path root is controlled by `FIRM_TRACES_ROOT` (default: `traces`).
+
+Span schema fields: `trace_id`, `span_id`, `parent_span_id`, `agent`, `operation`, `decision_id`, `duration_ms`, `model`, `input_tokens`, `output_tokens`, `cached_tokens`, `cost_usd`, `citations`, `failure_mode`, `status`.
+
+### All spans for a specific decision
+
+```bash
+jq 'select(.decision_id == "dec-abc123")' traces/2024-03-13/run-<run_id>.jsonl
+```
+
+### All `agent.research` spans ordered by start time
+
+`jq` operates on streaming JSONL; sort requires slurp:
+
+```bash
+jq -s '[.[] | select(.operation == "agent.research")] | sort_by(.span_id)' \
+  traces/2024-03-13/run-<run_id>.jsonl
+```
+
+### Total cost across all LLM spans in a run
+
+```bash
+jq -s '[.[] | select(.cost_usd > 0) | .cost_usd] | add // 0' \
+  traces/2024-03-13/run-<run_id>.jsonl
+```
+
+---
+
+## Cost ledger inspection
+
+The `cost_ledger` table records one row per LLM call (cached or live).
+
+Schema:
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER | Auto-increment monotonic key |
+| `decision_id` | TEXT | Enclosing Decision (may be `""` for pre-decision calls) |
+| `agent` | TEXT | e.g. `research`, `pm`, `risk` |
+| `model` | TEXT | Anthropic model id |
+| `input_tokens` | INTEGER | NULL for cached rows |
+| `output_tokens` | INTEGER | NULL for cached rows |
+| `cached_tokens` | INTEGER | NULL for live rows |
+| `cost_usd` | REAL | 0.0 for cached rows |
+| `created_at` | TEXT | ISO-8601 UTC |
+
+### Total spend today
+
+```bash
+sqlite3 data/firm.db "SELECT ROUND(SUM(cost_usd), 4) FROM cost_ledger WHERE date(created_at) = date('now')"
+```
+
+### Per-agent, per-model breakdown
+
+```bash
+sqlite3 data/firm.db "SELECT agent, model, ROUND(SUM(cost_usd),4) as total_usd FROM cost_ledger GROUP BY agent, model ORDER BY total_usd DESC"
+```
+
+### Cache-hit ratio
+
+```bash
+sqlite3 data/firm.db "SELECT
+  COUNT(CASE WHEN cached_tokens IS NOT NULL THEN 1 END) AS cached_calls,
+  COUNT(CASE WHEN input_tokens IS NOT NULL THEN 1 END) AS live_calls,
+  COUNT(*) AS total
+FROM cost_ledger WHERE date(created_at) = date('now')"
+```
+
+### Most expensive individual decisions
+
+```bash
+sqlite3 data/firm.db "SELECT decision_id, ROUND(SUM(cost_usd),4) as total FROM cost_ledger GROUP BY decision_id ORDER BY total DESC LIMIT 10"
+```
+
+---
+
 ## Known Limitations
 
 ### Forward-reference leakage in PIT-filtered RAG (spec §6.4)
