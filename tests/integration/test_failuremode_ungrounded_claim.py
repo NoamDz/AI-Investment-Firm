@@ -15,7 +15,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import NoReturn
 
 from firm.agents.research import make_research
 from firm.broker.fake_broker import FakeBroker
