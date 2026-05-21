@@ -27,14 +27,16 @@ cd "${REPO_ROOT}"
 
 EVAL_CMD="${FIRM_EVAL_CMD:-make eval}"
 REPORTS_DIR="reports/eval"
-DIFF_FILE="/tmp/firm-determinism-diff.txt"
 
 # ---------------------------------------------------------------------------
-# Temp dirs — cleaned up on exit regardless of outcome.
+# Temp paths — cleaned up on EXIT and on SIGTERM/SIGINT (CI runners send
+# SIGTERM when cancelling jobs).  DIFF_FILE is per-process to avoid races
+# under concurrent CI matrix builds.
 # ---------------------------------------------------------------------------
 T1="$(mktemp -d)"
 T2="$(mktemp -d)"
-trap 'rm -rf "$T1" "$T2"' EXIT
+DIFF_FILE="$(mktemp)"
+trap 'rm -rf "$T1" "$T2" "$DIFF_FILE"' EXIT SIGTERM SIGINT
 
 # ---------------------------------------------------------------------------
 # First run
@@ -50,8 +52,10 @@ fi
 cp -a "${REPORTS_DIR}/." "${T1}/"
 
 # ---------------------------------------------------------------------------
-# Second run
+# Second run — clear REPORTS_DIR first so stale files from run 1 cannot
+# silently propagate into the run-2 snapshot and mask a real regression.
 # ---------------------------------------------------------------------------
+rm -rf "${REPORTS_DIR}"
 echo "==> Run 2: ${EVAL_CMD}"
 eval "${EVAL_CMD}"
 
