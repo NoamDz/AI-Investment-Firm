@@ -23,6 +23,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 import pytest
@@ -55,16 +56,22 @@ from tests.red_team.conftest import BrokerCall, CallLoggingBroker
 
 
 class _MalformedVoterClient:
-    """AnthropicMessagesClient stub that returns one valid JSON then garbage.
+    """AnthropicMessagesClient stub that injects one malformed JSON response.
 
     Mirrors the pattern from
-    ``tests/unit/test_pm_agent.py::_RecordingClient`` — the first call
-    returns a valid vote JSON, the second returns ``"not json at all"``.
-    The third lens call never fires because ``asyncio.gather`` propagates
-    the first exception from the second call.
+    ``tests/unit/test_pm_agent.py::_RecordingClient``.
 
-    ``malformed_emitted`` tracks whether the bad response was actually
-    returned, so the test can assert the schema-error branch was exercised.
+    One of the three voters (any lens) will pop the malformed
+    ``"not json at all"`` response and raise ``PmVoteSchemaError``;
+    ``asyncio.gather`` then surfaces the exception.  Order is not
+    deterministic because ``asyncio.to_thread`` runs on a thread pool —
+    the ``malformed_emitted`` flag confirms only that the malformed entry
+    WAS consumed, not which lens consumed it.
+
+    A ``threading.Lock`` serialises ``pop(0)`` calls to make the intent
+    explicit and silence any "looks racy" review noise (``list.pop`` is
+    GIL-atomic for a single operation, but the explicit lock signals that
+    the serialisation is deliberate).
     """
 
     def __init__(self) -> None:
@@ -87,12 +94,14 @@ class _MalformedVoterClient:
                 }
             ),
         ]
+        self._lock = Lock()
         self.calls: list[dict[str, Any]] = []
         self.malformed_emitted: bool = False
 
     def messages_create(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
-        text = self._responses.pop(0) if self._responses else self._responses[-1]
+        with self._lock:
+            text = self._responses.pop(0) if self._responses else self._responses[-1]
         if text == "not json at all":
             self.malformed_emitted = True
         return {"content": [{"type": "text", "text": text}]}
@@ -170,7 +179,7 @@ def test_graph_propagates_refuse_schema_validation_failed_and_writes_no_broker_c
 
     # --- PM node setup -------------------------------------------------------
     malformed_client = _MalformedVoterClient()
-    voter = PmVoter(client=malformed_client, model="claude-sonnet-4-6")
+    voter = PmVoter(client=malformed_client, model="claude-sonnet-4-6")  # type: ignore[arg-type]  # structurally compatible stub
     pm_node = make_pm(voter=voter)
 
     # Research-stage BUY Decision supplied to PM
