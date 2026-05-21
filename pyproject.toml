@@ -31,6 +31,8 @@ dependencies = [
     "slack-sdk>=3.27",
     "python-dateutil>=2.9",  # relativedelta for rolling 12-month news window
     "requests>=2.31",  # production HTTP client for news adapter
+    "yfinance>=0.2.40",
+    "pyarrow>=15.0",   # explicit (already transitively required by fundamentals.py)
 ]
 
 [project.optional-dependencies]
