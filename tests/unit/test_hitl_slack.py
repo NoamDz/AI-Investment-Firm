@@ -367,3 +367,78 @@ def test_unknown_action_returns_400(tmp_path: Path) -> None:
 
     assert resp.status_code == 400
     assert "unknown action" in resp.json().get("error", "")
+
+
+# ---------------------------------------------------------------------------
+# Test 9 — T13a dual-key rotation: button signed under previous key accepted
+# while inside grace window, rejected once expired.
+# ---------------------------------------------------------------------------
+
+
+_PREV_INTERNAL_SECRET = b"internal-secret-previous"
+
+
+def _build_client_with_rotation(
+    db_path: Path,
+    *,
+    rotated_at: int,
+) -> TestClient:
+    app = build_app(
+        db_path=db_path,
+        clock=_CLOCK,
+        slack_signing_secret=_SLACK_SECRET,
+        internal_secret=_INTERNAL_SECRET,
+        previous_internal_secret=_PREV_INTERNAL_SECRET,
+        internal_rotated_at=rotated_at,
+    )
+    return TestClient(app, raise_server_exceptions=True)
+
+
+def test_rotation_accepts_previous_key_inside_grace_window(tmp_path: Path) -> None:
+    db = tmp_path / "t11.db"
+    init_db(db)
+    _seed_decision(db)
+
+    prev_sig = sign(
+        decision_id=_DECISION_ID,
+        approver_id=_APPROVER_ID,
+        ts=_TS_INT,
+        secret=_PREV_INTERNAL_SECRET,
+    )
+    slack_payload = _make_slack_payload(action="approve", sig=prev_sig)
+    raw_body = _make_form_body(slack_payload)
+    headers, body = _make_slack_request(
+        raw_body=raw_body, ts=_TS, slack_secret=_SLACK_SECRET
+    )
+
+    # rotated_at = 1 hour ago (well inside 24h default grace window).
+    client = _build_client_with_rotation(db, rotated_at=_TS_INT - 3600)
+    resp = client.post("/slack/interactive", content=body, headers=headers)
+
+    assert resp.status_code == 200
+    assert "approved" in resp.json().get("text", "")
+
+
+def test_rotation_rejects_previous_key_after_grace_window(tmp_path: Path) -> None:
+    db = tmp_path / "t11.db"
+    init_db(db)
+    _seed_decision(db)
+
+    prev_sig = sign(
+        decision_id=_DECISION_ID,
+        approver_id=_APPROVER_ID,
+        ts=_TS_INT,
+        secret=_PREV_INTERNAL_SECRET,
+    )
+    slack_payload = _make_slack_payload(action="approve", sig=prev_sig)
+    raw_body = _make_form_body(slack_payload)
+    headers, body = _make_slack_request(
+        raw_body=raw_body, ts=_TS, slack_secret=_SLACK_SECRET
+    )
+
+    # rotated_at = 25 hours ago (past default 24h grace).
+    client = _build_client_with_rotation(db, rotated_at=_TS_INT - 25 * 3600)
+    resp = client.post("/slack/interactive", content=body, headers=headers)
+
+    assert resp.status_code == 401
+    assert "invalid internal signature" in resp.json().get("error", "")

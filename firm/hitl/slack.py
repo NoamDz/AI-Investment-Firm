@@ -43,7 +43,7 @@ from firm.agents.hitl import mark_approved, mark_rejected
 from firm.audit.log import AuditLog
 from firm.core.clock import Clock
 from firm.core.models import FailureMode
-from firm.hitl.signing import verify as verify_internal
+from firm.hitl.signing import verify_with_rotation as verify_internal_with_rotation
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,8 @@ def build_app(
     clock: Clock,
     slack_signing_secret: bytes,
     internal_secret: bytes,
+    previous_internal_secret: bytes | None = None,
+    internal_rotated_at: int | None = None,
 ) -> FastAPI:
     """Construct and return the FastAPI application.
 
@@ -82,6 +84,14 @@ def build_app(
         ``X-Slack-Signature``.
     internal_secret:
         Our internal HMAC key.  Used to verify the embedded button ``sig``.
+    previous_internal_secret:
+        Optional prior internal HMAC key (T13a dual-key rotation).  When set
+        together with ``internal_rotated_at`` and the rotation grace window is
+        still open, a button signed under the previous key is also accepted.
+        ``None`` disables fallback (single-key mode).
+    internal_rotated_at:
+        Optional Unix timestamp (integer seconds) when ``internal_secret`` was
+        rotated in.  Required for ``previous_internal_secret`` to take effect.
     """
     app = FastAPI(title="HITL Slack Interactive", docs_url=None, redoc_url=None)
 
@@ -186,16 +196,19 @@ def build_app(
             )
 
         # ------------------------------------------------------------------
-        # Step 5: verify internal HMAC.
+        # Step 5: verify internal HMAC (T13a: accept previous key inside grace
+        # window when rotation params are provided).
         # ------------------------------------------------------------------
-        ok = verify_internal(
+        ok = verify_internal_with_rotation(
             payload={
                 "decision_id": button.get("decision_id"),
                 "approver_id": button.get("approver_id"),
                 "ts": button.get("ts"),
             },
             signature=button.get("sig", ""),
-            secret=internal_secret,
+            current_secret=internal_secret,
+            previous_secret=previous_internal_secret,
+            rotated_at=internal_rotated_at,
             now=now_ts,
         )
         if not ok:

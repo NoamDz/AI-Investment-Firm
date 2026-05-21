@@ -37,7 +37,7 @@
 - `litestream` — sibling container (binary, no Python dep) added to `docker-compose.yml`
 - Optional `polygon-api-client>=1.14` OR `newsapi-python>=0.2.7` — news adapter (gated by env vars)
 
-**Out of scope (deferred to Plan 4):** the FinanceBench-Q&A eval harness, red-team corpus, GitHub Actions CI, Terraform/AgentCore deployment, and the final 13/13 FailureMode CI invariant. None of those depend on this plan's deliverables, and bundling them in here would push the implementation surface beyond what one reviewer can sanity-check in a sitting.
+**Out of scope (deferred to Plan 4):** the FinanceBench-Q&A eval harness, red-team corpus, GitHub Actions CI, Terraform/AgentCore deployment, and the final 14/14 FailureMode CI invariant (15 enum values minus the `UNKNOWN` catch-all, all with end-to-end triggering fixtures). None of those depend on this plan's deliverables, and bundling them in here would push the implementation surface beyond what one reviewer can sanity-check in a sitting.
 
 ---
 
@@ -214,7 +214,7 @@ These are the loose ends the Plan 2 audit surfaced (the four 🔴/🟡 fixes alr
 | Non-empty diff renders red | `test_daily_report.test_drift_renders_red` | `tests/unit/` |
 | `published_at` NOT NULL across all corpus sources | `test_transcripts_source` + `test_news_source` | `tests/unit/` |
 | Litestream catches up after firm restart | `make litestream-drill` | `Makefile` |
-| FailureMode coverage ≥ 12/13 | extends Plan 2's `test_failure_mode_coverage` | `tests/unit/` |
+| FailureMode coverage — 7 fixtures + 7 documented `ALLOWED_GAPS` (full 15-value enumeration) | extends Plan 2's `test_failure_mode_coverage` | `tests/integration/test_failure_mode_coverage.py` |
 
 ---
 
@@ -233,7 +233,7 @@ Each risk below has a planned mitigation; the right column names the task that d
 - Red-team corpus 50 cases across 10 injection classes (spec §8.5).
 - GitHub Actions CI workflows incl. golden-file + Litestream drill (spec §11.3).
 - Terraform/AgentCore deployment artefacts (spec §11.1, §11.2).
-- Final 13/13 FailureMode coverage including UNCITED_CLAIM end-to-end.
+- Final 14/14 FailureMode end-to-end fixtures (15 enum values minus `UNKNOWN` catch-all) including UNCITED_CLAIM — promotes the 7 modes currently in `ALLOWED_GAPS` to first-class triggering fixtures.
 
 **Carried forward documented limitations:** PIT forward-reference leakage (spec §6.4, runbook §"Known Limitations" added in Plan 2).
 

@@ -140,10 +140,17 @@ class FailureMode(StrEnum):
     TOOL_PERMISSION_DENIED = "tool_permission_denied"
     UNAPPROVED_HIGH_RISK = "unapproved_high_risk"
     BROKER_UNAVAILABLE = "broker_unavailable"
+    RECONCILIATION_DRIFT = "reconciliation_drift"      # added in Plan 3 (T17 EOD reconcile)
+    SIGNED_APPROVAL_INVALID = "signed_approval_invalid" # added in Plan 3 (T11 Slack ingress)
     UNKNOWN = "unknown"
 ```
 
-Every value must be triggered by at least one CI fixture (enforced).
+Every value must be triggered by at least one CI fixture **or** be present in the
+`ALLOWED_GAPS` registry with a documented reason (enforced by
+`tests/integration/test_failure_mode_coverage.py`).  As of Plan 3, the registry
+covers 7 end-to-end triggering fixtures + 7 documented gaps + `UNKNOWN`
+sentinel = full enumeration.  Plan 4 promotes the deferred modes (notably
+`UNCITED_CLAIM`) from `ALLOWED_GAPS` to first-class fixtures.
 
 ### 3.6 Availability model
 
@@ -220,7 +227,7 @@ hitl:
 
 **Cross-references.** §5.5 (crash recovery test), §5.7 (boot reconciliation halts on broker drift), §10.2 (LLM fallback ladder), §3.7 (stale-data thresholds).
 
-**CI invariant.** `tests/integration/test_partial_failure.py` injects each failure above and asserts: (a) the correct `FailureMode` is emitted, (b) no order reaches the broker, (c) graph state is recoverable from checkpoint. Wired to the existing `FailureMode coverage` invariant (§9.5), now 13/13.
+**CI invariant.** `tests/integration/test_partial_failure.py` injects each failure above and asserts: (a) the correct `FailureMode` is emitted, (b) no order reaches the broker, (c) graph state is recoverable from checkpoint. Wired to the `FailureMode coverage` invariant (§9.5).  As of Plan 3, the invariant is satisfied by a hybrid registry: 7 enum values have end-to-end triggering fixtures, the remaining 7 are listed in `ALLOWED_GAPS` with documented deferral reasons, plus the `UNKNOWN` sentinel.  Plan 4 promotes the deferrals to full fixtures, ending at 14/14 first-class coverage (15 enum values minus the catch-all `UNKNOWN`).
 
 ---
 
@@ -619,7 +626,7 @@ PROCESS METRICS (aggregated)
   Red-team pass:                 50/50
   Privileged-action attempts:    0
   HITL correctness:              12/12
-  FailureMode coverage:          13/13
+  FailureMode coverage:          7/14 fixtures + 7 documented gaps (Plan 3); 14/14 fixtures (Plan 4)
 
 NOT MEASURED
   [list]
