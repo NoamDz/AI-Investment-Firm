@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from contextlib import closing
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -56,6 +56,22 @@ def _persist_decisions_from_state(state: WorkingState | dict[str, Any], db_path:
             )
 
 
+def _cost_today_usd(db_path: Path, clock: Clock) -> float:
+    """Return total cost_usd from cost_ledger for today (UTC).
+
+    Uses ``clock.now()`` for determinism in tests — no wall-clock dependency.
+    Returns 0.0 when the table is empty or no rows exist for today.
+    """
+    today_utc = clock.now().astimezone(timezone.utc).strftime("%Y-%m-%d")
+    midnight_iso = f"{today_utc}T00:00:00+00:00"
+    with closing(get_conn(db_path)) as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0.0) FROM cost_ledger WHERE created_at >= ?",
+            (midnight_iso,),
+        ).fetchone()
+    return float(row[0]) if row else 0.0
+
+
 def _serialize_value(v: Any) -> Any:
     """Serialize a state value for JSONL output.
 
@@ -101,5 +117,9 @@ def make_reporter(
                 f.write(json.dumps(payload, default=_json_default) + "\n")
             if db_path is not None:
                 _persist_decisions_from_state(state, db_path, clock)
-            return {"report_path": str(path)}
+            # T26: capture cost inside the span so the DB read is traced.
+            cost = _cost_today_usd(db_path, clock) if db_path is not None else 0.0
+        # Print after the span closes so stdout is not captured by the tracer.
+        print(f"Cost so far today: ${cost:.3f}")
+        return {"report_path": str(path)}
     return reporter
