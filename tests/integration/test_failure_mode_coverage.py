@@ -12,7 +12,7 @@ end-to-end fixture ships in Plan 4 with the red-team corpus.
 
 The following Plan 2-era modes have no triggering site in the source yet
 (enum-only) and are documented as allowed gaps pending future plan tasks:
-  HITL_TIMEOUT, UNGROUNDED_CLAIM, TOOL_PERMISSION_DENIED,
+  HITL_TIMEOUT, TOOL_PERMISSION_DENIED,
   UNAPPROVED_HIGH_RISK, BROKER_UNAVAILABLE.
 Each is registered in ALLOWED_GAPS below with a note; adding a triggering
 site will require moving it into FAILURE_MODE_FIXTURES.
@@ -71,6 +71,11 @@ FAILURE_MODE_FIXTURES: dict[FailureMode, str] = {
         "tests/integration/test_failuremode_prompt_injection.py"
         "::test_pm_emits_refuse_with_prompt_injection_detected_on_tainted_claim"
     ),
+    # UNGROUNDED_CLAIM: extractor fabricates a chunk_id absent from retrieval (Plan 4 T22).
+    FailureMode.UNGROUNDED_CLAIM: (
+        "tests/integration/test_failuremode_ungrounded_claim.py"
+        "::test_heartbeat_emits_refuse_with_ungrounded_claim_on_fabricated_chunk_id"
+    ),
     # UNKNOWN: catch-all; no specific triggering fixture required.
     FailureMode.UNKNOWN: "<allowed gap — UNKNOWN is a catch-all, no triggering fixture required>",
 }
@@ -86,9 +91,6 @@ ALLOWED_GAPS: dict[FailureMode, str] = {
     FailureMode.UNCITED_CLAIM: "deferred to Plan 4 — tied to red-team corpus",
     # Plan 2-era modes without triggering sites yet (enum-only).
     FailureMode.HITL_TIMEOUT: (
-        "enum-only — no triggering site in codebase yet; add fixture in future plan"
-    ),
-    FailureMode.UNGROUNDED_CLAIM: (
         "enum-only — no triggering site in codebase yet; add fixture in future plan"
     ),
     FailureMode.TOOL_PERMISSION_DENIED: (

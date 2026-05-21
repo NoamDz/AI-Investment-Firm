@@ -108,6 +108,14 @@ _EMPTY_RETRIEVAL_SUFFICIENCY: dict[str, Any] = {
     "overall_reasoning": "retrieval empty; judge skipped",
 }
 
+# Placeholder used when the grounding validator catches a claim citing an
+# unknown chunk_id — the judge is skipped because the claim set is already
+# known to be unfaithful to retrieval.
+_UNGROUNDED_CLAIM_SUFFICIENCY: dict[str, Any] = {
+    "claim_assessments": [],
+    "overall_reasoning": "grounding validator detected unknown chunk_id; judge skipped",
+}
+
 
 def _doc_id_of(chunk_id: str, chunks: list[Chunk]) -> str:
     """Look up the ``doc_id`` of the chunk with ``chunk_id`` in ``chunks``.
@@ -122,6 +130,21 @@ def _doc_id_of(chunk_id: str, chunks: list[Chunk]) -> str:
             "refusing to fabricate source_id for Citation"
         )
     return lookup[chunk_id]
+
+
+def _find_ungrounded_chunk_id(claims: list[Claim], chunks: list[Chunk]) -> str | None:
+    """Return the first source_chunk_id referenced by a claim that is not present
+    in *chunks*, or ``None`` if every claim with a non-None source_chunk_id maps
+    to a retrieved chunk. Claims with ``source_chunk_id is None`` (tool-derived)
+    are skipped — they are validated via ``tool_call_id`` elsewhere.
+    """
+    chunk_ids = {c.id for c in chunks}
+    for claim in claims:
+        if claim.source_chunk_id is None:
+            continue
+        if claim.source_chunk_id not in chunk_ids:
+            return claim.source_chunk_id
+    return None
 
 
 def _format_question(ticker: str) -> str:
@@ -400,6 +423,41 @@ def _make_grounded_research(
             # guarantees the attribute exists; copy defensively so downstream
             # mutation cannot leak back into the extractor's state.
             tool_call_ids: list[str] = list(extractor.last_tool_call_ids)
+
+            # Step 3.5: grounding validator (Plan 4 T22). Extractor must only cite
+            # chunks that were actually retrieved. A fabricated chunk_id => REFUSE /
+            # UNGROUNDED_CLAIM. This is the explicit translation of the Plan 2
+            # invariant historically enforced by _doc_id_of raising ValueError.
+            bad_chunk_id = _find_ungrounded_chunk_id(claims, chunks)
+            if bad_chunk_id is not None:
+                ungrounded_decision = Decision(
+                    id=decision_id,
+                    decision_id_chain=[],
+                    action=ActionEnum.REFUSE,
+                    payload=RefusePayload(reason="grounding:ungrounded_claim"),
+                    rationale=(
+                        f"extractor cited chunk_id {bad_chunk_id!r} which was not "
+                        f"present in the retrieved chunks; refusing to ground a "
+                        f"fabricated citation"
+                    ),
+                    confidence=0.0,
+                    citations=[],
+                    falsification_condition=(
+                        f"extractor cites only retrieved chunk_ids for {ticker} at a later heartbeat"
+                    ),
+                    escalation_reason=None,
+                    failure_mode=FailureMode.UNGROUNDED_CLAIM,
+                    metadata={"agent": "research", "ticker": ticker},
+                    nonce=nonce,
+                )
+                stamp_decision(span, ungrounded_decision.id, ungrounded_decision.failure_mode)
+                return {
+                    "research_decision": ungrounded_decision,
+                    "retrieved_chunks": chunks_dump,
+                    "claims": claims_dump,
+                    "sufficiency_result": copy.deepcopy(_UNGROUNDED_CLAIM_SUFFICIENCY),
+                    "tool_call_ids": tool_call_ids,
+                }
 
             # Step 4: oldest-filing-age metadata (shared across branches).
             metadata: dict[str, Any] = {"agent": "research", "ticker": ticker}
