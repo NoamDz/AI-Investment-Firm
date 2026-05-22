@@ -111,6 +111,13 @@ class PmVote(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     rationale: str = Field(min_length=1)
     cited_claim_ids: list[str]
+    # Bundle E bonus: ids the LLM cited that were NOT in the valid set
+    # (``c1``, ``c2``, ...) and therefore filtered out by ``PmVoter.vote``.
+    # ``make_pm`` propagates the failure to a Decision-level
+    # ``FailureMode.UNCITED_CLAIM`` REFUSE when this list is non-empty on
+    # any of the three voters.  Default empty so legacy test fixtures
+    # constructing PmVote directly do not break.
+    forged_cited_claim_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _vote_is_buy_hold_or_sell(self) -> "PmVote":
@@ -275,13 +282,20 @@ class PmVoter:
             ) from exc
 
         # Server-side filter: keep only ids that were actually provided.
+        # Capture the dropped ids so ``make_pm`` can stamp UNCITED_CLAIM on the
+        # Decision when the LLM forged citation ids the caller did not supply.
         filtered_ids = [cid for cid in vote_obj.cited_claim_ids if cid in valid_id_set]
+        forged_ids = [cid for cid in vote_obj.cited_claim_ids if cid not in valid_id_set]
         # Re-instantiate via model_validate so all validators (e.g. the
         # BUY/HOLD/SELL invariant) re-run; model_copy(update=...) would
         # silently bypass them.
         try:
             vote_obj = PmVote.model_validate(
-                {**vote_obj.model_dump(), "cited_claim_ids": filtered_ids}
+                {
+                    **vote_obj.model_dump(),
+                    "cited_claim_ids": filtered_ids,
+                    "forged_cited_claim_ids": forged_ids,
+                }
             )
         except (ValidationError, KeyError, ValueError) as exc:
             raise PmVoteSchemaError(
@@ -782,6 +796,51 @@ def make_pm(
                 "pm.latency_delta_ms",
                 round(sequential_estimate_ms - parallel_elapsed_ms, 2),
             )
+
+            # Bundle E bonus — UNCITED_CLAIM stamping in production.
+            # ``PmVoter.vote`` filters unknown cited_claim_ids silently
+            # (legacy behaviour preserved so downstream payloads stay clean);
+            # before that this was test-harness-only stamping in
+            # tests/red_team/conftest.py:_run_pm. Now the production path
+            # checks whether any voter dropped forged ids and emits a REFUSE
+            # Decision with FailureMode.UNCITED_CLAIM, which closes the same
+            # gap that T23/T24 closed for their respective failure modes
+            # (no test-only enforcement; no schema reference to a
+            # CitationVerifier that does not exist in the repo).
+            all_forged_ids: list[str] = []
+            for v in votes:
+                all_forged_ids.extend(v.forged_cited_claim_ids)
+            if all_forged_ids:
+                forged_metadata: dict[str, Any] = {
+                    "agent": "pm",
+                    "forged_cited_claim_ids": sorted(set(all_forged_ids)),
+                }
+                oldest_age = research.metadata.get("oldest_filing_age_days")
+                if oldest_age is not None:
+                    forged_metadata["oldest_filing_age_days"] = oldest_age
+                forged_refuse = Decision(
+                    id=pm_decision_id,
+                    decision_id_chain=[research.id],
+                    action=ActionEnum.REFUSE,
+                    payload=RefusePayload(reason="pm:uncited_claim"),
+                    rationale=(
+                        f"PM voter(s) cited claim id(s) "
+                        f"{sorted(set(all_forged_ids))!r} that were not in "
+                        f"the supplied claim set; conservative REFUSE."
+                    ),
+                    confidence=0.0,
+                    citations=list(research.citations),
+                    falsification_condition=research.falsification_condition,
+                    escalation_reason=None,
+                    failure_mode=FailureMode.UNCITED_CLAIM,
+                    metadata=forged_metadata,
+                    nonce="pm",
+                )
+                stamp_decision(span, forged_refuse.id, forged_refuse.failure_mode)
+                return {
+                    "pm_decision": forged_refuse,
+                    "pm_votes": [v.model_dump(mode="json") for v in votes],
+                }
 
             action, confidence, combined_rationale, fmode = aggregate_votes(votes)
             payload = _payload_for(action, research)
