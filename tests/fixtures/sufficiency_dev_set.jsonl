@@ -1,0 +1,6 @@
+{"claim_id": "dev-001", "text": "AAPL Q4 2024 revenue was $94.9B, up 6% year-over-year", "gold_citations": ["chunk-aapl-q4-rev-001", "chunk-aapl-q4-rev-002"]}
+{"claim_id": "dev-002", "text": "MSFT Azure segment grew 33% in fiscal Q1 2025 supporting BUY thesis", "gold_citations": ["chunk-msft-azure-001"]}
+{"claim_id": "dev-003", "text": "META 2024 capex guidance raised to $37-40B raising near-term margin pressure (SELL)", "gold_citations": ["chunk-meta-capex-001", "chunk-meta-margin-001"]}
+{"claim_id": "dev-004", "text": "NVDA data center revenue $30.8B in Q3 2025 with 112% YoY growth", "gold_citations": ["chunk-nvda-dc-001"]}
+{"claim_id": "dev-005", "text": "JPM net interest income held steady at $22.9B with no directional thesis (HOLD)", "gold_citations": ["chunk-jpm-nii-001"]}
+{"claim_id": "dev-006", "text": "TSLA delivered 462,890 vehicles in Q3 2024, missing analyst estimates", "gold_citations": ["chunk-tsla-deliv-001", "chunk-tsla-deliv-002"]}

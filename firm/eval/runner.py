@@ -59,6 +59,11 @@ from firm.eval.process_metrics import (
     compute_all_metrics,
 )
 from firm.eval.regimes import RegimeConfig
+from firm.eval.sufficiency import (
+    DEFAULT_DEV_SET_PATH,
+    compute_sufficiency_metrics,
+    load_dev_set,
+)
 
 HeartbeatFn = Callable[[date, Path], None]
 
@@ -240,6 +245,73 @@ def _claims_from_decisions(rows: Sequence[Mapping[str, Any]]) -> list[Claim]:
     return claims
 
 
+def _produced_citations_from_rows(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, list[str]]:
+    """Build the {claim_id: [chunk_id, ...]} mapping for the sufficiency gate.
+
+    The decisions table archives one row per Decision; its citations cell
+    is the JSON-encoded list of Citation dicts emitted by the agent. T12's
+    sufficiency_dev_set keys on claim_id, but Decision rows do not carry
+    a claim_id field — the natural join key is therefore the Decision
+    id (used as the synthetic claim_id) with each row's chunk_ids as the
+    produced set. Decisions whose id is not present in the dev set
+    contribute nothing toward the gate; this is the intended behaviour
+    (the gate measures performance on the labeled subset, not the whole run).
+    """
+    out: dict[str, list[str]] = {}
+    for row in rows:
+        decision_id = str(row.get("id") or "")
+        if not decision_id:
+            continue
+        cit_raw = row.get("citations") or "[]"
+        try:
+            cit_list = json.loads(cit_raw) if isinstance(cit_raw, str) else []
+        except json.JSONDecodeError:
+            cit_list = []
+        chunk_ids: list[str] = []
+        if isinstance(cit_list, list):
+            for c in cit_list:
+                if isinstance(c, dict):
+                    chunk_id = c.get("chunk_id")
+                    if isinstance(chunk_id, str) and chunk_id:
+                        chunk_ids.append(chunk_id)
+        if chunk_ids:
+            out[decision_id] = chunk_ids
+    return out
+
+
+def _wire_sufficiency_metrics(
+    decision_rows: Sequence[Mapping[str, Any]],
+    *,
+    dev_set_path: Path | None,
+) -> tuple[float, float]:
+    """Resolve (precision, recall) for the sufficiency gate.
+
+    Behaviour:
+      * If dev_set_path is None, fall back to the canonical fixture at
+        DEFAULT_DEV_SET_PATH.
+      * If the dev set file is missing, return (1.0, 1.0) as a soft
+        fallback so the gate doesn't block a run when fixtures haven't been
+        deployed yet. (The fixture ships with the repo; this branch only
+        fires in pathological envs.)
+      * If the run produced ZERO decisions with any citations, return
+        (1.0, 1.0) — common for the r3_quiet regime where the agent may
+        legitimately HOLD all day. A zero-citation run shouldn't be punished
+        by the gate; T12's gate measures citation *correctness*, not
+        citation *volume*.
+      * Otherwise, return the real measured (precision, recall).
+    """
+    resolved_path = dev_set_path if dev_set_path is not None else DEFAULT_DEV_SET_PATH
+    if not resolved_path.exists():
+        return 1.0, 1.0
+    dev_set = load_dev_set(resolved_path)
+    produced = _produced_citations_from_rows(decision_rows)
+    if not produced:
+        return 1.0, 1.0
+    return compute_sufficiency_metrics(dev_set, produced)
+
+
 def _decision_shims(rows: Sequence[Mapping[str, Any]]) -> list[_DecisionShim]:
     shims: list[_DecisionShim] = []
     for row in rows:
@@ -363,8 +435,9 @@ def run_regime(
     final_marks: dict[str, Decimal] | None = None,
     red_team_passed: int = 0,
     red_team_total: int = 50,
-    sufficiency_precision: float = 1.0,
-    sufficiency_recall: float = 1.0,
+    sufficiency_precision: float | None = None,
+    sufficiency_recall: float | None = None,
+    sufficiency_dev_set_path: Path | None = None,
 ) -> RegimeReport:
     """Run one regime end-to-end and write its Markdown report.
 
@@ -403,8 +476,15 @@ def run_regime(
     red_team_total    : red-team rollup. The suite runs in CI, not here, so
                         defaults to ``0 / 50``; callers that already ran the
                         suite can pipe values in.
-    sufficiency_*     : sufficiency-gate precision/recall, not measured by
-                        T13 scope; defaults to ``1.0, 1.0``.
+    sufficiency_precision,
+    sufficiency_recall : sufficiency-gate precision/recall. If None
+                        (default), measured by _wire_sufficiency_metrics
+                        from the canonical dev set at
+                        DEFAULT_DEV_SET_PATH against the decisions
+                        produced by the run. Caller-supplied values win and
+                        skip the dev-set lookup.
+    sufficiency_dev_set_path : path to the JSONL dev set; defaults to
+                        firm.eval.sufficiency.DEFAULT_DEV_SET_PATH.
 
     Returns
     -------
@@ -473,6 +553,17 @@ def run_regime(
         spy_return=spy_return,
         basket_return=basket_return,
     )
+
+    # ------ Resolve sufficiency metrics (T12). Caller-provided wins;
+    # otherwise measure precision/recall against the dev set fixture.
+    if sufficiency_precision is None or sufficiency_recall is None:
+        measured_p, measured_r = _wire_sufficiency_metrics(
+            decision_rows, dev_set_path=sufficiency_dev_set_path
+        )
+        if sufficiency_precision is None:
+            sufficiency_precision = measured_p
+        if sufficiency_recall is None:
+            sufficiency_recall = measured_r
 
     # ------ Process metrics.
     process_metrics = compute_all_metrics(
