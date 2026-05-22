@@ -65,6 +65,7 @@ addopts = "-v --tb=short"
 markers = [
     "requires_models: tests that need a downloaded model",
     "vcr_replay: replay-mode integration tests using recorded LLM cassettes",
+    "live: opt-in tests that hit real external APIs; require FIRM_E2E_LIVE=1",
 ]
 
 [tool.ruff]
