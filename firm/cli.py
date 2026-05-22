@@ -19,7 +19,12 @@ import click
 from jinja2 import Environment, FileSystemLoader
 
 from firm.agents.execution import make_execution
-from firm.agents.hitl import make_hitl, mark_approved, mark_rejected
+from firm.agents.hitl import (
+    make_hitl,
+    mark_approved,
+    mark_rejected,
+    reap_expired_hitl_entries,
+)
 from firm.agents.monitor import make_monitor
 from firm.agents.pm import PmVoter, make_pm
 from firm.agents.reporter import make_reporter
@@ -448,6 +453,22 @@ def run(once: bool) -> None:
     graph = build_graph(
         db_path=db, monitor_node=monitor, research_node=research, pm_node=pm,
         risk_node=risk_node, hitl_node=hitl, execution_node=execution, reporter_node=reporter,
+    )
+
+    # T24 (Plan 4): one HITL aging sweep per heartbeat.
+    # The graph topology routes risk → (hitl | execution) → reporter via a
+    # conditional edge; clean insertion of a reaper "between hitl and
+    # execution" would require non-trivial graph rewiring (the conditional
+    # router currently dispatches on risk.action == ESCALATE, not on a
+    # hitl-output sentinel). The reaper is conceptually a maintenance
+    # sweep over rows queued by PRIOR heartbeats, so running it once per
+    # `firm run` invocation (before the current heartbeat's graph kick-off)
+    # is the natural placement: any pending hitl_queue row whose deadline
+    # has elapsed is reaped and a REFUSE/UNAPPROVED_HIGH_RISK Decision is
+    # written before this heartbeat proceeds. The reaper is no-op when no
+    # rows have aged out.
+    reap_expired_hitl_entries(
+        db_path=db, clock=clock, nonce_secret=nonce_secret
     )
 
     config: RunnableConfig = {"configurable": {"thread_id": clock.now().isoformat()}}

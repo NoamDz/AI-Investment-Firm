@@ -3,13 +3,20 @@ from __future__ import annotations
 
 import logging
 from contextlib import closing
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from firm.audit.log import AuditLog
 from firm.agents.reporter import _persist_decisions_from_state
 from firm.core.clock import Clock
-from firm.core.models import ActionEnum, Decision
+from firm.core.ids import sign_nonce, ulid_new
+from firm.core.models import (
+    ActionEnum,
+    Decision,
+    FailureMode,
+    RefusePayload,
+)
 from firm.db.connection import get_conn
 from firm.orchestrator.state import WorkingState
 
@@ -17,6 +24,12 @@ if TYPE_CHECKING:
     from firm.hitl.notify import SlackNotifier
 
 logger = logging.getLogger(__name__)
+
+
+# Spec §8.5 default: HITL approvals must arrive within 30 minutes or the
+# pending row is treated as unapproved-high-risk.  Lifted to a module
+# constant so callers (and tests) can reference the same canonical value.
+DEFAULT_HITL_TIMEOUT_SECONDS: int = 1800
 
 
 def make_hitl(
@@ -118,3 +131,95 @@ def mark_rejected(*, db_path: Path, decision_id: str, approver: str, clock: Cloc
         mutated = cur.rowcount == 1
     if mutated:
         AuditLog(db_path, clock).append("hitl.rejected", {"decision_id": decision_id, "approver": approver})
+
+
+# ---------------------------------------------------------------------------
+# Plan 4 T24 — HITL aging/reaper policy (UNAPPROVED_HIGH_RISK)
+# ---------------------------------------------------------------------------
+
+
+def reap_expired_hitl_entries(
+    *,
+    db_path: Path,
+    clock: Clock,
+    deadline_seconds: int = DEFAULT_HITL_TIMEOUT_SECONDS,
+    nonce_secret: bytes,
+) -> list[Decision]:
+    """Sweep ``hitl_queue`` for aged-out pending rows and emit REFUSE Decisions.
+
+    For every row where ``status='pending'`` and ``clock.now() - queued_at``
+    exceeds ``deadline_seconds``, construct a REFUSE :class:`Decision`
+    with ``failure_mode=UNAPPROVED_HIGH_RISK`` and a ``decision_id_chain``
+    pointing back to the expired ESCALATE.  Persist each new disposition
+    Decision via :func:`_persist_decisions_from_state` and return the list.
+
+    Conservative-default policy: when a high-risk trade ages out without
+    an explicit human approval, the disposition is NOT a bare
+    ``HITL_TIMEOUT`` (which would be a transport/UX failure mode); it is
+    ``UNAPPROVED_HIGH_RISK`` — the trade is refused on the substantive
+    grounds that no authorised human signed off, which is materially
+    different from "the message did not arrive".
+
+    Intentional non-decision: the reaper does NOT mutate the ``hitl_queue``
+    row (it remains ``'pending'``).  Whether the queue-row lifecycle
+    should transition (e.g., ``'pending'`` → ``'timed_out'``) is a
+    separate question deferred to a future iteration.
+
+    Parameters
+    ----------
+    db_path:
+        Path to the firm SQLite DB.
+    clock:
+        Clock providing ``now()`` for age comparison and Decision timestamping.
+    deadline_seconds:
+        Age threshold beyond which a pending row is considered aged-out.
+        Defaults to :data:`DEFAULT_HITL_TIMEOUT_SECONDS` (1800s = 30 min,
+        matching spec §8.5).
+    nonce_secret:
+        HMAC secret used to sign the emitted REFUSE Decisions' nonces.
+
+    Returns
+    -------
+    list[Decision]
+        The REFUSE Decisions emitted this sweep (empty if no rows aged out).
+    """
+    now = clock.now()
+    refused: list[Decision] = []
+    with closing(get_conn(db_path)) as conn:
+        rows = conn.execute(
+            "SELECT decision_id, queued_at FROM hitl_queue WHERE status='pending'"
+        ).fetchall()
+    for row in rows:
+        queued_at = datetime.fromisoformat(row["queued_at"])
+        age_seconds = (now - queued_at).total_seconds()
+        if age_seconds < deadline_seconds:
+            continue
+        refuse_id = ulid_new()
+        nonce = sign_nonce(
+            nonce_secret,
+            decision_id=refuse_id,
+            timestamp=int(now.timestamp()),
+        )
+        refuse = Decision(
+            id=refuse_id,
+            decision_id_chain=[row["decision_id"]],
+            action=ActionEnum.REFUSE,
+            payload=RefusePayload(reason="hitl:unapproved_high_risk"),
+            rationale=(
+                f"hitl_queue entry {row['decision_id']!r} aged "
+                f"{int(age_seconds)}s past the {deadline_seconds}s deadline "
+                f"without an approval; conservative default applied"
+            ),
+            confidence=0.0,
+            citations=[],
+            falsification_condition=(
+                "an authorised human posts an approval within the deadline"
+            ),
+            escalation_reason=None,
+            failure_mode=FailureMode.UNAPPROVED_HIGH_RISK,
+            metadata={"agent": "hitl", "expired_decision_id": row["decision_id"]},
+            nonce=nonce,
+        )
+        _persist_decisions_from_state({"risk_decision": refuse}, db_path, clock)
+        refused.append(refuse)
+    return refused
