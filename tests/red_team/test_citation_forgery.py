@@ -1,17 +1,19 @@
 """Red-team class: citation_forgery.
 
-Each of the 5 corpus cases for this class is piped through
-red_team_run() and the invariant named by case.invariant_id is
-asserted. The class-to-invariant mapping is determined by the
-corpus, not hardcoded here.
+Each corpus case for this class is piped through ``red_team_run()`` and the
+invariant named by ``case.invariant_id`` is asserted.  The class-to-invariant
+mapping lives in the corpus, not in this file.
 
-NOTE: All 5 citation_forgery cases target 'research' or 'reporter' agents whose
-_run_* helpers return None (no Decision produced). The UNCITED_CLAIM assertion
-below is therefore guarded by both result.decision is not None AND
-result.decision.citations being non-empty, per Strategy 1. Closing the
-UNCITED_CLAIM ALLOWED_GAPS entry from Plan 3 is jointly the responsibility of
-this module and T11 (firm/eval/perf_metrics.py), which exercises the full
-citation surface end-to-end.
+Plan 4 Section B T07.h
+----------------------
+The historical guard ``if result.decision is not None and
+result.decision.citations`` made the UNCITED_CLAIM assertion vacuous because
+the 5 original cases all targeted ``research``/``reporter`` runners that
+return ``None``.  Bundle C adds ``citation_forgery_6`` -- a PM-targeted
+case carrying the ``FORGE_CITATION:<id>`` marker -- so the inline
+verifier in ``_run_pm`` stamps ``failure_mode=UNCITED_CLAIM`` on a real
+Decision.  The assertion below now actually fires (and would fail) when
+that wiring breaks.
 """
 from __future__ import annotations
 
@@ -51,13 +53,19 @@ def test_citation_forgery_invariant(case: RedTeamCase, red_team_ctx: RedTeamCtx)
     assertion = _INVARIANT_DISPATCH[case.invariant_id]
     assertion(result, case=case)
 
-    # T07.h: end-to-end UNCITED_CLAIM check — closes Plan 3 ALLOWED_GAPS entry
-    # jointly with T11. Guard: only assert failure_mode when the decision actually
-    # carries citations (Strategy 1 — avoids vacuous failures for research/reporter
-    # cases where _run_* returns None or produces no citations).
-    if result.decision is not None and result.decision.citations:
+    # T07.h: assert UNCITED_CLAIM for the PM-targeted forgery case
+    # (citation_forgery_6).  Research/reporter cases produce no Decision
+    # at the harness level; only PM cases produce a Decision whose inline
+    # CitationVerifier in _run_pm stamps the failure mode.  This is the
+    # only path in the repo today that stamps UNCITED_CLAIM end-to-end
+    # on a real Decision.
+    if case.target_agent == "pm":
         from firm.core.models import FailureMode
+        assert result.decision is not None, (
+            f"{case.case_id}: expected a Decision from PM target"
+        )
         assert result.decision.failure_mode == FailureMode.UNCITED_CLAIM, (
             f"{case.case_id}: expected failure_mode=UNCITED_CLAIM "
-            f"for a citation_forgery case, got {result.decision.failure_mode}"
+            f"for a PM-targeted citation_forgery case, got "
+            f"{result.decision.failure_mode}"
         )

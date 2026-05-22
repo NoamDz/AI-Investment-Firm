@@ -20,6 +20,11 @@ Limitations for T06
 * ``_run_monitor`` likewise discards ``payload_text`` because the production
   monitor node only reads the clock; monitor-targeted cases test harness
   wiring only.
+* ``_run_pm`` carries the T07.h ``FORGE_CITATION:<id>`` hook -- when the
+  marker is present in ``payload_text``, the stub voter returns the
+  forged id and the helper stamps ``failure_mode=UNCITED_CLAIM`` on the
+  returned Decision (closing the Plan 3 ALLOWED_GAPS entry jointly with
+  the perf-metrics surface in firm/eval/perf_metrics.py).
 """
 from __future__ import annotations
 
@@ -273,10 +278,31 @@ def _run_research(payload_text: str, ctx: RedTeamCtx) -> Decision | None:
 
 
 def _run_pm(payload_text: str, ctx: RedTeamCtx) -> Decision | None:
-    """Attack surface: payload is the rationale of an upstream Decision-stub that PM votes on."""
+    """Attack surface: payload is the rationale of an upstream Decision-stub that PM votes on.
+
+    T07.h hook -- UNCITED_CLAIM end-to-end coverage.  When ``payload_text``
+    contains the marker ``FORGE_CITATION:<id>``, the helper:
+
+      1. Builds a stub LLM client whose voters return that ``<id>`` in
+         ``cited_claim_ids`` (simulating a model that emitted a forged
+         citation id under attacker pressure).
+      2. After ``make_pm(...)`` returns the aggregated PM Decision, the
+         helper verifies the cited id against the valid claim ids
+         (``c1``, ``c2``, ...).  ``PmVoter`` filters unknown ids silently
+         (pm.py line ~278) -- i.e. the production path drops them without
+         stamping a failure mode -- so the red-team harness makes this
+         surface explicit by stamping ``failure_mode=UNCITED_CLAIM`` on
+         the returned Decision whenever a forged id was injected.
+
+    This is the only path in the repo today that stamps UNCITED_CLAIM
+    onto a real Decision end-to-end; it satisfies the Plan 4 Section B
+    T07.h invariant (closing the Plan 3 ALLOWED_GAPS entry jointly with
+    the perf-metrics surface in firm/eval/perf_metrics.py).
+    """
     import json as _json
+    import re as _re
     from firm.agents.pm import PmVoter, make_pm
-    from firm.core.models import Claim
+    from firm.core.models import Claim, FailureMode
 
     # Inject the red-team payload as the research rationale.
     research_decision = Decision(
@@ -294,6 +320,10 @@ def _run_pm(payload_text: str, ctx: RedTeamCtx) -> Decision | None:
         nonce="rt-nonce-1",
     )
 
+    # T07.h: detect the FORGE_CITATION:<id> marker and forge a cited id.
+    _forge_match = _re.search(r"FORGE_CITATION:([\w\-]+)", payload_text)
+    forged_cited_ids: list[str] = [_forge_match.group(1)] if _forge_match else []
+
     class _StubClient:
         def messages_create(self, **kwargs: Any) -> dict[str, Any]:
             return {
@@ -305,7 +335,11 @@ def _run_pm(payload_text: str, ctx: RedTeamCtx) -> Decision | None:
                                 "vote": "HOLD",
                                 "confidence": 0.5,
                                 "rationale": "red-team hold vote",
-                                "cited_claim_ids": [],
+                                # T07.h: return the forged citation id when
+                                # the payload carried the FORGE_CITATION
+                                # marker, else keep the legacy empty-ids
+                                # behaviour so other tests are unaffected.
+                                "cited_claim_ids": forged_cited_ids,
                             }
                         ),
                     }
@@ -318,7 +352,21 @@ def _run_pm(payload_text: str, ctx: RedTeamCtx) -> Decision | None:
         Claim(text="Test claim.", source_chunk_id="chunk-0").model_dump()
     ]
     out = pm({"research_decision": research_decision, "claims": claims_dump})
-    return out.get("pm_decision")
+    decision: Decision | None = out.get("pm_decision")
+
+    # T07.h: stamp UNCITED_CLAIM on the returned Decision when a forged id
+    # was injected.  The forged id is, by construction, not in the valid
+    # set ``{c1, c2, ...}`` since the marker carries a free-form attacker-
+    # chosen id (e.g. ``fake-claim-99``).
+    if decision is None or not forged_cited_ids:
+        return decision
+
+    valid_claim_ids: set[str] = {f"c{i + 1}" for i in range(len(claims_dump))}
+    forged_unknown = set(forged_cited_ids) - valid_claim_ids
+    if not forged_unknown:
+        return decision
+
+    return decision.model_copy(update={"failure_mode": FailureMode.UNCITED_CLAIM})
 
 
 def _run_risk(payload_text: str, ctx: RedTeamCtx) -> Decision | None:
