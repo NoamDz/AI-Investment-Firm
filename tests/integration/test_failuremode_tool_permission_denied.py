@@ -1,28 +1,28 @@
 """Plan 4 T23 — TOOL_PERMISSION_DENIED end-to-end fixture.
 
 Wires a :class:`firm.broker.capability.RestrictedBroker` with
-``agent_role="research"`` around an inner :class:`FakeBroker`.  Any code
-path that attempts the order-placing surface (``broker.place_order``,
-implemented at the protocol level as ``Broker.submit``) from a
-non-execution role is rejected by the capability layer with
-:class:`ToolPermissionDeniedError` BEFORE the inner broker is touched.
+``agent_role="research"`` around an inner :class:`FakeBroker`, hands it
+to the production execution node via :func:`make_execution`, and runs a
+BUY risk Decision through the node.  The outbox's bounded-retry loop
+re-raises :class:`ToolPermissionDeniedError` (permission errors are
+not transient), and the execution agent stamps a REFUSE Decision with
+``failure_mode=TOOL_PERMISSION_DENIED`` via
+:func:`_build_tool_permission_denied_refuse`.
 
-The primary test demonstrates the failure mode is reachable end-to-end:
+The primary test demonstrates the failure mode is reachable end-to-end
+via the production code path:
 
   1. Construct ``restricted = RestrictedBroker(inner=FakeBroker(...),
-     agent_role="research")``.
-  2. Attempt the privileged call; assert the exception fires with the
-     correct ``(role, tool)`` attributes.
-  3. Build a REFUSE :class:`Decision` with ``failure_mode =
-     TOOL_PERMISSION_DENIED`` mirroring what an agent would emit when the
-     capability layer rejected its tool call.
-  4. Persist that Decision via the reporter pattern (
-     :func:`firm.agents.reporter._persist_decisions_from_state`) into a
-     temp SQLite DB.
-  5. Assert the audit row is queryable by
+     agent_role="research")`` — the wrong role for placing orders.
+  2. Build a BUY risk Decision and invoke the execution node directly
+     (this is the production code path; no test-local stamping).
+  3. Assert the returned Decision (persisted via the agent's own
+     ``_persist_decisions_from_state`` call) has
+     ``failure_mode=TOOL_PERMISSION_DENIED``.
+  4. Assert the audit row is queryable by
      ``WHERE failure_mode = 'tool_permission_denied'``.
-  6. Assert the inner broker was NOT invoked (capability check rejects
-     before delegation).
+  5. Assert the inner broker was NOT invoked (capability check rejects
+     before delegation; no order leaked through).
 
 Two additional unit-level tests pin down that the gate is SELECTIVE —
 not a blanket block:
@@ -37,8 +37,8 @@ Complements (does not replace)
 ``tests/red_team/conftest.py::assert_no_privileged_action``; that helper
 remains the test-time defense-in-depth invariant across four channels
 (decision.action allowlist, broker_calls, audit_log, outbox).  The
-capability layer is the new production-time enforcement that this
-fixture also exercises.
+capability layer is the production-time enforcement that this fixture
+exercises end-to-end through the execution agent (Bundle E).
 """
 from __future__ import annotations
 
@@ -48,18 +48,16 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-import pytest
-
-from firm.agents.reporter import _persist_decisions_from_state
-from firm.broker.capability import RestrictedBroker, ToolPermissionDeniedError
+from firm.agents.execution import make_execution
+from firm.broker.capability import RestrictedBroker
 from firm.broker.fake_broker import FakeBroker
 from firm.core.clock import ReplayClock
 from firm.core.ids import sign_nonce, ulid_new
 from firm.core.models import (
     ActionEnum,
+    BuyPayload,
     Decision,
     FailureMode,
-    RefusePayload,
 )
 from firm.db.migrations import init_db
 
@@ -92,9 +90,22 @@ def _build_buy_payload_dict() -> dict[str, object]:
 def test_research_role_broker_call_rejected_with_tool_permission_denied_failure_mode(
     tmp_path: Path,
 ) -> None:
-    """Research-role broker.place_order => ToolPermissionDeniedError =>
-    REFUSE / TOOL_PERMISSION_DENIED Decision persisted to audit table; inner
-    broker is never touched.
+    """Production path: BUY risk Decision + research-role RestrictedBroker
+    => execution agent emits a REFUSE Decision with
+    ``failure_mode=TOOL_PERMISSION_DENIED`` and the inner broker is never
+    touched.
+
+    Wired through:
+
+      * :class:`RestrictedBroker` with ``agent_role="research"`` (wrong
+        role for ``broker.place_order``).
+      * :func:`firm.outbox.outbox.place_order_via_outbox` — the retry
+        loop now re-raises ``ToolPermissionDeniedError`` immediately
+        instead of misclassifying it as ``BrokerUnavailableError``.
+      * :func:`firm.agents.execution.make_execution` — the typed
+        handler stamps ``FailureMode.TOOL_PERMISSION_DENIED`` on a REFUSE
+        Decision and persists it via the agent's own
+        ``_persist_decisions_from_state`` call.
     """
     # --- infrastructure setup -----------------------------------------------
     db_path = tmp_path / "firm.db"
@@ -102,56 +113,58 @@ def test_research_role_broker_call_rejected_with_tool_permission_denied_failure_
 
     clock = ReplayClock(_T0)
     inner = FakeBroker(initial_cash=Decimal("100000"))
+    # Wrong role: ``research`` is NOT in the capability layer's privileged
+    # allowlist, so any submit() through ``restricted`` must raise
+    # ToolPermissionDeniedError before reaching ``inner``.
     restricted = RestrictedBroker(inner=inner, agent_role="research")
 
-    # --- Step 1: capability layer rejects the privileged call ----------------
-    with pytest.raises(ToolPermissionDeniedError) as exc_info:
-        restricted.submit(_build_buy_payload_dict(), idempotency_key="t23-rejected-1")
-
-    assert exc_info.value.role == "research", (
-        f"expected role='research', got {exc_info.value.role!r}"
-    )
-    assert exc_info.value.tool == "broker.place_order", (
-        f"expected tool='broker.place_order', got {exc_info.value.tool!r}"
-    )
-
-    # --- Step 2: build REFUSE / TOOL_PERMISSION_DENIED Decision --------------
-    decision_id = ulid_new()
-    nonce = sign_nonce(
+    # --- Step 1: build a BUY risk Decision the execution agent will act on --
+    risk_decision_id = ulid_new()
+    risk_nonce = sign_nonce(
         _NONCE_SECRET,
-        decision_id=decision_id,
+        decision_id=risk_decision_id,
         timestamp=int(clock.now().timestamp()),
     )
-    decision = Decision(
-        id=decision_id,
+    risk_decision = Decision(
+        id=risk_decision_id,
         decision_id_chain=[],
-        action=ActionEnum.REFUSE,
-        payload=RefusePayload(reason="capability:tool_permission_denied"),
-        rationale=(
-            f"agent_role={exc_info.value.role!r} attempted to invoke "
-            f"tool={exc_info.value.tool!r}; capability layer denied"
-        ),
-        confidence=0.0,
+        action=ActionEnum.BUY,
+        payload=BuyPayload(ticker="AAPL", shares=Decimal("10")),
+        rationale="risk-approved BUY for T23 capability fixture",
+        confidence=0.7,
         citations=[],
-        falsification_condition=(
-            "research agent has its broker reference rotated to "
-            "agent_role='execution' (out-of-spec configuration)"
-        ),
+        falsification_condition="risk gate flips",
         escalation_reason=None,
-        failure_mode=FailureMode.TOOL_PERMISSION_DENIED,
-        metadata={"agent": "research", "ticker": "AAPL"},
-        nonce=nonce,
+        failure_mode=None,
+        metadata={"agent": "risk", "ticker": "AAPL"},
+        nonce=risk_nonce,
     )
 
-    assert decision.action == ActionEnum.REFUSE
-    assert decision.failure_mode == FailureMode.TOOL_PERMISSION_DENIED
-
-    # --- Step 3: persist via the reporter helper -----------------------------
-    _persist_decisions_from_state(
-        {"research_decision": decision}, db_path, clock
+    # --- Step 2: invoke the execution node directly (production code path) --
+    execution = make_execution(
+        db_path=db_path,
+        broker=restricted,
+        clock=clock,
+        nonce_secret=_NONCE_SECRET,
+    )
+    result = execution(
+        {"risk_decision": risk_decision, "hitl_required": False, "hitl_approved": True}
     )
 
-    # --- Step 4: audit row queryable -----------------------------------------
+    # --- Step 3: execution_result reports the production rejection ----------
+    exec_result = result["execution_result"]
+    assert exec_result.get("skipped") is True, (
+        f"expected skipped=True (capability rejection), got {exec_result!r}"
+    )
+    assert exec_result.get("reason") == "tool_permission_denied", (
+        f"expected reason='tool_permission_denied', got {exec_result.get('reason')!r}"
+    )
+    assert exec_result.get("role") == "research"
+    assert exec_result.get("tool") == "broker.place_order"
+
+    # --- Step 4: REFUSE Decision with TOOL_PERMISSION_DENIED persisted -------
+    # The execution agent's own _persist_decisions_from_state call writes the
+    # REFUSE Decision to the decisions table — no test-local persistence.
     with closing(sqlite3.connect(str(db_path))) as conn:
         rows = conn.execute(
             "SELECT id, action, failure_mode FROM decisions WHERE failure_mode = ?",
@@ -159,9 +172,8 @@ def test_research_role_broker_call_rejected_with_tool_permission_denied_failure_
         ).fetchall()
     assert len(rows) >= 1, (
         "decisions table must contain at least one row with "
-        "failure_mode='tool_permission_denied'"
+        "failure_mode='tool_permission_denied' (stamped by execution agent)"
     )
-    assert rows[0][0] == decision_id
     assert rows[0][1] == "REFUSE"
 
     # --- Step 5: inner broker was NOT invoked --------------------------------
