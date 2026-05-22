@@ -13,7 +13,12 @@ from pathlib import Path
 import pytest
 
 _BADGE_RE = re.compile(
-    r"!\[[^\]]*\]\(https://github\.com/[^/]+/[^/]+/actions/workflows/([^/]+)/badge\.svg\)"
+    # Capture the workflow filename out of badge URLs like
+    #   ![PR CI](https://github.com/<owner>/<repo>/actions/workflows/pr.yml/badge.svg)
+    #   ![Main CI](https://github.com/<owner>/<repo>/actions/workflows/main.yml/badge.svg?branch=main)
+    # Trailing `(?:\?[^)]*)?` permits an optional query string (e.g. ?branch=main)
+    # which GitHub's badge URL supports for ref-pinning.
+    r"!\[[^\]]*\]\(https://github\.com/[^/]+/[^/]+/actions/workflows/([^/]+)/badge\.svg(?:\?[^)]*)?\)"
 )
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
