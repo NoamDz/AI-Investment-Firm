@@ -1,9 +1,10 @@
 """HITL gate. Plan 1 = CLI ack; Plan 3 = Slack signed approvals. See spec §3, §8.4."""
 from __future__ import annotations
 
+import logging
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from firm.audit.log import AuditLog
 from firm.agents.reporter import _persist_decisions_from_state
@@ -12,8 +13,18 @@ from firm.core.models import ActionEnum, Decision
 from firm.db.connection import get_conn
 from firm.orchestrator.state import WorkingState
 
+if TYPE_CHECKING:
+    from firm.hitl.notify import SlackNotifier
 
-def make_hitl(*, db_path: Path, clock: Clock) -> Callable[[WorkingState], dict[str, Any]]:
+logger = logging.getLogger(__name__)
+
+
+def make_hitl(
+    *,
+    db_path: Path,
+    clock: Clock,
+    notifier: "SlackNotifier | None" = None,
+) -> Callable[[WorkingState], dict[str, Any]]:
     def hitl(state: WorkingState) -> dict[str, Any]:
         risk: Decision = state["risk_decision"]
         if risk.action != ActionEnum.ESCALATE:
@@ -34,6 +45,21 @@ def make_hitl(*, db_path: Path, clock: Clock) -> Callable[[WorkingState], dict[s
             ).fetchone()
         if inserted:
             AuditLog(db_path, clock).append("hitl.queued", {"decision_id": risk.id})
+            # Notify via Slack on first ESCALATE entry only (idempotency: not on
+            # re-traversal).  DB insert happens before Slack call (audit ordering).
+            if notifier is not None:
+                try:
+                    notifier.notify(decision=risk)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "hitl.slack_notify_failed: decision_id=%s error=%s",
+                        risk.id,
+                        exc,
+                    )
+                    AuditLog(db_path, clock).append(
+                        "hitl.slack_notify_failed",
+                        {"decision_id": risk.id, "error": str(exc)},
+                    )
         approved = row and row["status"] == "approved"
         return {"hitl_required": True, "hitl_approved": bool(approved)}
     return hitl

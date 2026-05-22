@@ -12,10 +12,16 @@ with Python 3.11 + CUDA 12.4 (RTX 4060) + Docker Desktop.
 
 ```powershell
 # Python venv with GPU torch + project deps (skip if you already have a CUDA Python env)
+# IMPORTANT: Python 3.11.x specifically — 3.13 wheels are missing torch.SymInt and
+# break sentence_transformers. The package raises a clear error on 3.12+/3.10-.
 python -m venv .venv
 .\.venv\Scripts\activate
 pip install --index-url https://download.pytorch.org/whl/cu128 torch    # or whl/cpu
 pip install -e ".[dev]"
+
+# If `uv` is the cached resolver and you hit a "torch.SymInt missing" import error,
+# the cached venv is on the wrong Python. Recreate explicitly:
+#   uv venv --python 3.11 && uv pip install -e ".[dev]"
 
 # Anthropic key
 copy .env.example .env                  # then edit .env, set ANTHROPIC_API_KEY
@@ -127,6 +133,50 @@ docker compose run --rm firm python -m firm.cli ack <DECISION_ID>
 docker compose run --rm firm
 ```
 
+### Slack integration (.env additions)
+
+To enable inbound Slack approval callbacks, add to `.env`:
+
+```
+FIRM_SLACK_BOT_TOKEN=xoxb-...        # OAuth bot token for outbound notifications
+```
+
+The `POST /slack/interactive` endpoint verifies every inbound request with Slack's v0
+signing scheme (HMAC-SHA256 over `v0:{X-Slack-Request-Timestamp}:{raw_body}`) and rejects
+requests older than 5 minutes (replay-window protection). The `slack_channel` and
+`slack_approver_id` used for outbound notifications come from `config/policy.yaml`, not
+from environment variables.
+
+**Dev fallback** — in non-production environments (or with Docker) use the CLI directly:
+
+```powershell
+docker compose run --rm firm python -m firm.cli ack <DECISION_ID> --dev-ack
+```
+
+`--dev-ack` is required outside a pytest session; without it the CLI exits with a
+reminder to use the Slack workflow.
+
+See `docs/runbook.md#slack-approval-flow` for the full operator procedure.
+
+### Generate a daily report
+
+```powershell
+make report DATE=2024-03-13
+```
+
+Writes the bundle to `data/reports/2024-03-13/`:
+- `daily_report.md` — decision histogram, cost summary, EOD reconcile block
+- `positions.xlsx` — Positions and P&L sheets
+
+Equivalent without `make`: `python -m firm.cli report --date 2024-03-13`
+
+### Restore from backup (SQLite)
+
+SQLite (`data/firm.db`) is continuously replicated by the `litestream` service.
+To restore, see `docs/runbook.md#restore-from-litestream-sqlite` for the exact
+commands. The Qdrant vector store uses a separate Docker-volume tar approach
+documented in `docs/runbook.md#qdrant-volume-backup`.
+
 ## Running `firm run` natively (no Docker)
 
 The `docker compose up firm` flow above sets every required environment variable
@@ -164,5 +214,5 @@ Then `docker compose up firm`.
 
 - [x] Plan 1: Foundation + Walking Skeleton
 - [x] Plan 2: RAG + Citations + Grounding
-- [ ] Plan 3: HITL + Daily Reports + Observability
+- [x] Plan 3: HITL + Daily Reports + Observability
 - [ ] Plan 4: Eval Harness + Red Team + CI/CD + Bonuses

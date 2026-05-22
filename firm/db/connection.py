@@ -19,5 +19,11 @@ def get_conn(db_path: Path) -> sqlite3.Connection:
     if mode != "wal":
         raise RuntimeError(f"SQLite failed to switch to WAL mode (got {mode!r})")
     conn.execute("PRAGMA synchronous = FULL")
+    # wal_autocheckpoint pages (default 1000): trigger an automatic checkpoint
+    # whenever the WAL reaches ~4MB (1000 pages × 4KB default page size). Paired
+    # with litestream's max-wal-size: 16MB ceiling in config/litestream.yml,
+    # this keeps a stuck checkpointer visible as a replication error rather
+    # than unbounded WAL growth.
+    conn.execute("PRAGMA wal_autocheckpoint = 1000")
     conn.execute("PRAGMA foreign_keys = ON")
     return conn

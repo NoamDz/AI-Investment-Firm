@@ -25,3 +25,4 @@ htmlcov/
 logs/
 *.log
 artifacts/
+traces/

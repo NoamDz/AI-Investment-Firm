@@ -15,6 +15,8 @@ dependencies = [
     "anthropic>=0.39",
     "qdrant-client>=1.11,<1.13",  # keep within one minor of the v1.11 server pinned in docker-compose
     "numpy>=1.26",
+    "jinja2>=3.1",
+    "openpyxl>=3.1",
     "sentence-transformers>=3.0",
     "einops>=0.7",  # required by nomic-embed-text-v1.5 remote modeling code
     "datasets>=2.20",
@@ -22,6 +24,13 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "lxml>=5.0",
     "tiktoken>=0.7",
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "fastapi>=0.111",
+    "python-multipart>=0.0.9",  # required by FastAPI for form parsing
+    "slack-sdk>=3.27",
+    "python-dateutil>=2.9",  # relativedelta for rolling 12-month news window
+    "requests>=2.31",  # production HTTP client for news adapter
 ]
 
 [project.optional-dependencies]
@@ -30,6 +39,8 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.5",
     "mypy>=1.10",
+    "httpx>=0.27",  # only used by fastapi.testclient.TestClient
+    "types-openpyxl>=3.1",
 ]
 
 [project.scripts]

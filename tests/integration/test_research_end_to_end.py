@@ -124,6 +124,7 @@ def test_research_end_to_end_produces_decision_with_citation() -> None:
         text="Apple revenue grew 8% year-over-year driven by services and wearables.",
         char_span=(0, 70),
         token_count=12,
+        source="test",
     )
     chunk_b = Chunk(
         id="doc-aapl-002::0001",
@@ -134,6 +135,7 @@ def test_research_end_to_end_produces_decision_with_citation() -> None:
         text="Management reiterated full-year guidance and capital return plans.",
         char_span=(0, 66),
         token_count=10,
+        source="test",
     )
     dense_vecs: list[list[float]] = [[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]
     sparse_vecs: list[dict[int, float]] = [{0: 1.0}, {0: 1.0}]

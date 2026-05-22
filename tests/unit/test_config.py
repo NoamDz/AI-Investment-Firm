@@ -51,6 +51,8 @@ def test_policy_rejects_negative_pct(tmp_path: Path):
         "hitl:\n"
         "  trade_threshold_pct: 0.03\n"
         "  escalate_new_ticker: true\n"
+        "  slack_channel: \"#trading-hitl\"\n"
+        "  slack_approver_id: \"U_PLACEHOLDER\"\n"
     )
     import pytest
     with pytest.raises(ValueError):
@@ -73,6 +75,8 @@ def test_policy_rejects_pct_above_one(tmp_path: Path):
         "hitl:\n"
         "  trade_threshold_pct: 0.03\n"
         "  escalate_new_ticker: true\n"
+        "  slack_channel: \"#trading-hitl\"\n"
+        "  slack_approver_id: \"U_PLACEHOLDER\"\n"
     )
     import pytest
     with pytest.raises(ValueError):

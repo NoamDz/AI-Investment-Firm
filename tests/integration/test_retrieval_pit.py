@@ -45,6 +45,7 @@ def _make_chunk(chunk_id: str, published_at: datetime, *, text: str = "body") ->
         text=text,
         char_span=(0, len(text)),
         token_count=max(1, len(text.split())),
+        source="test",
     )
 
 

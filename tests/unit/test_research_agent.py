@@ -115,6 +115,7 @@ def _make_chunk(
         text=text,
         char_span=(0, len(text)),
         token_count=max(1, len(text.split())),
+        source="test",
     )
 
 

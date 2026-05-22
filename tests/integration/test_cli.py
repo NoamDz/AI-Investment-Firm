@@ -98,6 +98,11 @@ def test_cli_run_produces_decision(tmp_path: Path) -> None:
     # Ensure QDRANT_URL is not set — QDRANT_LOCAL_PATH takes precedence.
     env.pop("QDRANT_URL", None)
 
+    # T27a: cold-machine cost = BM25 pre-pass + NomicEmbedder._lazy_load
+    # (sentence_transformers + torch warmup) + Qdrant init regularly tops 120s.
+    # Bumped to 300s. Subprocess isolation means a session-scoped pytest
+    # fixture wouldn't help (the warmup re-pays in every subprocess), so the
+    # spec's fixture suggestion is dropped — timeout headroom is the lever.
     result = subprocess.run(
         [sys.executable, "-m", "firm.cli", "run", "--once"],
         env=env,
@@ -105,7 +110,7 @@ def test_cli_run_produces_decision(tmp_path: Path) -> None:
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=120,
+        timeout=300,
     )
     assert result.returncode == 0, result.stderr
 

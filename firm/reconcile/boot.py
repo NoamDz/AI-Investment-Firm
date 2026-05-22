@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -11,6 +11,7 @@ from typing import Any
 from firm.audit.log import AuditLog
 from firm.broker.protocol import Broker
 from firm.core.clock import Clock
+from firm.core.models import FailureMode
 from firm.db.connection import get_conn
 
 
@@ -18,6 +19,14 @@ from firm.db.connection import get_conn
 class ReconcileResult:
     status: str  # 'ok' or 'mismatch'
     diff: dict[str, Any]
+    # Snapshot fields populated by reconcile_on_boot (additive — existing callers
+    # only use .status and .diff, so defaults ensure backward compatibility).
+    broker_positions: dict[str, Decimal] = field(default_factory=dict)
+    local_positions: dict[str, Decimal] = field(default_factory=dict)
+    broker_cash: Decimal = field(default_factory=lambda: Decimal("0"))
+    local_cash: Decimal = field(default_factory=lambda: Decimal("0"))
+    # T25: RECONCILIATION_DRIFT emitted when status == 'mismatch'.
+    failure_mode: FailureMode | None = None
 
 
 def _local_positions(db_path: Path) -> dict[str, Decimal]:
@@ -50,6 +59,7 @@ def reconcile_on_boot(db_path: Path, broker: Broker, clock: Clock) -> ReconcileR
         diff["cash"] = {"broker": str(broker_cash), "local": str(local_cash)}
 
     status = "ok" if not diff else "mismatch"
+    failure_mode: FailureMode | None = FailureMode.RECONCILIATION_DRIFT if status == "mismatch" else None
     with closing(get_conn(db_path)) as conn:
         conn.execute(
             "INSERT INTO reconciliations (kind, ran_at, broker_snapshot, local_snapshot, diff, status) "
@@ -62,8 +72,19 @@ def reconcile_on_boot(db_path: Path, broker: Broker, clock: Clock) -> ReconcileR
                 status,
             ),
         )
-    AuditLog(db_path, clock).append("reconcile.boot", {"status": status, "diff": diff})
-    return ReconcileResult(status=status, diff=diff)
+    audit_payload: dict[str, Any] = {"status": status, "diff": diff}
+    if failure_mode is not None:
+        audit_payload["failure_mode"] = failure_mode.value
+    AuditLog(db_path, clock).append("reconcile.boot", audit_payload)
+    return ReconcileResult(
+        status=status,
+        diff=diff,
+        broker_positions=broker_positions,
+        local_positions=local_positions,
+        broker_cash=broker_cash,
+        local_cash=local_cash,
+        failure_mode=failure_mode,
+    )
 
 
 def resolve_from_broker(

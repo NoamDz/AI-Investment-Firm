@@ -1,0 +1,29 @@
+# Litestream replication config. See docs/runbook.md "Restore from Litestream"
+# for restore drill commands.
+#
+# max-wal-size guards against a paused replicator quietly filling the disk:
+# if WAL exceeds 16MB without checkpointing, litestream fails fast.
+# PRAGMA wal_autocheckpoint=1000 in firm.db.connection.get_conn complements
+# this on the SQLite side.
+
+dbs:
+  - path: /data/firm.db
+    replicas:
+      - type: file
+        path: /data/litestream/firm
+        sync-interval: 1s
+        retention: 72h
+      # S3 replica — opt-in via env. The S3_BUCKET env unset disables this
+      # block at container startup. Leave commented so dev/CI doesn't need
+      # AWS creds.
+      # - type: s3
+      #   bucket: ${LITESTREAM_S3_BUCKET}
+      #   path: firm-db
+      #   region: ${LITESTREAM_S3_REGION:-us-east-1}
+      #   sync-interval: 10s
+      #   retention: 24h
+
+# Stuck-checkpointer guard: surface a replication error rather than
+# unbounded WAL growth. Tune in tandem with wal_autocheckpoint=1000
+# (default 4MB → 16MB ceiling = ~4 checkpoints' worth of slack).
+max-wal-size: 16MB

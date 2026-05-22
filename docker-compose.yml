@@ -28,5 +28,23 @@ services:
       qdrant:
         condition: service_healthy
 
+  litestream:
+    image: litestream/litestream:0.3.13
+    command: replicate -config /etc/litestream.yml
+    volumes:
+      - ./data:/data
+      - ./config/litestream.yml:/etc/litestream.yml:ro
+    depends_on:
+      firm:
+        condition: service_started
+    healthcheck:
+      # File destination is growing — verified by checking that the replica
+      # generation dir exists. (Litestream creates /data/litestream/firm/
+      # on first sync.)
+      test: ["CMD-SHELL", "test -d /data/litestream/firm || exit 1"]
+      interval: 10s
+      retries: 6
+      start_period: 30s
+
 volumes:
   qdrant_data:

@@ -28,9 +28,12 @@ from collections.abc import Sequence
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
+from opentelemetry import trace
+
 from firm.core.clock import Clock
 from firm.llm.cache import LlmCache, hash_prompt
 from firm.llm.client import CompletionResponse
+from firm.llm.cost import extract_cost_fields, get_router_config
 
 
 class LlmCacheMissError(Exception):
@@ -105,6 +108,18 @@ class CachedAnthropicClient:
     Implements the T9 :class:`firm.llm.client.AnthropicClient` Protocol via
     :meth:`complete`, and additionally exposes :meth:`messages_create` for
     callers that need the raw response dict (T18 cited-claim extraction).
+
+    Concurrency model
+    -----------------
+    The injected :class:`~firm.llm.cache.LlmCache` uses one SQLite connection
+    per thread, opened lazily via ``threading.local()``.  Reads (``cache.get``)
+    are lock-free; writes (``cache.put``, which occur only on RECORD-mode cache
+    misses) acquire a module-level ``threading.Lock`` so concurrent writers
+    across N threads do not surface ``"database is locked"`` SQLite errors.
+    The underlying DB is WAL-mode, so concurrent reads and a single write do
+    not block each other beyond the write lock.  This concurrency model is
+    stress-tested in ``tests/integration/test_cached_client_threadsafety.py``
+    with 50 parallel ``messages_create()`` calls across 10 threads.
     """
 
     def __init__(
@@ -171,6 +186,10 @@ class CachedAnthropicClient:
         The returned dict carries a synthetic ``_cache_hit`` boolean so callers
         (notably :meth:`complete`) can report cache provenance via
         :class:`CompletionResponse`.
+
+        Side-effect: stamps the currently-active OTel span (set by the
+        enclosing :func:`firm.obs.llm_span`) with the token / cost attributes
+        from the spec §10.1 schema.  See :meth:`_stamp_llm_cost`.
         """
         prompt_hash = hash_prompt(system=system, messages=messages, tools=tools)
 
@@ -183,6 +202,7 @@ class CachedAnthropicClient:
             raw = json.loads(cached.response_json)
             assert isinstance(raw, dict)
             raw["_cache_hit"] = True
+            _stamp_llm_cost(raw, model=model)
             return raw
 
         if self.mode == LlmMode.LIVE:
@@ -195,6 +215,7 @@ class CachedAnthropicClient:
                 temperature=temperature,
             )
             raw["_cache_hit"] = False
+            _stamp_llm_cost(raw, model=model)
             return raw
 
         # RECORD: cache-first, then live + write.
@@ -203,6 +224,7 @@ class CachedAnthropicClient:
             raw = json.loads(cached.response_json)
             assert isinstance(raw, dict)
             raw["_cache_hit"] = True
+            _stamp_llm_cost(raw, model=model)
             return raw
 
         raw = self._transport.messages_create(
@@ -225,6 +247,7 @@ class CachedAnthropicClient:
             output_tokens=output_tokens,
         )
         raw["_cache_hit"] = False
+        _stamp_llm_cost(raw, model=model)
         return raw
 
     def complete(
@@ -291,3 +314,47 @@ class _LazyMissingTransport:
             "CachedAnthropicClient is in CACHED mode but a live call was attempted. "
             "This indicates a missing cache entry; check FIRM_LLM_MODE / the prompt hash."
         )
+
+
+def _stamp_llm_cost(
+    raw: dict[str, object], *, model: str
+) -> None:
+    """Write token / cost attributes onto the currently active OTel span.
+
+    Field convention (spec §10.1):
+
+    * **cache hit**  -> ``cached_tokens`` = input + output (the work the cache
+      saved), ``cost_usd`` = 0.0.  ``input_tokens`` / ``output_tokens`` are
+      *not* written, because those fields imply a real, billed call.
+    * **live call**  -> ``input_tokens`` / ``output_tokens`` from the response,
+      ``cost_usd`` computed via the ``config/router.yaml`` rate card.
+      ``cached_tokens`` is not written.
+
+    No-op (no exception) when called outside any :func:`firm.obs.llm_span`
+    context — e.g. directly from a unit test or a startup probe.  This keeps
+    the wrapper safe to call from any callsite without requiring a span to
+    be active.
+
+    Implementation note: delegates to :func:`firm.llm.cost.extract_cost_fields`
+    so the (cache-hit / live) -> field-set mapping cannot drift from the T09
+    cost-ledger writer.  Cache-hit provenance is read from ``raw["_cache_hit"]``
+    directly; the caller attaches it before invoking this function.
+    """
+    span = trace.get_current_span()
+    if not span.is_recording():
+        return
+
+    fields = extract_cost_fields(raw, model=model, router_cfg=get_router_config())
+
+    if fields.cached_tokens is not None:
+        span.set_attribute("cached_tokens", fields.cached_tokens)
+        span.set_attribute("cost_usd", fields.cost_usd)
+        return
+
+    # Live call branch — input/output tokens are ints (extract_cost_fields
+    # only nulls them on cache hit).
+    assert fields.input_tokens is not None
+    assert fields.output_tokens is not None
+    span.set_attribute("input_tokens", fields.input_tokens)
+    span.set_attribute("output_tokens", fields.output_tokens)
+    span.set_attribute("cost_usd", fields.cost_usd)

@@ -1,0 +1,34 @@
+# Cost-router config (Plan 3 spec §10.2). Loaded via
+# firm.core.config.load_router_config into a typed RouterConfig.
+profiles:
+  haiku:
+    model_id: claude-haiku-4-5
+    max_tokens: 1024
+    temperature: 0.0
+    input_per_mtok_usd: 0.80
+    output_per_mtok_usd: 4.00
+  sonnet:
+    model_id: claude-sonnet-4-6
+    max_tokens: 4096
+    temperature: 0.0
+    input_per_mtok_usd: 3.00
+    output_per_mtok_usd: 15.00
+  opus:
+    model_id: claude-opus-4-7
+    max_tokens: 4096
+    temperature: 0.0
+    input_per_mtok_usd: 15.00
+    output_per_mtok_usd: 75.00
+
+# Weights for RouterFeatures.score(weights). Must include exactly the four
+# RouterFeatures field names; missing or extra keys raise at load time.
+weights:
+  risk_weight: 0.40
+  novelty: 0.20
+  complexity: 0.20
+  time_pressure: 0.20
+
+# Order is the fallback ladder used by CostRouter.call_with_fallback (T07).
+# When the primary profile fails, retry with the next entry. Profile names
+# here must exist in `profiles` above.
+fallback_chain: [sonnet, haiku]

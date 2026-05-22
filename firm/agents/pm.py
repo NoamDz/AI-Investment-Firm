@@ -14,7 +14,9 @@ It reasons only over claims produced by Research.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Callable
@@ -30,13 +32,32 @@ from firm.core.models import (
     EscalatePayload,
     FailureMode,
     HoldPayload,
+    ProfileName,
     RefusePayload,
     SellPayload,
     TypedPayload,
 )
 from firm.llm.citations import AnthropicMessagesClient
+from firm.llm.messages_client import RouterBackedMessagesClient
 from firm.llm.prompts import pm_voter_system
+from firm.llm.router import CostRouter, LLMUnavailableError
+from firm.obs import agent_span, llm_span, stamp_decision
 from firm.orchestrator.state import WorkingState
+
+
+# Provider literal used on every llm_span emitted from this module — lifted
+# to a constant so a future provider rename only changes one site.
+_PROVIDER_ANTHROPIC = "anthropic"
+
+# T08 escalation hook: PM default profile, and the profile used when the
+# sufficiency judge returned PARTIAL but a human ack overrode (so PM is
+# voting on a HITL-approved-but-marginal idea, where opus's deeper reasoning
+# is worth the cost).
+_PM_DEFAULT_PROFILE: ProfileName = "sonnet"
+_PM_ESCALATED_PROFILE: ProfileName = "opus"
+
+# Agent name stamped on router-managed cost-ledger rows (T09).
+_PM_AGENT_NAME = "pm"
 
 
 # ---------------------------------------------------------------------------
@@ -442,7 +463,61 @@ def _payload_for(action: ActionEnum, research: Decision) -> TypedPayload:
     raise AssertionError(f"unexpected aggregated action: {action}")  # pragma: no cover
 
 
-def make_pm(voter: PmVoter) -> Callable[[WorkingState], dict[str, Any]]:
+async def _vote_parallel(
+    voter: PmVoter,
+    *,
+    question: str,
+    claims: list[Claim],
+    research_rationale: str,
+    voter_model: str,
+) -> tuple[list[PmVote], list[float]]:
+    """Run three single-lens voters concurrently via asyncio.gather + to_thread.
+
+    Concurrency cap = 3 (one task per lens). Each task wraps voter.vote in its
+    own llm_span so per-call cost/timing attribution survives.  OTel ContextVars
+    are propagated by asyncio.to_thread so each llm_span nests under the caller's
+    agent_span("pm") context.
+
+    Returns
+    -------
+    tuple
+        ``(votes, per_voter_ms)``.  ``per_voter_ms[i]`` is the wall-clock
+        cost of the i-th voter's call (in the same order as ``votes``) so
+        the caller can stamp the OTel parent span with a measurement-based
+        sequential-estimate instead of a multiplicative guess.
+
+        Order guarantee: ``asyncio.gather`` preserves submission order, so
+        ``results[i]`` always corresponds to ``coros[i]`` — and therefore
+        ``votes[i]`` and ``per_voter_ms[i]`` align with the lens at index
+        ``i`` in the QUALITY / VALUATION / CATALYST list below.
+    """
+
+    def _one(lens: PmLens) -> tuple[PmVote, float]:
+        t0 = time.perf_counter()
+        with llm_span(_PROVIDER_ANTHROPIC, voter_model):
+            vote = voter.vote(
+                lens=lens,
+                question=question,
+                claims=claims,
+                research_rationale=research_rationale,
+            )
+        return vote, (time.perf_counter() - t0) * 1000.0
+
+    coros = [
+        asyncio.to_thread(_one, lens)
+        for lens in (PmLens.QUALITY, PmLens.VALUATION, PmLens.CATALYST)
+    ]
+    results = list(await asyncio.gather(*coros))
+    votes = [r[0] for r in results]
+    per_voter_ms = [r[1] for r in results]
+    return votes, per_voter_ms
+
+
+def make_pm(
+    voter: PmVoter,
+    *,
+    router: CostRouter | None = None,
+) -> Callable[[WorkingState], dict[str, Any]]:
     """Build the PM node callable.
 
     For each heartbeat the node:
@@ -470,111 +545,213 @@ def make_pm(voter: PmVoter) -> Callable[[WorkingState], dict[str, Any]]:
     original question as its own field, and rationale is the closest
     available proxy.  Plan 3 may surface the question on working state
     explicitly so the PM voter receives it verbatim.
+
+    ``router`` (T08): when provided AND the voter's client is a
+    :class:`RouterBackedMessagesClient`, each heartbeat binds the voter's
+    client to a profile (sonnet by default; opus only when the sufficiency
+    judge returned ``partial`` AND ``state["human_override_ack"]`` is truthy
+    — see TODO below). When ``router`` is ``None``, the voter calls its
+    client directly with no routing layer (pre-T08 behavior).
+
+    Catches :class:`LLMUnavailableError` raised by the voter loop and emits
+    a REFUSE Decision with ``failure_mode=LLM_UNAVAILABLE`` and a
+    conservative "all-models-exhausted" payload (T08 spec).
     """
 
+    # Read the model id off the voter so each ``llm.call`` span records the
+    # actual model that handled the request.  ``_model`` is a leading-
+    # underscore implementation attribute; treating it as read-only from
+    # the agent layer keeps PmVoter's public interface unchanged (T03 must
+    # not restructure the LLM client interface).
+    voter_model: str = getattr(voter, "_model", "unknown")
+
     def pm(state: WorkingState) -> dict[str, Any]:
-        research: Decision = state["research_decision"]
+        # T03: CM form (not decorator) so each return branch can stamp
+        # ``failure_mode`` and ``decision_id`` onto the agent span.  Mirrors
+        # the pattern used by ``firm/cli.py`` risk_node.
+        with agent_span("pm") as span:
+            research: Decision = state["research_decision"]
 
-        # ---- Pass-through path: research already terminated the heartbeat.
-        if research.action in (ActionEnum.REFUSE, ActionEnum.ESCALATE):
-            passthrough_metadata: dict[str, Any] = {
-                "agent": "pm",
-                "passthrough": True,
-            }
-            oldest_age = research.metadata.get("oldest_filing_age_days")
-            if oldest_age is not None:
-                passthrough_metadata["oldest_filing_age_days"] = oldest_age
-            passthrough = Decision(
-                id=ulid_new(),
-                decision_id_chain=[research.id],
-                action=research.action,
-                payload=research.payload,
-                rationale=research.rationale,
-                confidence=research.confidence,
-                citations=research.citations,
-                falsification_condition=research.falsification_condition,
-                escalation_reason=research.escalation_reason,
-                failure_mode=research.failure_mode,
-                metadata=passthrough_metadata,
-                nonce="pm",
-            )
-            return {"pm_decision": passthrough, "pm_votes": []}
-
-        # ---- Vote path: three sequential single-lens votes, then aggregate.
-        claims_dicts: list[dict[str, Any]] = list(state.get("claims", []))
-        claims: list[Claim] = [Claim.model_validate(c) for c in claims_dicts]
-        # Use research.rationale as the question proxy (see docstring).
-        question = research.rationale
-
-        votes: list[PmVote] = []
-        try:
-            for lens in (PmLens.QUALITY, PmLens.VALUATION, PmLens.CATALYST):
-                vote = voter.vote(
-                    lens=lens,
-                    question=question,
-                    claims=claims,
-                    research_rationale=research.rationale,
+            # ---- Pass-through path: research already terminated the heartbeat.
+            if research.action in (ActionEnum.REFUSE, ActionEnum.ESCALATE):
+                passthrough_metadata: dict[str, Any] = {
+                    "agent": "pm",
+                    "passthrough": True,
+                }
+                oldest_age = research.metadata.get("oldest_filing_age_days")
+                if oldest_age is not None:
+                    passthrough_metadata["oldest_filing_age_days"] = oldest_age
+                passthrough = Decision(
+                    id=ulid_new(),
+                    decision_id_chain=[research.id],
+                    action=research.action,
+                    payload=research.payload,
+                    rationale=research.rationale,
+                    confidence=research.confidence,
+                    citations=research.citations,
+                    falsification_condition=research.falsification_condition,
+                    escalation_reason=research.escalation_reason,
+                    failure_mode=research.failure_mode,
+                    metadata=passthrough_metadata,
+                    nonce="pm",
                 )
-                votes.append(vote)
-        except PmVoteSchemaError as exc:
-            # Mirror research.py's JudgeSchemaError path: surface as a REFUSE
-            # Decision with SCHEMA_VALIDATION_FAILED so a single malformed
-            # voter response does not crash the heartbeat.
-            schema_metadata: dict[str, Any] = {"agent": "pm"}
+                stamp_decision(span, passthrough.id, passthrough.failure_mode)
+                return {"pm_decision": passthrough, "pm_votes": []}
+
+            # ---- Vote path: three sequential single-lens votes, then aggregate.
+            claims_dicts: list[dict[str, Any]] = list(state.get("claims", []))
+            claims: list[Claim] = [Claim.model_validate(c) for c in claims_dicts]
+            # Use research.rationale as the question proxy (see docstring).
+            question = research.rationale
+
+            # T08 wiring: hoisted ahead of the voter loop so the same id is
+            # used to bind the router client AND to stamp the emitted PM
+            # Decision below. Ledger rows written by the router during
+            # voting then attribute back to this exact PM Decision id.
+            pm_decision_id = ulid_new()
+
+            if router is not None:
+                # Opus escalation hook: PARTIAL sufficiency + human-ack
+                # override means we're voting on a HITL-approved marginal
+                # idea, where opus's deeper reasoning is worth the cost.
+                # TODO(T13): ``human_override_ack`` is populated by the
+                # HITL approval flow (Section C T13/T14). The branch is
+                # dormant today; the synthetic-state test in
+                # tests/integration/test_router_wired_e2e.py exercises it.
+                sufficiency_status = state.get("sufficiency_status")
+                human_ack = state.get("human_override_ack")
+                profile: ProfileName = (
+                    _PM_ESCALATED_PROFILE
+                    if sufficiency_status == "partial" and bool(human_ack)
+                    else _PM_DEFAULT_PROFILE
+                )
+                voter_client = getattr(voter, "_client", None)
+                if isinstance(voter_client, RouterBackedMessagesClient):
+                    voter_client.bind(
+                        profile=profile,
+                        decision_id=pm_decision_id,
+                        agent=_PM_AGENT_NAME,
+                    )
+
+            t_start = time.perf_counter()
+            votes: list[PmVote] = []
+            per_voter_ms: list[float] = []
+            try:
+                votes, per_voter_ms = asyncio.run(
+                    _vote_parallel(
+                        voter,
+                        question=question,
+                        claims=claims,
+                        research_rationale=research.rationale,
+                        voter_model=voter_model,
+                    )
+                )
+            except LLMUnavailableError as exc:
+                # T08 spec: PM REFUSEs with LLM_UNAVAILABLE + the conservative
+                # "all-models-exhausted" payload when the router ladder is
+                # exhausted. Distinct rationale string so dashboards can
+                # split router exhaustion from PmVoteSchemaError-driven
+                # SCHEMA_VALIDATION_FAILED REFUSEs.
+                exhausted_metadata: dict[str, Any] = {"agent": "pm"}
+                oldest_age = research.metadata.get("oldest_filing_age_days")
+                if oldest_age is not None:
+                    exhausted_metadata["oldest_filing_age_days"] = oldest_age
+                router_refuse = Decision(
+                    id=pm_decision_id,
+                    decision_id_chain=[research.id],
+                    action=ActionEnum.REFUSE,
+                    payload=RefusePayload(reason="all-models-exhausted"),
+                    rationale=f"all model profiles exhausted: {exc!s}",
+                    confidence=0.0,
+                    citations=list(research.citations),
+                    falsification_condition=research.falsification_condition,
+                    escalation_reason=None,
+                    failure_mode=FailureMode.LLM_UNAVAILABLE,
+                    metadata=exhausted_metadata,
+                    nonce="pm",
+                )
+                stamp_decision(span, router_refuse.id, router_refuse.failure_mode)
+                return {
+                    "pm_decision": router_refuse,
+                    "pm_votes": [v.model_dump(mode="json") for v in votes],
+                }
+            except PmVoteSchemaError as exc:
+                # Mirror research.py's JudgeSchemaError path: surface as a REFUSE
+                # Decision with SCHEMA_VALIDATION_FAILED so a single malformed
+                # voter response does not crash the heartbeat.
+                schema_metadata: dict[str, Any] = {"agent": "pm"}
+                oldest_age = research.metadata.get("oldest_filing_age_days")
+                if oldest_age is not None:
+                    schema_metadata["oldest_filing_age_days"] = oldest_age
+                schema_refuse = Decision(
+                    id=pm_decision_id,
+                    decision_id_chain=[research.id],
+                    action=ActionEnum.REFUSE,
+                    payload=RefusePayload(reason="pm:schema_validation_failed"),
+                    rationale=f"PM voter response failed schema validation: {exc!s}",
+                    confidence=0.0,
+                    citations=list(research.citations),
+                    falsification_condition=research.falsification_condition,
+                    escalation_reason=None,
+                    failure_mode=FailureMode.SCHEMA_VALIDATION_FAILED,
+                    metadata=schema_metadata,
+                    nonce="pm",
+                )
+                stamp_decision(span, schema_refuse.id, schema_refuse.failure_mode)
+                return {
+                    "pm_decision": schema_refuse,
+                    "pm_votes": [v.model_dump(mode="json") for v in votes],
+                }
+
+            # Spec T24: stamp parent span with parallel timing so the OTel
+            # collector surfaces the wall-clock savings.  sequential_estimate
+            # is the sum of per-voter elapsed times (measured, not multiplied)
+            # so cached/live mixes report the honest delta.
+            parallel_elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+            sequential_estimate_ms = sum(per_voter_ms)
+            span.set_attribute("pm.voter_count", 3)
+            span.set_attribute("pm.parallel_ms", round(parallel_elapsed_ms, 2))
+            span.set_attribute(
+                "pm.sequential_estimate_ms", round(sequential_estimate_ms, 2)
+            )
+            span.set_attribute(
+                "pm.latency_delta_ms",
+                round(sequential_estimate_ms - parallel_elapsed_ms, 2),
+            )
+
+            action, confidence, combined_rationale, fmode = aggregate_votes(votes)
+            payload = _payload_for(action, research)
+
+            pm_metadata: dict[str, Any] = {"agent": "pm"}
             oldest_age = research.metadata.get("oldest_filing_age_days")
             if oldest_age is not None:
-                schema_metadata["oldest_filing_age_days"] = oldest_age
-            schema_refuse = Decision(
-                id=ulid_new(),
+                pm_metadata["oldest_filing_age_days"] = oldest_age
+
+            escalation_reason = (
+                "PM committee aggregated to ESCALATE"
+                if action == ActionEnum.ESCALATE
+                else None
+            )
+
+            decision = Decision(
+                id=pm_decision_id,
                 decision_id_chain=[research.id],
-                action=ActionEnum.REFUSE,
-                payload=RefusePayload(reason="pm:schema_validation_failed"),
-                rationale=f"PM voter response failed schema validation: {exc!s}",
-                confidence=0.0,
+                action=action,
+                payload=payload,
+                rationale=combined_rationale,
+                confidence=confidence,
                 citations=list(research.citations),
                 falsification_condition=research.falsification_condition,
-                escalation_reason=None,
-                failure_mode=FailureMode.SCHEMA_VALIDATION_FAILED,
-                metadata=schema_metadata,
+                escalation_reason=escalation_reason,
+                failure_mode=fmode,
+                metadata=pm_metadata,
                 nonce="pm",
             )
+            stamp_decision(span, decision.id, decision.failure_mode)
             return {
-                "pm_decision": schema_refuse,
+                "pm_decision": decision,
                 "pm_votes": [v.model_dump(mode="json") for v in votes],
             }
-
-        action, confidence, combined_rationale, fmode = aggregate_votes(votes)
-        payload = _payload_for(action, research)
-
-        pm_metadata: dict[str, Any] = {"agent": "pm"}
-        oldest_age = research.metadata.get("oldest_filing_age_days")
-        if oldest_age is not None:
-            pm_metadata["oldest_filing_age_days"] = oldest_age
-
-        escalation_reason = (
-            "PM committee aggregated to ESCALATE"
-            if action == ActionEnum.ESCALATE
-            else None
-        )
-
-        decision = Decision(
-            id=ulid_new(),
-            decision_id_chain=[research.id],
-            action=action,
-            payload=payload,
-            rationale=combined_rationale,
-            confidence=confidence,
-            citations=list(research.citations),
-            falsification_condition=research.falsification_condition,
-            escalation_reason=escalation_reason,
-            failure_mode=fmode,
-            metadata=pm_metadata,
-            nonce="pm",
-        )
-        return {
-            "pm_decision": decision,
-            "pm_votes": [v.model_dump(mode="json") for v in votes],
-        }
 
     return pm
 

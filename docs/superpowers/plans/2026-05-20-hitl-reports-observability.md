@@ -37,7 +37,7 @@
 - `litestream` — sibling container (binary, no Python dep) added to `docker-compose.yml`
 - Optional `polygon-api-client>=1.14` OR `newsapi-python>=0.2.7` — news adapter (gated by env vars)
 
-**Out of scope (deferred to Plan 4):** the FinanceBench-Q&A eval harness, red-team corpus, GitHub Actions CI, Terraform/AgentCore deployment, and the final 13/13 FailureMode CI invariant. None of those depend on this plan's deliverables, and bundling them in here would push the implementation surface beyond what one reviewer can sanity-check in a sitting.
+**Out of scope (deferred to Plan 4):** the FinanceBench-Q&A eval harness, red-team corpus, GitHub Actions CI, Terraform/AgentCore deployment, and the final 14/14 FailureMode CI invariant (15 enum values minus the `UNKNOWN` catch-all, all with end-to-end triggering fixtures). None of those depend on this plan's deliverables, and bundling them in here would push the implementation surface beyond what one reviewer can sanity-check in a sitting.
 
 ---
 
@@ -104,81 +104,81 @@ Tasks are ordered for subagent-driven execution. Each task is sized to fit one f
 
 This section is first because every downstream task (router, reports, HITL) emits spans, and the test invariants for those tasks assume the span schema.
 
-- [ ] **T01: Bootstrap `firm/obs/tracer.py`** — TracerProvider + custom file exporter that writes one JSON line per span to `traces/YYYY-MM-DD/run-<run_id>.jsonl`. `run_id` = `ulid_new()` minted at CLI entry. Honor `OTEL_EXPORTER` env (`file` default; `otlp` for production). Default span processor is `BatchSpanProcessor` so hot-path agent code doesn't block on disk; expose `firm.obs.tracer.use_sync_exporter()` (also via `FIRM_OTEL_SYNC=1` env) that swaps in `SimpleSpanProcessor` for test determinism. Conftest enables sync mode at session scope. Fields per span match spec §10.1: `trace_id`, `span_id`, `parent_span_id`, `agent`, `operation`, `decision_id`, `duration_ms`, `model`, `input_tokens`, `output_tokens`, `cached_tokens`, `cost_usd`, `citations`, `failure_mode`, `status`. Test in `tests/unit/test_otel_spans.py` writes a known span and asserts every field present + JSON-parsable.
+- [x] **T01: Bootstrap `firm/obs/tracer.py`** — TracerProvider + custom file exporter that writes one JSON line per span to `traces/YYYY-MM-DD/run-<run_id>.jsonl`. `run_id` = `ulid_new()` minted at CLI entry. Honor `OTEL_EXPORTER` env (`file` default; `otlp` for production). Default span processor is `BatchSpanProcessor` so hot-path agent code doesn't block on disk; expose `firm.obs.tracer.use_sync_exporter()` (also via `FIRM_OTEL_SYNC=1` env) that swaps in `SimpleSpanProcessor` for test determinism. Conftest enables sync mode at session scope. Fields per span match spec §10.1: `trace_id`, `span_id`, `parent_span_id`, `agent`, `operation`, `decision_id`, `duration_ms`, `model`, `input_tokens`, `output_tokens`, `cached_tokens`, `cost_usd`, `citations`, `failure_mode`, `status`. Test in `tests/unit/test_otel_spans.py` writes a known span and asserts every field present + JSON-parsable.
 
-- [ ] **T02: `firm/obs/spans.py` decorators** — `@agent_span("research")`, `@llm_span("anthropic", model)`, `@tool_span("fundamentals.get_ratio")`, `@retrieval_span("hybrid|rerank|pit")`. Each is a context manager that opens a span, sets `agent`/`operation` attrs, swallows-and-rethrows exceptions (setting `status="error"` + the exception class name on `failure_mode`). Test verifies a nested span sequence yields correct `parent_span_id` chaining.
+- [x] **T02: `firm/obs/spans.py` decorators** — `@agent_span("research")`, `@llm_span("anthropic", model)`, `@tool_span("fundamentals.get_ratio")`, `@retrieval_span("hybrid|rerank|pit")`. Each is a context manager that opens a span, sets `agent`/`operation` attrs, swallows-and-rethrows exceptions (setting `status="error"` + the exception class name on `failure_mode`). Test verifies a nested span sequence yields correct `parent_span_id` chaining.
 
-- [ ] **T03: Wire spans into existing agents** — Replace ad-hoc logging in `firm/agents/research.py`, `firm/agents/pm.py`, `firm/agents/risk.py`, `firm/orchestrator/graph.py` with the decorators from T02. The Risk node sets `failure_mode` from the Decision when present. The Reporter writes `decisions.jsonl` *and* the trace pointer onto each row. Spec-compliance test: `tests/integration/test_otel_run_e2e.py` runs one heartbeat and asserts ≥ 1 span per agent + 1 span per LLM call + 1 trace per retrieval stage.
+- [x] **T03: Wire spans into existing agents** — Replace ad-hoc logging in `firm/agents/research.py`, `firm/agents/pm.py`, `firm/agents/risk.py`, `firm/orchestrator/graph.py` with the decorators from T02. The Risk node sets `failure_mode` from the Decision when present. The Reporter writes `decisions.jsonl` *and* the trace pointer onto each row. Spec-compliance test: `tests/integration/test_otel_run_e2e.py` runs one heartbeat and asserts ≥ 1 span per agent + 1 span per LLM call + 1 trace per retrieval stage.
 
-- [ ] **T04: CachedAnthropicClient onto-span instrumentation** — in `firm/llm/anthropic_client.py`, when a cached hit is served, record `cached_tokens` and `cost_usd=0.0` onto the *currently active* span. On a real call, record `input_tokens`, `output_tokens`, computed `cost_usd` from a per-model rate card in `config/router.yaml`. Test confirms cached vs live paths leave distinguishable spans.
+- [x] **T04: CachedAnthropicClient onto-span instrumentation** — in `firm/llm/anthropic_client.py`, when a cached hit is served, record `cached_tokens` and `cost_usd=0.0` onto the *currently active* span. On a real call, record `input_tokens`, `output_tokens`, computed `cost_usd` from a per-model rate card in `config/router.yaml`. Test confirms cached vs live paths leave distinguishable spans.
 
 ### Section B — Cost router + fallback ladder (§10.2)
 
-- [ ] **T05: `RouterFeatures` model** — `firm/core/models.py`, fields `risk_weight: float`, `novelty: float`, `complexity: float`, `time_pressure: float`. Add a `score(weights) -> profile_name` static method. Test exhaustively covers low/standard/high-risk boundary cases.
+- [x] **T05: `RouterFeatures` model** — `firm/core/models.py`, fields `risk_weight: float`, `novelty: float`, `complexity: float`, `time_pressure: float`. Add a `score(weights) -> profile_name` static method. Test exhaustively covers low/standard/high-risk boundary cases.
 
-- [ ] **T06: `config/router.yaml`** — Three profiles `{haiku, sonnet, opus}`. Each carries `model_id`, `max_tokens`, `temperature`, `input_per_mtok_usd`, `output_per_mtok_usd`. Top-level `weights` for the scoring function and explicit `fallback_chain: [sonnet, haiku]`. Load via `firm.core.config.load_router_config()` mirroring `load_policy()`. Test asserts every profile resolves to a real model_id from `config/llm.yaml`.
+- [x] **T06: `config/router.yaml`** — Three profiles `{haiku, sonnet, opus}`. Each carries `model_id`, `max_tokens`, `temperature`, `input_per_mtok_usd`, `output_per_mtok_usd`. Top-level `weights` for the scoring function and explicit `fallback_chain: [sonnet, haiku]`. Load via `firm.core.config.load_router_config()` mirroring `load_policy()`. Test asserts every profile resolves to a real model_id from `config/llm.yaml`.
 
-- [ ] **T07: `firm/llm/router.py`** — `CostRouter(features, anthropic_client) -> ProfileChoice`. Public API: `route_for_decision(features) -> profile` and `call_with_fallback(profile, system, messages, tools) -> AnthropicResponse`. The fallback ladder retries Sonnet with truncated chunks once, then downgrades to Haiku with `max_tokens *= 0.5`, then raises `LLMUnavailableError`. Test the ladder by injecting a stub client whose first two calls 503.
+- [x] **T07: `firm/llm/router.py`** — `CostRouter(features, anthropic_client) -> ProfileChoice`. Public API: `route_for_decision(features) -> profile` and `call_with_fallback(profile, system, messages, tools) -> AnthropicResponse`. The fallback ladder retries Sonnet with truncated chunks once, then downgrades to Haiku with `max_tokens *= 0.5`, then raises `LLMUnavailableError`. Test the ladder by injecting a stub client whose first two calls 503.
 
-- [ ] **T08: Wire router into Research + PM** — Research uses Sonnet by default; passes `RouterFeatures(novelty=high, complexity=high)` for first-of-kind tickers (the same signal `escalate_new_ticker` watches). PM voters use Sonnet; only escalate to Opus when sufficiency judge returned PARTIAL but the human ack overrode. On `LLMUnavailableError`: REFUSE with `failure_mode=LLM_UNAVAILABLE`, conservative payload "all-models-exhausted". Spec-compliance test: simulate Sonnet down → assert REFUSE path + cost ledger row written.
+- [x] **T08: Wire router into Research + PM** — Research uses Sonnet by default; passes `RouterFeatures(novelty=high, complexity=high)` for first-of-kind tickers (the same signal `escalate_new_ticker` watches). PM voters use Sonnet; only escalate to Opus when sufficiency judge returned PARTIAL but the human ack overrode. On `LLMUnavailableError`: REFUSE with `failure_mode=LLM_UNAVAILABLE`, conservative payload "all-models-exhausted". Spec-compliance test: simulate Sonnet down → assert REFUSE path + cost ledger row written.
 
-- [ ] **T09: `cost_ledger` table** — Add to `firm/db/schema.sql`: `(decision_id, agent, model, input_tokens, output_tokens, cached_tokens, cost_usd, created_at)`. Append-only. The router writes one row per LLM call (cached or live). Test asserts schema indices on `decision_id` and `created_at`.
+- [x] **T09: `cost_ledger` table** — Add to `firm/db/schema.sql`: `(decision_id, agent, model, input_tokens, output_tokens, cached_tokens, cost_usd, created_at)`. Append-only. The router writes one row per LLM call (cached or live). Test asserts schema indices on `decision_id` and `created_at`.
 
 ### Section C — HITL via signed Slack (§8.4)
 
-- [ ] **T10: `firm/hitl/signing.py`** — `sign(decision_id, approver_id, ts, secret) -> str`, `verify(payload, signature, secret) -> bool`. HMAC-SHA256 over a canonical `f"{decision_id}|{approver_id}|{ts}"`. Reject signatures older than 5 minutes (replay defense). Test the tampering paths: wrong secret, wrong approver, swapped decision_id, expired timestamp.
+- [x] **T10: `firm/hitl/signing.py`** — `sign(decision_id, approver_id, ts, secret) -> str`, `verify(payload, signature, secret) -> bool`. HMAC-SHA256 over a canonical `f"{decision_id}|{approver_id}|{ts}"`. Reject signatures older than 5 minutes (replay defense). Test the tampering paths: wrong secret, wrong approver, swapped decision_id, expired timestamp.
 
-- [ ] **T11: `firm/hitl/slack.py`** — Slim FastAPI app exposing `POST /slack/interactive`. Verifies Slack's request-signing header (per Slack docs) **and** our internal HMAC on the button payload. On verified ack, calls the existing `hitl.ack(decision_id, approver_id)` which already writes to `audit_log` and unblocks the LangGraph node. Returns 200 with an updated ephemeral message. Test with stubbed Slack signing + golden payload fixture.
+- [x] **T11: `firm/hitl/slack.py`** — Slim FastAPI app exposing `POST /slack/interactive`. Verifies Slack's request-signing header (per Slack docs) **and** our internal HMAC on the button payload. On verified ack, calls the existing `hitl.ack(decision_id, approver_id)` which already writes to `audit_log` and unblocks the LangGraph node. Returns 200 with an updated ephemeral message. Test with stubbed Slack signing + golden payload fixture.
 
-- [ ] **T12: Slack notifier on HITL entry** — When the LangGraph reaches an ESCALATE node, push a threaded message to `policy.hitl.slack_channel` containing the Decision summary + a `Approve`/`Reject` button pair, each carrying a signed payload (T10). Reuse the existing `slack-sdk` `WebClient` so we have a single dependency. Test: ESCALATE Decision in unit fixture → asserts one `chat.postMessage` mock call with two buttons.
+- [x] **T12: Slack notifier on HITL entry** — When the LangGraph reaches an ESCALATE node, push a threaded message to `policy.hitl.slack_channel` containing the Decision summary + a `Approve`/`Reject` button pair, each carrying a signed payload (T10). Reuse the existing `slack-sdk` `WebClient` so we have a single dependency. Test: ESCALATE Decision in unit fixture → asserts one `chat.postMessage` mock call with two buttons.
 
-- [ ] **T13: `--dev-ack` CLI fallback** — Keep `firm.cli.ack <decision_id>` working unchanged but require `--dev-ack` flag in non-test environments (otherwise emit a Slack reminder and exit 1). Ensures we don't accidentally ship a backdoor. Test: missing flag → exits 1; with flag → original behavior.
+- [x] **T13: `--dev-ack` CLI fallback** — Keep `firm.cli.ack <decision_id>` working unchanged but require `--dev-ack` flag in non-test environments (otherwise emit a Slack reminder and exit 1). Ensures we don't accidentally ship a backdoor. Test: missing flag → exits 1; with flag → original behavior.
 
-- [ ] **T13a: Dual-key Slack secret rotation** — Extend `firm/hitl/signing.py:verify()` to accept either `FIRM_SLACK_SECRET` or optional `FIRM_SLACK_SECRET_PREVIOUS`, valid only while `FIRM_SLACK_SECRET_ROTATED_AT` is within a configurable grace window (default 24h). Logs which key matched so audit can trace rotation events. Runbook section in T29 documents the procedure: set previous → set new → wait window → unset previous. Test: valid sig under previous key during window accepted; same sig after window rejected; tampered sig rejected under both keys.
+- [x] **T13a: Dual-key Slack secret rotation** — Extend `firm/hitl/signing.py:verify()` to accept either `FIRM_SLACK_SECRET` or optional `FIRM_SLACK_SECRET_PREVIOUS`, valid only while `FIRM_SLACK_SECRET_ROTATED_AT` is within a configurable grace window (default 24h). Logs which key matched so audit can trace rotation events. Runbook section in T29 documents the procedure: set previous → set new → wait window → unset previous. Test: valid sig under previous key during window accepted; same sig after window rejected; tampered sig rejected under both keys.
 
-- [ ] **T14: `hitl_queue.approver_id` NOT NULL** — `firm/db/schema.sql` migration: the approver_id column is currently nullable from Plan 1's stub. Tighten to NOT NULL since Slack always supplies it. Test: insertion without approver_id raises `IntegrityError`.
+- [x] **T14: `hitl_queue.approver_id` NOT NULL** — `firm/db/schema.sql` migration: the approver_id column is currently nullable from Plan 1's stub. Tighten to NOT NULL since Slack always supplies it. Test: insertion without approver_id raises `IntegrityError`.
 
 ### Section D — Daily reports + EOD reconcile (§5.7, §10.3)
 
-- [ ] **T15: `firm.reports.xlsx` writer** — Writes `positions.xlsx` with two sheets (`Positions`, `P&L`). Sources data from the broker (positions/cash at close) and `decisions` table (P&L attribution). Golden-file test compares cell-by-cell.
+- [x] **T15: `firm.reports.xlsx` writer** — Writes `positions.xlsx` with two sheets (`Positions`, `P&L`). Sources data from the broker (positions/cash at close) and `decisions` table (P&L attribution). Golden-file test compares cell-by-cell.
 
-- [ ] **T16: `firm.reports.daily` Markdown** — `render_daily_report(date, db, broker, traces_path) -> Path`. Uses Jinja2 template `md_template.j2`. Sections: (1) Decision summary (count, BUY/SELL/HOLD/REFUSE/ESCALATE histogram with failure_mode breakdown), (2) Cost summary (group cost_ledger by model — output matches spec §10.2 example exactly), (3) `RECONCILIATION (EOD)` block (T17). Golden file in `tests/fixtures/reports/2024-03-13/daily_report.md`.
+- [x] **T16: `firm.reports.daily` Markdown** — `render_daily_report(date, db, broker, traces_path) -> Path`. Uses Jinja2 template `md_template.j2`. Sections: (1) Decision summary (count, BUY/SELL/HOLD/REFUSE/ESCALATE histogram with failure_mode breakdown), (2) Cost summary (group cost_ledger by model — output matches spec §10.2 example exactly), (3) `RECONCILIATION (EOD)` block (T17). Golden file in `tests/fixtures/reports/2024-03-13/daily_report.md`.
 
-- [ ] **T17: EOD reconcile block** — Re-runs `reconcile_on_boot()` after market close, formats output per spec §5.7. Non-empty diff renders the section in red (Markdown footnote convention) and links to `audit_log` entry. Test the three drift scenarios (clean / position-drift / cash-drift) against golden output.
+- [x] **T17: EOD reconcile block** — Re-runs `reconcile_on_boot()` after market close, formats output per spec §5.7. Non-empty diff renders the section in red (Markdown footnote convention) and links to `audit_log` entry. Test the three drift scenarios (clean / position-drift / cash-drift) against golden output.
 
-- [ ] **T18: `make report` target** — `firm.cli report --date YYYY-MM-DD` writes the bundle into `reports/YYYY-MM-DD/`. Idempotent: re-running overwrites. CI committed-bundle invariant: the sample run committed under `sample_runs/2024-03-13/` includes the daily report bundle.
+- [x] **T18: `make report` target** — `firm.cli report --date YYYY-MM-DD` writes the bundle into `reports/YYYY-MM-DD/`. Idempotent: re-running overwrites. CI committed-bundle invariant: the sample run committed under `sample_runs/2024-03-13/` includes the daily report bundle.
 
 ### Section E — Corpus adapters (§6.3)
 
-- [ ] **T19: `firm.rag.transcripts.TranscriptsCorpusSource`** — Local JSONL adapter (path from `config/rag.yaml:corpus.transcripts_path`). Each line: `{ticker, quarter, fiscal_year, published_at, body}`. `published_at` required; missing rejected per spec §6.3 discipline. Reuses the same chunker + contextual augmentation as FinanceBench. Test the no-NULL invariant.
+- [x] **T19: `firm.rag.transcripts.TranscriptsCorpusSource`** — Local JSONL adapter (path from `config/rag.yaml:corpus.transcripts_path`). Each line: `{ticker, quarter, fiscal_year, published_at, body}`. `published_at` required; missing rejected per spec §6.3 discipline. Reuses the same chunker + contextual augmentation as FinanceBench. Test the no-NULL invariant.
 
-- [ ] **T20: `firm.rag.news.NewsCorpusSource`** — Polygon or NewsAPI client gated by `POLYGON_API_KEY` / `NEWSAPI_KEY` env. Without creds it's a no-op (logs once, returns empty iter). With creds it polls rolling 12 months for the 30-ticker universe. Test both paths.
+- [x] **T20: `firm.rag.news.NewsCorpusSource`** — Polygon or NewsAPI client gated by `POLYGON_API_KEY` / `NEWSAPI_KEY` env. Without creds it's a no-op (logs once, returns empty iter). With creds it polls rolling 12 months for the 30-ticker universe. Test both paths.
 
-- [ ] **T20a: News rate limiting + opt-in flag** — Wrap the Polygon/NewsAPI client in `firm/rag/_rate_limit.py:TokenBucket` (4 req/min ceiling — one below Polygon free tier's 5/min cap) with exponential backoff on 429. Cache headlines per `(ticker, YYYY-MM-DD)` in SQLite so a heartbeat retry doesn't double-spend the quota. Gate the entire adapter behind `FIRM_NEWS_ENABLED` (default `false`); production env opts in explicitly. Test: 6 rapid calls → only 4 hit the wire, 2 wait; 429 response → 1 backoff before retry; disabled flag → no network call.
+- [x] **T20a: News rate limiting + opt-in flag** — Wrap the Polygon/NewsAPI client in `firm/rag/_rate_limit.py:TokenBucket` (4 req/min ceiling — one below Polygon free tier's 5/min cap) with exponential backoff on 429. Cache headlines per `(ticker, YYYY-MM-DD)` in SQLite so a heartbeat retry doesn't double-spend the quota. Gate the entire adapter behind `FIRM_NEWS_ENABLED` (default `false`); production env opts in explicitly. Test: 6 rapid calls → only 4 hit the wire, 2 wait; 429 response → 1 backoff before retry; disabled flag → no network call.
 
-- [ ] **T21: Multi-source `make ingest`** — Update `firm.cli ingest` to take `--source {financebench,transcripts,news,all}` (default `all`). Each source contributes chunks to the same `firm_chunks` Qdrant collection; the chunk payload carries `source: str` so retrieval can be filtered if needed. Test ingestion is order-independent and idempotent (uses the now-non-destructive `create_collection` from Plan 2's hardening).
+- [x] **T21: Multi-source `make ingest`** — Update `firm.cli ingest` to take `--source {financebench,transcripts,news,all}` (default `all`). Each source contributes chunks to the same `firm_chunks` Qdrant collection; the chunk payload carries `source: str` so retrieval can be filtered if needed. Test ingestion is order-independent and idempotent (uses the now-non-destructive `create_collection` from Plan 2's hardening).
 
 ### Section F — Litestream live
 
-- [ ] **T22: Litestream container** — Add a `litestream` service to `docker-compose.yml` running `litestream replicate` against `data/firm.db` to a `data/litestream/` directory (file destination; S3 is optional via env). Healthcheck: file destination growing. Config `config/litestream.yml` sets `max-wal-size: 16MB` so a stuck checkpointer surfaces as a replication error rather than unbounded growth; `PRAGMA wal_autocheckpoint=1000` in `firm/db/__init__.py` complements this on the SQLite side. Test: integration `docker compose up firm litestream && stop firm && verify litestream caught up`.
+- [x] **T22: Litestream container** — Add a `litestream` service to `docker-compose.yml` running `litestream replicate` against `data/firm.db` to a `data/litestream/` directory (file destination; S3 is optional via env). Healthcheck: file destination growing. Config `config/litestream.yml` sets `max-wal-size: 16MB` so a stuck checkpointer surfaces as a replication error rather than unbounded growth; `PRAGMA wal_autocheckpoint=1000` in `firm/db/__init__.py` complements this on the SQLite side. Test: integration `docker compose up firm litestream && stop firm && verify litestream caught up`.
 
-- [ ] **T23: PIT restore drill** — `docs/runbook.md` gets a "Restore from Litestream" section with exact commands. CI invariant: `make litestream-drill` (a target that restores into a temp DB and asserts row counts match) runs green. After the drill, an additional assertion: `os.path.getsize('data/firm.db-wal') < 16 * 1024 * 1024` — catches a paused-but-undetected replicator before it eats the disk.
+- [x] **T23: PIT restore drill** — `docs/runbook.md` gets a "Restore from Litestream" section with exact commands. CI invariant: `make litestream-drill` (a target that restores into a temp DB and asserts row counts match) runs green. After the drill, an additional assertion: `os.path.getsize('data/firm.db-wal') < 16 * 1024 * 1024` — catches a paused-but-undetected replicator before it eats the disk.
 
-- [ ] **T23a: `firm doctor` health command** — New `firm.cli doctor` subcommand prints WAL size, last-checkpoint age, last-replication timestamp, Qdrant `points_count`, and cost-ledger row count for today. One line per check, `OK` / `WARN` / `FAIL` prefix. Ops wires this to monitoring (cron + alert on any non-OK line). Test: snapshot the output format against a golden fixture.
+- [x] **T23a: `firm doctor` health command** — New `firm.cli doctor` subcommand prints WAL size, last-checkpoint age, last-replication timestamp, Qdrant `points_count`, and cost-ledger row count for today. One line per check, `OK` / `WARN` / `FAIL` prefix. Ops wires this to monitoring (cron + alert on any non-OK line). Test: snapshot the output format against a golden fixture.
 
 ### Section G — Hardening pickups from Plan 2 audit
 
 These are the loose ends the Plan 2 audit surfaced (the four 🔴/🟡 fixes already landed inline). They are listed here so they aren't lost; each is a 1-task subagent invocation.
 
-- [ ] **T24: Parallel PM voting** — Plan 2 ran the three voters sequentially. Plan 3's OTel + cost router make parallel execution observable and cheap. Convert `make_pm.invoke` to use `asyncio.gather` over the three voters; cap concurrency at 3. Save the latency delta into the OTel parent span.
+- [x] **T24: Parallel PM voting** — Plan 2 ran the three voters sequentially. Plan 3's OTel + cost router make parallel execution observable and cheap. Convert `make_pm.invoke` to use `asyncio.gather` over the three voters; cap concurrency at 3. Save the latency delta into the OTel parent span.
 
-- [ ] **T24a: Cached-client thread-safety** — Prerequisite for T24. The current `CachedAnthropicClient` uses a single `sqlite3.connect(...)` from one thread. Convert to a `threading.local()` connection factory (each thread opens its own connection lazily) with a module-level `threading.Lock` only around writes — reads stay lock-free. Document the concurrency model in a `CachedAnthropicClient` class docstring. Stress test: 50 parallel `extract()` calls across 10 threads, assert no `sqlite3.ProgrammingError` and cache-hit rate matches sequential baseline.
+- [x] **T24a: Cached-client thread-safety** — Prerequisite for T24. The current `CachedAnthropicClient` uses a single `sqlite3.connect(...)` from one thread. Convert to a `threading.local()` connection factory (each thread opens its own connection lazily) with a module-level `threading.Lock` only around writes — reads stay lock-free. Document the concurrency model in a `CachedAnthropicClient` class docstring. Stress test: 50 parallel `extract()` calls across 10 threads, assert no `sqlite3.ProgrammingError` and cache-hit rate matches sequential baseline.
 
-- [ ] **T25: Full FailureMode CI invariant (partial)** — Plan 2 brought coverage to 9 modes (gate UNCITED_CLAIM was deferred enum-only by design). Plan 3 adds 3 more triggering fixtures (`LLM_UNAVAILABLE`, `RECONCILIATION_DRIFT`, `SIGNED_APPROVAL_INVALID`). Leaves the last gap (UNCITED_CLAIM end-to-end) for Plan 4 because it ties into the red-team corpus.
+- [x] **T25: Full FailureMode CI invariant (partial)** — Plan 2 brought coverage to 9 modes (gate UNCITED_CLAIM was deferred enum-only by design). Plan 3 adds 3 more triggering fixtures (`LLM_UNAVAILABLE`, `RECONCILIATION_DRIFT`, `SIGNED_APPROVAL_INVALID`). Leaves the last gap (UNCITED_CLAIM end-to-end) for Plan 4 because it ties into the red-team corpus.
 
-- [ ] **T26: Cost ledger smoke** — `make demo` writes ≥ 1 row to `cost_ledger`. Reporter prints "Cost so far today: $0.0XX" at heartbeat end. Test asserts the print line matches `Cost so far today: \$\d+\.\d{3}`.
+- [x] **T26: Cost ledger smoke** — `make demo` writes ≥ 1 row to `cost_ledger`. Reporter prints "Cost so far today: $0.0XX" at heartbeat end. Test asserts the print line matches `Cost so far today: \$\d+\.\d{3}`.
 
-- [ ] **T27: Hooks for the Plan 2 test-runner audit** — Findings from the post-Plan-2 background test run (250/252 collectible tests pass; verdict 🟡):
+- [x] **T27: Hooks for the Plan 2 test-runner audit** — Findings from the post-Plan-2 background test run (250/252 collectible tests pass; verdict 🟡):
 
   - **T27a: Raise `test_cli_run_produces_decision` subprocess timeout.** `tests/integration/test_cli.py:108` uses `timeout=120`. On cold-machine runs the BM25 pre-pass + `NomicEmbedder._lazy_load` (`sentence_transformers` + torch warmup) + Qdrant init regularly exceeds 120 s. Bump to `timeout=300` AND split the embedder warmup out into a session-scoped `pytest` fixture so subsequent CLI tests don't re-pay the warmup cost. Add a runtime assertion at heartbeat end: "warmup completed in N s" so regressions are visible.
 
@@ -192,11 +192,11 @@ These are the loose ends the Plan 2 audit surfaced (the four 🔴/🟡 fixes alr
 
 ### Section H — Documentation + sample run
 
-- [ ] **T28: Update `README.md`** — Status table marks Plan 3 done. Quickstart section adds the Slack `.env` block and a one-liner for `make report`. Mention Litestream in "Restore from backup" instead of the volume-tar approach.
+- [x] **T28: Update `README.md`** — Status table marks Plan 3 done. Quickstart section adds the Slack `.env` block and a one-liner for `make report`. Mention Litestream in "Restore from backup" instead of the volume-tar approach.
 
-- [ ] **T29: Update `docs/runbook.md`** — New sections: (1) Slack approval flow (signature verification, replay window, dev fallback), (2) Trace inspection (`jq` recipes against `run-<id>.jsonl`), (3) Cost ledger inspection (SQL queries against `cost_ledger`), (4) Litestream restore drill.
+- [x] **T29: Update `docs/runbook.md`** — New sections: (1) Slack approval flow (signature verification, replay window, dev fallback), (2) Trace inspection (`jq` recipes against `run-<id>.jsonl`), (3) Cost ledger inspection (SQL queries against `cost_ledger`), (4) Litestream restore drill.
 
-- [ ] **T30: Sample run** — Commit `sample_runs/2024-03-13/` with `daily_report.md`, `positions.xlsx`, `decisions.jsonl`, `trace.jsonl`. This is the reviewer's end-to-end replay artifact (spec §10.1 final line).
+- [x] **T30: Sample run** — Commit `sample_runs/2024-03-13/` with `daily_report.md`, `positions.xlsx`, `decisions.jsonl`, `trace.jsonl`. This is the reviewer's end-to-end replay artifact (spec §10.1 final line).
 
 ---
 
@@ -214,7 +214,7 @@ These are the loose ends the Plan 2 audit surfaced (the four 🔴/🟡 fixes alr
 | Non-empty diff renders red | `test_daily_report.test_drift_renders_red` | `tests/unit/` |
 | `published_at` NOT NULL across all corpus sources | `test_transcripts_source` + `test_news_source` | `tests/unit/` |
 | Litestream catches up after firm restart | `make litestream-drill` | `Makefile` |
-| FailureMode coverage ≥ 12/13 | extends Plan 2's `test_failure_mode_coverage` | `tests/unit/` |
+| FailureMode coverage — 7 fixtures + 7 documented `ALLOWED_GAPS` (full 15-value enumeration) | extends Plan 2's `test_failure_mode_coverage` | `tests/integration/test_failure_mode_coverage.py` |
 
 ---
 
@@ -233,7 +233,7 @@ Each risk below has a planned mitigation; the right column names the task that d
 - Red-team corpus 50 cases across 10 injection classes (spec §8.5).
 - GitHub Actions CI workflows incl. golden-file + Litestream drill (spec §11.3).
 - Terraform/AgentCore deployment artefacts (spec §11.1, §11.2).
-- Final 13/13 FailureMode coverage including UNCITED_CLAIM end-to-end.
+- Final 14/14 FailureMode end-to-end fixtures (15 enum values minus `UNKNOWN` catch-all) including UNCITED_CLAIM — promotes the 7 modes currently in `ALLOWED_GAPS` to first-class triggering fixtures.
 
 **Carried forward documented limitations:** PIT forward-reference leakage (spec §6.4, runbook §"Known Limitations" added in Plan 2).
 

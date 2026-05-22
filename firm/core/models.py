@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from enum import StrEnum
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, ClassVar, Literal, Union
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -29,6 +29,8 @@ class FailureMode(StrEnum):
     TOOL_PERMISSION_DENIED = "tool_permission_denied"
     UNAPPROVED_HIGH_RISK = "unapproved_high_risk"
     BROKER_UNAVAILABLE = "broker_unavailable"
+    RECONCILIATION_DRIFT = "reconciliation_drift"
+    SIGNED_APPROVAL_INVALID = "signed_approval_invalid"
     UNKNOWN = "unknown"
 
 
@@ -135,3 +137,93 @@ class Decision(BaseModel):
     failure_mode: FailureMode | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     nonce: str = Field(min_length=1)
+
+
+# ---------------------------------------------------------------------------
+# Router features (Plan 3 T05)
+# ---------------------------------------------------------------------------
+#
+# Per-request features the CostRouter uses to pick a model profile.  Values are
+# normalized scalars in ``[0.0, 1.0]``; the upstream caller (Research / PM) is
+# responsible for projecting raw inputs (e.g. portfolio %-of-NAV, novelty
+# score, prompt-token estimate, SLA deadline distance) into this space.
+#
+# ``score()`` takes the per-feature *weights* (one float per feature name)
+# supplied by ``config/router.yaml`` (T06), computes the weighted-sum of
+# features normalized by the weight total, and maps the result to one of the
+# three model profiles ``haiku`` / ``sonnet`` / ``opus``.  The thresholds are
+# fixed here rather than in config because they encode the contract with the
+# profile names themselves (see Plan 3 §4 "Cost-aware routing").
+
+# Normalized-score cutoffs for profile selection.  ``score < _HAIKU_MAX`` →
+# haiku; ``_HAIKU_MAX <= score < _OPUS_MIN`` → sonnet; ``score >= _OPUS_MIN``
+# → opus.
+_HAIKU_MAX = 0.33   # normalized score strictly below this → haiku
+_OPUS_MIN = 0.66    # normalized score at or above this → opus
+
+# Profile-name alias.  T06's router-config loader imports this to validate
+# the ``profiles:`` keys in ``config/router.yaml``.  Kept as a ``Literal``
+# (not a ``StrEnum``) — lighter, no runtime cost, and matches how other
+# config-driven name unions are typed in this codebase.
+ProfileName = Literal["haiku", "sonnet", "opus"]
+
+
+class RouterFeatures(BaseModel):
+    """Per-request features used by the CostRouter to pick a model profile."""
+
+    risk_weight: float = Field(ge=0.0, le=1.0)
+    novelty: float = Field(ge=0.0, le=1.0)
+    complexity: float = Field(ge=0.0, le=1.0)
+    time_pressure: float = Field(ge=0.0, le=1.0)
+
+    _FEATURE_NAMES: ClassVar[tuple[str, ...]] = (
+        "risk_weight",
+        "novelty",
+        "complexity",
+        "time_pressure",
+    )
+
+    def score(self, weights: dict[str, float]) -> ProfileName:
+        """Return the model profile name (``"haiku"`` / ``"sonnet"`` / ``"opus"``).
+
+        Computes a weighted sum of the four features using ``weights`` and
+        normalizes by the sum of weights so the result lies in ``[0, 1]``
+        independent of weight magnitudes.  Buckets:
+
+        * ``s < _HAIKU_MAX`` → ``"haiku"`` (cheap, low-stakes)
+        * ``_HAIKU_MAX ≤ s < _OPUS_MIN`` → ``"sonnet"`` (standard)
+        * ``s ≥ _OPUS_MIN`` → ``"opus"`` (high-stakes)
+
+        Raises ``ValueError`` if ``weights`` contains an unknown key, if any
+        feature key is missing from ``weights``, if any weight is negative,
+        or if all weights sum to zero — all four indicate a router-config
+        bug and should fail loudly rather than be masked by a silent default.
+        """
+        # Reject unknown keys up front: a typo in router.yaml should not be
+        # silently dropped.
+        extra = set(weights) - set(self._FEATURE_NAMES)
+        if extra:
+            raise ValueError(f"unknown router weight key(s): {sorted(extra)}")
+
+        # Validate weight shape & sign so callers see config errors, not
+        # arithmetic ones.
+        weighted_sum = 0.0
+        weight_total = 0.0
+        for name in self._FEATURE_NAMES:
+            if name not in weights:
+                raise ValueError(f"missing router weight for: {name}")
+            w = float(weights[name])
+            if w < 0.0:
+                raise ValueError(f"negative router weight for {name}: {w}")
+            weighted_sum += w * float(getattr(self, name))
+            weight_total += w
+
+        if weight_total == 0.0:
+            raise ValueError("router weights sum to zero")
+
+        s = weighted_sum / weight_total
+        if s < _HAIKU_MAX:
+            return "haiku"
+        if s < _OPUS_MIN:
+            return "sonnet"
+        return "opus"

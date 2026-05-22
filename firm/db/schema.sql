@@ -46,6 +46,8 @@ CREATE TABLE IF NOT EXISTS cash (
 );
 
 -- Decisions awaiting human approval. See spec §3.1, §8.4.
+-- NOTE: CREATE TABLE IF NOT EXISTS will NOT alter an existing table. This constraint
+-- applies to fresh DBs only. Delete data/firm.db to pick it up in dev.
 CREATE TABLE IF NOT EXISTS hitl_queue (
     decision_id     TEXT PRIMARY KEY,
     queued_at       TEXT NOT NULL,
@@ -53,6 +55,9 @@ CREATE TABLE IF NOT EXISTS hitl_queue (
     approver        TEXT,
     approval_nonce  TEXT,
     decided_at      TEXT,
+    -- approver must be supplied for decided rows; pending and timed_out rows may have
+    -- NULL approver — Slack/CLI always supplies it on approval/rejection (T14).
+    CHECK (status = 'pending' OR status = 'timed_out' OR approver IS NOT NULL),
     FOREIGN KEY (decision_id) REFERENCES decisions(id)
 );
 CREATE INDEX IF NOT EXISTS idx_hitl_queue_status ON hitl_queue(status);
@@ -102,3 +107,38 @@ CREATE TABLE IF NOT EXISTS ingest_runs (
     status          TEXT NOT NULL CHECK (status IN ('running','completed','failed')),
     error           TEXT
 );
+
+-- Append-only per-LLM-call cost ledger. See Plan 3 §10.2 / T09.
+-- The router writes one row per successful call (cached or live); cached rows
+-- have input_tokens=NULL, output_tokens=NULL, cost_usd=0.0 and the cached
+-- token count goes into cached_tokens. Live rows have cached_tokens=NULL.
+-- Append-only: no UPDATE/DELETE path; the AUTOINCREMENT id keeps inserts
+-- monotonic. No FK on decision_id because a call may be logged before the
+-- enclosing decisions row is written (or for heartbeats with no Decision).
+CREATE TABLE IF NOT EXISTS cost_ledger (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    decision_id     TEXT NOT NULL,
+    agent           TEXT NOT NULL,
+    model           TEXT NOT NULL,
+    input_tokens    INTEGER,
+    output_tokens   INTEGER,
+    cached_tokens   INTEGER,
+    cost_usd        REAL NOT NULL,
+    created_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cost_ledger_decision_id ON cost_ledger(decision_id);
+CREATE INDEX IF NOT EXISTS idx_cost_ledger_created_at ON cost_ledger(created_at);
+
+-- Per-(ticker, day) raw response cache for the news adapter. See Plan 3 §T20a.
+-- Prevents heartbeat retries from double-spending the upstream rate-limit
+-- quota; cached rows return the original JSON body byte-for-byte. day is the
+-- UTC YYYY-MM-DD partition of the request's "as-of" time (clock.now()).
+CREATE TABLE IF NOT EXISTS news_cache (
+    ticker       TEXT NOT NULL,
+    day          TEXT NOT NULL,
+    provider     TEXT NOT NULL,
+    response_json TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY (ticker, day, provider)
+);
+CREATE INDEX IF NOT EXISTS idx_news_cache_created ON news_cache(created_at);

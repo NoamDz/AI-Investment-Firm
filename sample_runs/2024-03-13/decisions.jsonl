@@ -1,0 +1,2 @@
+{"ts": "2024-03-13T14:30:00+00:00", "research_decision": {"id": "dec-buy-1", "action": "BUY", "payload": {"kind": "buy", "ticker": "AAPL", "shares": "100"}, "rationale": "Strong earnings momentum", "confidence": 0.85, "failure_mode": null}, "trace_id": "00000000000000000000000000000001"}
+{"ts": "2024-03-13T16:00:00+00:00", "research_decision": {"id": "dec-hold-1", "action": "HOLD", "payload": {"kind": "hold", "reason": "wait for catalyst"}, "rationale": "No clear edge", "confidence": 0.60, "failure_mode": null}, "trace_id": "00000000000000000000000000000002"}

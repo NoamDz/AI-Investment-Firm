@@ -126,6 +126,7 @@ class IngestPipeline:
                     doc_for_chunker,
                     target_tokens=target_tokens,
                     overlap_tokens=overlap_tokens,
+                    source=self._source.name,
                 )
                 if not chunks:
                     docs_completed += 1

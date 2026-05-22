@@ -1,0 +1,4 @@
+# T27e: stable line endings regardless of operator OS.
+# Tracked text files stay LF in the repo even when checked out on Windows
+# with autocrlf enabled — prevents the CRLF/LF churn Plan 2 audit flagged.
+* text=auto eol=lf

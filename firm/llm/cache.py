@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
+import threading
 from collections.abc import Sequence
-from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,6 +25,10 @@ from pydantic import BaseModel
 
 from firm.core.clock import Clock
 from firm.db.connection import get_conn
+
+# Serialises concurrent put() calls so the SQLite WAL doesn't surface
+# "database is locked" errors when multiple threads write simultaneously.
+_WRITE_LOCK = threading.Lock()
 
 
 class CachedResponse(BaseModel):
@@ -72,22 +77,57 @@ def _parse_created_at(raw: str) -> datetime:
 class LlmCache:
     """SQLite-backed deterministic LLM response cache.
 
-    Each ``get``/``put`` opens a short-lived connection so the cache is safe to
-    share across threads. The underlying connection is WAL-mode with
-    ``synchronous=FULL`` (see :func:`firm.db.connection.get_conn`).
+    Concurrency model
+    -----------------
+    Each :class:`LlmCache` instance maintains one SQLite connection **per
+    thread**, opened lazily on first use via :meth:`_thread_conn` and stored in
+    a :class:`threading.local` slot.  This avoids the per-call overhead of
+    opening and closing a fresh connection while remaining safe to share across
+    threads.
+
+    * **Reads** (``get``) are lock-free: WAL mode allows any number of
+      concurrent readers without blocking each other or an in-progress write.
+    * **Writes** (``put``) acquire the module-level :data:`_WRITE_LOCK` before
+      executing ``INSERT OR REPLACE``.  This serialises writes across threads so
+      the SQLite WAL never surfaces ``"database is locked"`` errors.
+
+    Long-lived processes do not need to call :meth:`close`; each thread's
+    connection lives for the thread's lifetime and is released when the thread
+    exits.  Tests that want deterministic cleanup should call
+    ``cache.close()`` explicitly from the thread that opened the connection.
+
+    The underlying connection is WAL-mode with ``synchronous=FULL``
+    (see :func:`firm.db.connection.get_conn`).
     """
 
     def __init__(self, db_path: Path, clock: Clock) -> None:
         self._db_path = db_path
         self._clock = clock
+        self._local: threading.local = threading.local()
+
+    def _thread_conn(self) -> sqlite3.Connection:
+        """Return (or lazily create) this thread's SQLite connection."""
+        if not hasattr(self._local, "conn"):
+            self._local.conn = get_conn(self._db_path)
+        return self._local.conn  # type: ignore[no-any-return]
+
+    def close(self) -> None:
+        """Close the calling thread's connection, if one was opened.
+
+        Safe to call multiple times; subsequent calls are no-ops.
+        """
+        conn: sqlite3.Connection | None = getattr(self._local, "conn", None)
+        if conn is not None:
+            conn.close()
+            del self._local.conn
 
     def get(self, *, prompt_hash: str, model: str) -> CachedResponse | None:
-        with closing(get_conn(self._db_path)) as conn:
-            row = conn.execute(
-                "SELECT response_json, input_tokens, output_tokens, created_at "
-                "FROM llm_cache WHERE prompt_hash = ? AND model = ?",
-                (prompt_hash, model),
-            ).fetchone()
+        conn = self._thread_conn()
+        row = conn.execute(
+            "SELECT response_json, input_tokens, output_tokens, created_at "
+            "FROM llm_cache WHERE prompt_hash = ? AND model = ?",
+            (prompt_hash, model),
+        ).fetchone()
         if row is None:
             return None
         return CachedResponse(
@@ -107,7 +147,8 @@ class LlmCache:
         output_tokens: int,
     ) -> None:
         created_at = self._clock.now().isoformat()
-        with closing(get_conn(self._db_path)) as conn:
+        conn = self._thread_conn()
+        with _WRITE_LOCK:
             conn.execute(
                 "INSERT OR REPLACE INTO llm_cache "
                 "(prompt_hash, model, response_json, input_tokens, output_tokens, created_at) "

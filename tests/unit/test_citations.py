@@ -45,6 +45,7 @@ def _chunk(idx: int, doc_id: str, text: str) -> Chunk:
         text=text,
         char_span=(0, len(text)),
         token_count=len(text.split()),
+        source="test",
     )
 
 
