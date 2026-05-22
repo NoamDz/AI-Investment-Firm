@@ -174,6 +174,53 @@ Writes the bundle to `data/reports/2024-03-13/`:
 
 Equivalent without `make`: `python -m firm.cli report --date 2024-03-13`
 
+## Eval harness
+
+`make eval` runs a 3-regime smoke sweep (trending / sideways / volatile) and
+re-renders `reports/eval/summary.md`. The Main CI badge above tracks this on
+every push to main.
+
+```powershell
+make eval
+# Equivalent without make:
+python -m firm.cli eval
+```
+
+Output paths written on each run:
+
+- `reports/eval/r1/regime.md` — trending regime scorecard
+- `reports/eval/r2/regime.md` — sideways regime scorecard
+- `reports/eval/r3/regime.md` — volatile regime scorecard
+- `reports/eval/summary.md` — cross-regime aggregate
+
+**Determinism gate** — cassettes pin every LLM call and the RNG is seeded, so
+eval output is byte-stable across re-runs. CI asserts `git diff --exit-code
+reports/` after eval; any drift fails the build.
+
+See `docs/eval.md` for the full design (metrics, regimes, "not measured" list).
+
+## Deployment
+
+AWS infrastructure is sketched in Terraform (`infra/terraform/`). The Reporter
+agent also runs on AWS Bedrock AgentCore's local runtime via an adapter in
+`firm/agentcore/reporter_adapter.py`.
+
+```powershell
+# Terraform plan — writes infra/terraform/PLAN.md (dry-run, no real AWS calls)
+make deploy-dev
+```
+
+To run the AgentCore Reporter locally:
+
+```powershell
+pip install -e ".[agentcore]"
+# Then invoke via the local runtime entry point:
+python firm/agentcore/reporter_adapter.py
+```
+
+See `docs/path-to-production.md` for the take-home → prod delta map, and
+`docs/agentcore_mapping.md` for the firm-to-AgentCore migration table.
+
 ### Restore from backup (SQLite)
 
 SQLite (`data/firm.db`) is continuously replicated by the `litestream` service.
@@ -213,10 +260,14 @@ Then `docker compose up firm`.
 - Plan 2 summary: `docs/implementation_summary_plan_2.md`
 - Full design spec: `docs/superpowers/specs/2026-05-18-ai-investment-firm-design.md`
 - Operator runbook: `docs/runbook.md`
+- AgentCore migration map: `docs/agentcore_mapping.md`
+- Eval harness design: `docs/eval.md`
+- Threat model: `docs/threat_model.md`
+- Path to production: `docs/path-to-production.md`
 
 ## Status
 
 - [x] Plan 1: Foundation + Walking Skeleton
 - [x] Plan 2: RAG + Citations + Grounding
 - [x] Plan 3: HITL + Daily Reports + Observability
-- [ ] Plan 4: Eval Harness + Red Team + CI/CD + Bonuses
+- [x] Plan 4: Eval Harness + Red Team + CI/CD + Bonuses
