@@ -45,6 +45,16 @@ dev = [
     "types-openpyxl>=3.1",
     "types-PyYAML>=6.0",
 ]
+# Plan 4 §T41 — AWS Bedrock AgentCore Runtime adapter (Reporter only in
+# Plan 4; see ``docs/agentcore_mapping.md`` for the full migration map).
+# The SDK is pre-1.0 (PyPI: ``bedrock-agentcore-sdk``) so the public API
+# may drift; ``firm/agentcore/reporter_adapter.py`` pins the symbol names
+# it imports and raises a friendly ImportError pointing operators back
+# here if the extra is not installed. Default ``pip install -e .`` does
+# NOT pull this in — the core LangGraph path runs without the SDK.
+agentcore = [
+    "bedrock-agentcore-sdk>=0.1",
+]
 
 [project.scripts]
 firm = "firm.cli:main"
