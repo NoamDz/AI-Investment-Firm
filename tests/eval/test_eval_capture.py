@@ -141,3 +141,29 @@ def test_cost_prompt_aborts_on_no(
     assert mock_confirm.called
     assert mock_run.call_count == 0
     assert "Aborted" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Test 5 — --stub flag fails loudly with T16.2 deferral message.
+# ---------------------------------------------------------------------------
+def test_stub_flag_raises_not_implemented(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T16.2 deferred — --stub must raise ClickException, not silently no-op."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    runner = CliRunner()
+    with mock.patch(
+        "scripts.eval_capture.subprocess.run",
+        side_effect=AssertionError("subprocess.run must not be called when --stub is used"),
+    ):
+        result = runner.invoke(
+            eval_capture.main,
+            ["--stub", "--regime", "r1", "--yes"],
+            catch_exceptions=False,
+        )
+
+    # ClickException → non-zero exit.
+    assert result.exit_code != 0
+    # Operator guidance present.
+    assert "not implemented" in result.output
+    assert "T16.2" in result.output

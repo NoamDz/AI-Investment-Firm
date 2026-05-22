@@ -16,6 +16,39 @@ Surface
   invoking the eval subprocess. ``ANTHROPIC_API_KEY`` is NOT required.
 * ``--yes``     skips the interactive cost-confirmation prompt.
 
+TODO (Plan 4 T16.2)
+-------------------
+A ``--stub`` mode for fully-offline cassette generation was scoped but
+NOT implemented. Stubbing the LLM transport alone is insufficient: a real
+eval run also depends on a running Qdrant instance, downloaded
+sentence-transformers + BGE rerank models, and a populated BM25 corpus —
+none of which a stand-alone script can fake without duplicating most of
+``firm.cli._build_llm_stack`` infrastructure. The honest engineering
+decision was to leave ``--stub`` unimplemented and let T16.1's
+loud-fail (a ``click.ClickException`` from ``firm eval`` on a missing
+parquet) communicate the gap. A future PR that ships a true ``--stub``
+mode should:
+
+  1. Add a ``StubAnthropicTransport`` implementing
+     ``AnthropicTransport`` with sha256-deterministic canned responses
+     keyed off (prompt_hash, model) — see
+     ``firm/llm/anthropic_client.py`` for the protocol shape.
+  2. Add a ``FIRM_LLM_MODE=stub`` recognised by
+     ``CachedAnthropicClient.from_env`` that substitutes the stub
+     transport for ``_AnthropicSdkTransport`` while still letting the
+     cassette layer wrap it.
+  3. Generate fixture price parquets via
+     ``numpy.random`` seeded by ``hash(ticker)`` (~10 OHLCV rows per
+     ticker over the regime window) and write them through
+     ``firm.eval.benchmarks._write_parquet_series``.
+  4. Provide a way to skip Qdrant + sentence-transformers (likely an
+     additional ``FIRM_RAG_MODE=stub`` env var that swaps the retriever
+     for a fixture-backed one). This is the largest piece of work.
+
+Until that lands, operators must run the recording variant with a real
+``ANTHROPIC_API_KEY`` once to populate ``tests/eval/cassettes/`` and
+``data/prices_eval/``. The recorded artifacts can then be committed.
+
 Each regime is launched in its OWN subprocess so env-var mutations
 (``FIRM_LLM_MODE=record`` / ``FIRM_VCR_MODE=record`` / ``FIRM_PRICES_MODE=
 record`` / ``FIRM_CASSETTE_DIR=...``) don't leak across regimes — running
@@ -183,10 +216,38 @@ def _print_summary(regime_flags: list[str], elapsed: float) -> None:
     default=False,
     help="Skip the interactive cost-confirmation prompt (non-interactive runs).",
 )
-def main(regime_arg: str, dry_run: bool, yes_flag: bool) -> None:
+@click.option(
+    "--stub",
+    "stub_flag",
+    is_flag=True,
+    default=False,
+    help=(
+        "(NOT IMPLEMENTED — Plan 4 T16.2) Offline cassette generation. "
+        "Currently raises ClickException with operator guidance; see "
+        "this script's module docstring for the rollout plan."
+    ),
+)
+def main(regime_arg: str, dry_run: bool, yes_flag: bool, stub_flag: bool) -> None:
     """Capture eval cassettes + price parquets in record mode."""
     regime_arg = regime_arg.lower()
     regime_flags = _selected_regime_flags(regime_arg)
+
+    # ------------------------------------------------------------------
+    # T16.2 stub mode is intentionally not implemented (see module
+    # docstring). The flag exists so the surface is discoverable and a
+    # future implementer can plug it in without changing the CLI shape.
+    # ------------------------------------------------------------------
+    if stub_flag:
+        raise click.ClickException(
+            "--stub mode is not implemented (Plan 4 T16.2 deferred). "
+            "Stubbing the LLM transport alone is insufficient because "
+            "the eval graph also requires Qdrant + sentence-transformers "
+            "+ BM25 corpus. Run with a real ANTHROPIC_API_KEY (omit "
+            "--stub) to populate tests/eval/cassettes/ and "
+            "data/prices_eval/, then commit the resulting fixtures. See "
+            "scripts/eval_capture.py module docstring for the planned "
+            "--stub rollout."
+        )
 
     # ------------------------------------------------------------------
     # Dry-run short-circuits BEFORE the API-key preflight: the operator
