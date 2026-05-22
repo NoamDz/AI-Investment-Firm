@@ -197,9 +197,9 @@ the first 50 lines of the diff.
 2. Inspect `git diff reports/eval/` — compare what changed.
 3. **Timestamp/clock drift** — the diff shows date strings that change between
    runs.  The eval path is mis-using `datetime.now()` somewhere it shouldn't.
-   Every eval code path must use the seeded clock in `firm/core/random.py` (which
-   respects `FIRM_RANDOM_SEED`).  Find the raw `datetime.now()` call and replace
-   it with the injected clock.
+   Every eval code path must use the injected clock in `firm/core/clock.py`
+   (the `ReplayClock` used by the eval harness).  Find the raw `datetime.now()`
+   call and replace it with the injected clock.
 4. **Content drift** — the diff shows substantive text changes (agent decisions,
    numbers, phrasing).  Two sub-causes:
    a. **Stale cassette** — a prompt or model changed since the cassette was
