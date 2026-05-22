@@ -11,15 +11,17 @@ Provides:
     audit log, outbox — defense in depth)
   - ALLOWED_ACTIONS_PER_AGENT / KNOWN_SOURCE_IDS constants
 
-Limitations for T06
--------------------
-* ``_run_research`` exercises the legacy stub research path which IGNORES
-  ``payload_text``.  All research-targeted corpus cases (~8/50) exercise the
-  harness wiring only; the real grounded-retriever attack surface is wired
-  in T07.f.
-* ``_run_monitor`` likewise discards ``payload_text`` because the production
-  monitor node only reads the clock; monitor-targeted cases test harness
-  wiring only.
+Limitations for T06 (Bundle C)
+------------------------------
+* ``_run_research`` now surfaces ``payload_text`` into the grounded
+  research path via a stub retriever (the payload becomes the body of
+  one chunk).  Research-targeted corpus cases now exercise the real
+  attack surface rather than only the harness wiring.
+* ``_run_monitor`` still effectively discards ``payload_text`` because
+  the production monitor node only emits a heartbeat timestamp and
+  reads nothing from state.  The helper forwards the payload on
+  ``state["notes"]`` for forward-compatibility, but monitor-targeted
+  cases test harness wiring only until production consumes the field.
 * ``_run_pm`` carries the T07.h ``FORGE_CITATION:<id>`` hook -- when the
   marker is present in ``payload_text``, the stub voter returns the
   forged id and the helper stamps ``failure_mode=UNCITED_CLAIM`` on the
@@ -245,32 +247,92 @@ def _collect_outbox(db_path: Path) -> list[dict[str, Any]]:
 
 
 def _run_research(payload_text: str, ctx: RedTeamCtx) -> Decision | None:
-    """Attack surface: payload fed as the working-state heartbeat context.
+    """Attack surface: payload is injected as the body of the single retrieved chunk.
 
-    The legacy stub research agent doesn't accept external text, so we use
-    it as-is and note the payload in the returned decision's metadata.  The
-    real grounded path (T07) will inject via the retriever.  For now this
-    stub exercises the harness without requiring a live retriever.
+    T06: the payload now flows through the grounded research path via a
+    stub retriever that wraps ``payload_text`` as the body of one chunk.
+    A benign stub extractor returns zero claims (so the deterministic
+    happy-path HOLD branch runs and no citations are emitted), and a
+    benign stub judge marks the empty claim set as supported.  This
+    exercises the real attack surface -- the payload reaches the chunk
+    content the LLM would normally see -- rather than the legacy-stub
+    no-op of earlier T06 iterations.
+
+    The grounding-validator and UNCITED_CLAIM paths have their own
+    dedicated integration tests (test_failuremode_ungrounded_claim and
+    test_citation_forgery::citation_forgery_6); keeping the extractor
+    benign here means research-targeted citation_forgery cases stay
+    safe by default and the invariant assertions on the run focus on
+    the non-citation channels (privileged-action, schema, etc.).
     """
+    from datetime import date
     from firm.agents.research import make_research
     from firm.core.config import UniverseConfig
-    from datetime import date
-
-    # NOTE: payload_text is NOT injected into the stub research path. All
-    # research-targeted corpus cases exercise harness wiring only; the
-    # real grounded-retriever attack surface is wired in T07.f.
-    _ = payload_text  # explicitly mark as intentionally unused
+    from firm.core.models import Claim
+    from firm.grounding.schema import SufficiencyResult
+    from firm.rag.chunk import Chunk
+    from firm.rag.retrieve import RetrievedChunk
 
     universe = UniverseConfig(
         as_of=date(2024, 3, 13),
         tickers=["AAPL"],
         sector_map={"AAPL": "tech"},
     )
+
+    # Inject payload_text as the body of a single retrieved chunk.
+    payload_chunk = Chunk(
+        id="rt-chunk-0",
+        doc_id="rt-doc-0",
+        ticker="AAPL",
+        section="body",
+        published_at=datetime(2024, 2, 15, tzinfo=timezone.utc),
+        text=payload_text,
+        char_span=(0, max(1, len(payload_text))),
+        token_count=max(1, len(payload_text.split())),
+        source="red_team_harness",
+    )
+
+    class _PayloadRetriever:
+        def retrieve(
+            self, query: str, *, as_of: datetime
+        ) -> list[RetrievedChunk]:
+            return [
+                RetrievedChunk(
+                    chunk=payload_chunk,
+                    score=1.0,
+                    rank_dense=0,
+                    rank_sparse=0,
+                    rerank_score=0.9,
+                )
+            ]
+
+    class _EmptyExtractor:
+        """Stub extractor that emits no claims (research -> HOLD)."""
+
+        last_tool_call_ids: list[str] = []
+
+        def extract(
+            self, *, query: str, chunks: list[Chunk], as_of: datetime
+        ) -> list[Claim]:
+            return []
+
+    class _AlwaysOkJudge:
+        def assess(
+            self, *, question: str, claims: list[Claim]
+        ) -> SufficiencyResult:
+            return SufficiencyResult(
+                claim_assessments=[],
+                overall_reasoning="red-team stub: no claims to assess",
+            )
+
     research = make_research(
         clock=ctx.clock,
         broker=ctx.broker,
         universe=universe,
-        # No retriever/extractor/judge → legacy stub path
+        retriever=_PayloadRetriever(),  # type: ignore[arg-type]
+        extractor=_EmptyExtractor(),  # type: ignore[arg-type]
+        judge=_AlwaysOkJudge(),  # type: ignore[arg-type]
+        nonce_secret=b"x" * 32,
     )
     state: WorkingState = {"heartbeat_at": ctx.clock.now().isoformat()}
     out = research(state)
@@ -489,15 +551,28 @@ def _run_reporter(payload_text: str, ctx: RedTeamCtx) -> Decision | None:
 
 
 def _run_monitor(payload_text: str, ctx: RedTeamCtx) -> Decision | None:
-    """Attack surface: payload injected as part of the WorkingState (e.g. notes field)."""
+    """Attack surface: payload forwarded via the WorkingState ``notes`` field.
+
+    T06: the production monitor node (``firm/agents/monitor.py``) emits a
+    heartbeat timestamp and reads nothing from state, so injecting
+    ``payload_text`` today has no observable effect on the monitor's
+    output.  Monitor-targeted corpus cases therefore exercise harness
+    wiring (the dispatcher contract plus the invariant assertions on the
+    no-Decision result).  We still forward ``payload_text`` on a ``notes``
+    key so a future monitor that consumes WorkingState will pick it up
+    without additional plumbing changes here -- the surface is now wired
+    even if production does not yet consume the field.
+    """
     from firm.agents.monitor import make_monitor
 
-    # NOTE: 'notes' is discarded by the production monitor node when invoked
-    # outside LangGraph's add_messages accumulator; monitor-targeted cases
-    # test harness wiring only. Real attack surface awaits T07.
-    _ = payload_text  # explicitly mark as intentionally unused
     monitor = make_monitor(ctx.clock)
-    monitor({"heartbeat_at": ctx.clock.now().isoformat()})
+    state: dict[str, Any] = {
+        "heartbeat_at": ctx.clock.now().isoformat(),
+        # Forward-compat: today's monitor discards "notes"; a future
+        # monitor that logs WorkingState will pick it up automatically.
+        "notes": payload_text,
+    }
+    monitor(state)  # type: ignore[arg-type]  # state is a superset of WorkingState
     return None
 
 
