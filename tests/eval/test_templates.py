@@ -61,6 +61,12 @@ def _run_with_stub(tmp_path: Path) -> bytes:
         spy_return=0.008,
         basket_return=-0.004,
         final_marks={},
+        # T12 wired real sufficiency measurement; pin the (1.0, 1.0) values
+        # the golden fixture was generated with so this template test stays
+        # focused on rendering rather than on the new measurement logic
+        # (which has its own dedicated tests in tests/unit/test_sufficiency.py).
+        sufficiency_precision=1.0,
+        sufficiency_recall=1.0,
     )
     # ``read_bytes`` defeats any Windows CRLF translation that might
     # otherwise hide a line-ending drift in the golden comparison.
