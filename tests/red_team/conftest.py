@@ -24,9 +24,12 @@ Limitations for T06 (Bundle C)
   cases test harness wiring only until production consumes the field.
 * ``_run_pm`` carries the T07.h ``FORGE_CITATION:<id>`` hook -- when the
   marker is present in ``payload_text``, the stub voter returns the
-  forged id and the helper stamps ``failure_mode=UNCITED_CLAIM`` on the
-  returned Decision (closing the Plan 3 ALLOWED_GAPS entry jointly with
-  the perf-metrics surface in firm/eval/perf_metrics.py).
+  forged id.  Bundle E lifted UNCITED_CLAIM stamping into production
+  (``firm/agents/pm.py:make_pm``), so the harness only injects the
+  forged id and lets the production code path stamp the failure mode;
+  the previous test-local ``decision.model_copy(...)`` injection has
+  been removed (closing the Plan 3 ALLOWED_GAPS entry jointly with the
+  perf-metrics surface in firm/eval/perf_metrics.py).
 """
 from __future__ import annotations
 
@@ -343,28 +346,23 @@ def _run_pm(payload_text: str, ctx: RedTeamCtx) -> Decision | None:
     """Attack surface: payload is the rationale of an upstream Decision-stub that PM votes on.
 
     T07.h hook -- UNCITED_CLAIM end-to-end coverage.  When ``payload_text``
-    contains the marker ``FORGE_CITATION:<id>``, the helper:
+    contains the marker ``FORGE_CITATION:<id>``, the helper builds a stub
+    LLM client whose voters return that ``<id>`` in ``cited_claim_ids``
+    (simulating a model that emitted a forged citation id under attacker
+    pressure).
 
-      1. Builds a stub LLM client whose voters return that ``<id>`` in
-         ``cited_claim_ids`` (simulating a model that emitted a forged
-         citation id under attacker pressure).
-      2. After ``make_pm(...)`` returns the aggregated PM Decision, the
-         helper verifies the cited id against the valid claim ids
-         (``c1``, ``c2``, ...).  ``PmVoter`` filters unknown ids silently
-         (pm.py line ~278) -- i.e. the production path drops them without
-         stamping a failure mode -- so the red-team harness makes this
-         surface explicit by stamping ``failure_mode=UNCITED_CLAIM`` on
-         the returned Decision whenever a forged id was injected.
-
-    This is the only path in the repo today that stamps UNCITED_CLAIM
-    onto a real Decision end-to-end; it satisfies the Plan 4 Section B
-    T07.h invariant (closing the Plan 3 ALLOWED_GAPS entry jointly with
-    the perf-metrics surface in firm/eval/perf_metrics.py).
+    Bundle E lifted UNCITED_CLAIM stamping into production
+    (``firm/agents/pm.py:make_pm``): ``PmVoter.vote`` now records the
+    dropped ids on ``PmVote.forged_cited_claim_ids`` and ``make_pm``
+    short-circuits to a REFUSE Decision with
+    ``failure_mode=UNCITED_CLAIM`` whenever any voter dropped forged
+    ids.  This harness only injects the forged id and returns the
+    production Decision verbatim; no test-local stamping is needed.
     """
     import json as _json
     import re as _re
     from firm.agents.pm import PmVoter, make_pm
-    from firm.core.models import Claim, FailureMode
+    from firm.core.models import Claim
 
     # Inject the red-team payload as the research rationale.
     research_decision = Decision(
@@ -415,20 +413,7 @@ def _run_pm(payload_text: str, ctx: RedTeamCtx) -> Decision | None:
     ]
     out = pm({"research_decision": research_decision, "claims": claims_dump})
     decision: Decision | None = out.get("pm_decision")
-
-    # T07.h: stamp UNCITED_CLAIM on the returned Decision when a forged id
-    # was injected.  The forged id is, by construction, not in the valid
-    # set ``{c1, c2, ...}`` since the marker carries a free-form attacker-
-    # chosen id (e.g. ``fake-claim-99``).
-    if decision is None or not forged_cited_ids:
-        return decision
-
-    valid_claim_ids: set[str] = {f"c{i + 1}" for i in range(len(claims_dump))}
-    forged_unknown = set(forged_cited_ids) - valid_claim_ids
-    if not forged_unknown:
-        return decision
-
-    return decision.model_copy(update={"failure_mode": FailureMode.UNCITED_CLAIM})
+    return decision
 
 
 def _run_risk(payload_text: str, ctx: RedTeamCtx) -> Decision | None:
