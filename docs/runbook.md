@@ -145,6 +145,84 @@ to repopulate the cache before switching back to `cached` mode.
 
 ---
 
+## `make eval` operational guide
+
+### What it does
+
+`make eval` runs a 3-regime replay-mode smoke sweep over pre-recorded cassettes and
+price fixtures.  No network calls are made; all LLM responses come from committed YAML
+cassettes and prices from committed Parquet files.  The three regimes each exercise a
+different market scenario (bull / bear / choppy — defined in `firm/eval/regimes.py`).
+
+Outputs written to disk:
+
+| Path | Contents |
+|------|----------|
+| `reports/eval/r1/regime.md` | Per-decision audit for regime r1 (bull) |
+| `reports/eval/r2/regime.md` | Per-decision audit for regime r2 (bear) |
+| `reports/eval/r3/regime.md` | Per-decision audit for regime r3 (choppy) |
+| `reports/eval/summary.md` | Cross-regime aggregate: pass/fail counts, citation rate, risk gate hits |
+
+### Basic invocation
+
+```bash
+# Full sweep — all three regimes (default; used in CI):
+make eval
+
+# Single regime — faster, useful during PR development:
+make eval REGIME=r1
+```
+
+The `REGIME=` variable is passed as `--regime $(REGIME)` to `firm.cli eval`.  Passing
+`REGIME=` (empty) or omitting it both run the full sweep.  The underlying env vars
+`FIRM_LLM_MODE=cached`, `FIRM_VCR_MODE=replay`, `FIRM_PRICES_MODE=replay`, and
+`FIRM_RANDOM_SEED=42` are set automatically by the Makefile recipe — do **not** set
+them to `live`/`record` unless you are re-recording cassettes (see below).
+
+### Expected runtime
+
+REPLAY mode never touches the network.  Expect the full sweep to complete in under
+30 seconds on a developer laptop.  If it takes longer, suspect a cassette miss
+(`CassetteMissError`) causing a retry loop rather than a genuine slowdown.
+
+### Determinism gate failure
+
+CI runs `bash scripts/check_reports_clean.sh` after `make eval`.  The script runs
+`make eval` **twice** and diffs `reports/eval/`.  A non-empty diff exits 1 and prints
+the first 50 lines of the diff.
+
+**Diagnostic procedure:**
+
+1. Run `make eval` locally to reproduce.
+2. Inspect `git diff reports/eval/` — compare what changed.
+3. **Timestamp/clock drift** — the diff shows date strings that change between
+   runs.  The eval path is mis-using `datetime.now()` somewhere it shouldn't.
+   Every eval code path must use the seeded clock in `firm/core/random.py` (which
+   respects `FIRM_RANDOM_SEED`).  Find the raw `datetime.now()` call and replace
+   it with the injected clock.
+4. **Content drift** — the diff shows substantive text changes (agent decisions,
+   numbers, phrasing).  Two sub-causes:
+   a. **Stale cassette** — a prompt or model changed since the cassette was
+      recorded; the cassette key no longer matches, so the adapter is falling
+      back to a different (or missing) cassette.  Symptom: `CassetteMissError`
+      in logs, or the output looks like a different model version answered.
+      Fix: re-record via the procedure in the next section.
+   b. **Non-deterministic code path** — `set` iteration order, `dict` ordering
+      (Python 3.7+ is insertion-ordered, but explicit sorting may be absent
+      in some path), or random sampling that bypasses `firm.core.random`.
+      Fix: diff and trace the offending call site; add explicit sorting or
+      route the RNG through `firm.core.random.get_rng()`.
+5. **Stale cassette** — re-record via the procedure in `## Re-recording eval
+   cassettes` below.
+6. **Other drift** — run `git diff reports/eval/` between the two successive
+   runs, narrow to the smallest differing block, and trace the code path from
+   the eval harness call site to the non-deterministic output.
+
+See ["## Re-recording eval cassettes"](#re-recording-eval-cassettes) below for how
+to refresh cassettes.  See `docs/eval.md` for the harness design.
+
+---
+
 ## Re-recording eval cassettes
 
 `make eval` runs in REPLAY mode (no network) and depends on two committed
@@ -520,6 +598,166 @@ Review the plan Terraform prints before typing `yes`. Confirm you are targeting 
 ### CI never runs `deploy-dev`
 
 The `make deploy-dev` target is explicitly absent from all CI workflows. The `.github/workflows/main.yml` workflow runs only `terraform plan` (in read-only mode) to catch configuration drift. `terraform apply` and `terraform destroy` are operator-only operations and must be run locally with valid AWS credentials.
+
+---
+
+## Reading the Terraform plan
+
+### The committed snapshot
+
+`infra/terraform/PLAN.md` is the authoritative pre-apply dry-run snapshot.  It was
+captured via `scripts/sanitise_plan.sh` (T38), which runs a `terraform show -no-color`
+on a binary plan file and strips account IDs / region noise before committing.  The
+CI workflow checks that this file exists and is non-empty but does not re-run
+`terraform plan` (that requires live AWS credentials).
+
+### How to regenerate locally
+
+Requires: AWS credentials (`AWS_PROFILE` set or `~/.aws/credentials` populated),
+`terraform >= 1.6.0`, and `infra/terraform/envs/dev.tfvars` reviewed.
+
+```bash
+# Step 1 — produce the binary plan
+terraform -chdir=infra/terraform plan \
+  -var-file=envs/dev.tfvars \
+  -out=tfplan.bin
+
+# Step 2 — render to human-readable text (update PLAN.md)
+terraform -chdir=infra/terraform show -no-color tfplan.bin > infra/terraform/PLAN.md
+
+# Step 3 — strip sensitive values before committing (optional but recommended)
+bash scripts/sanitise_plan.sh infra/terraform/PLAN.md
+```
+
+The binary `tfplan.bin` is `.gitignore`d; only `PLAN.md` is committed.
+
+### How to read PLAN.md
+
+The file is the raw output of `terraform show -no-color tfplan.bin`.  Key landmarks:
+
+- **`Plan:` summary line** — appears near the top; e.g.
+  `Plan: 42 to add, 0 to change, 0 to destroy.`  This is the first thing to check
+  when reviewing a plan before apply.
+- **Resource blocks** — each resource appears as
+  `# module.<module>.<resource_type>.<resource_name> will be created` followed by the
+  attribute diff.  Lines with `+` are additions, `~` are in-place updates, `-` are
+  deletions.
+- **`(known after apply)`** — placeholder for values computed by AWS on create
+  (e.g. ARNs, IDs).  Normal; not a problem.
+
+### Per-module ownership
+
+| Module | Owns |
+|--------|------|
+| `network` | VPC (`/16`), 2 public + 2 private subnets across 2 AZs, Internet Gateway, NAT Gateway (single AZ for dev), public + private route tables, 3 security groups (ECS task egress-only, RDS 5432 from ECS, OTLP 4317 from ECS) |
+| `compute` | ECS Fargate cluster (Container Insights on), ECS task execution + task IAM roles, task definition (`FARGATE`/`awsvpc`, `:8080`), ECS service (desired 1, autoscaling 1–3 @ CPU 70 %) |
+| `storage` | 3 S3 buckets (`reports`, `traces`, `cassettes`) — versioned, AES-256 SSE, public-access blocked; RDS Postgres 15 (`db.t4g.micro`) in private subnets, master credentials auto-rotated via Secrets Manager |
+| `secrets` | Customer-managed KMS key (annual rotation), KMS alias, 6 Secrets Manager entries (`firm/anthropic_api_key`, `firm/slack_signing_secret`, `firm/slack_bot_token`, `firm/firm_hmac_secret`, `firm/firm_hmac_secret_prev`, `firm/firm_hmac_rotated_at`) |
+| `bedrock` | IAM role for AgentCore Runtime (trusted by `bedrock-agentcore.amazonaws.com`), inline policy granting HMAC secret reads + KMS decrypt + CW log writes; CloudWatch log group for AgentCore reporter (`/aws/bedrock-agentcore/<project>-<env>-reporter`, 90-day retention) |
+| `observability` | CloudWatch log groups (`/firm/<env>` for telemetry, `/ecs/<project>-<env>-otelcol` for collector stdout), otelcol-contrib Fargate service (4317/4318), 4-widget CloudWatch dashboard |
+
+---
+
+## AgentCore Reporter deployment
+
+### What it is
+
+The AgentCore Reporter adapter wraps the existing `firm.agents.reporter.make_reporter`
+closure as a `@agent`-decorated function so it can be served by AWS Bedrock AgentCore
+Runtime.  The adapter is a thin marshalling shim: it deserialises an
+`InvocationRequest.payload` (JSON matching `WorkingState`) into the closure and
+serialises the `{"report_path": str}` result back into an `InvocationResponse`.
+
+- **Source**: `firm/agentcore/reporter_adapter.py`
+- **Background**: `docs/agentcore_mapping.md` (migration table from LangGraph → AgentCore)
+- **Agent name** (Terraform contract): `"firm-reporter"` — matches `locals.agentcore_runtime_name` in `infra/terraform/modules/bedrock/main.tf`
+
+### Local runtime (developer machine)
+
+The `bedrock-agentcore-sdk` is gated under the optional `[agentcore]` extra (T41).
+The core LangGraph path never imports this module, so the extra is not required for
+normal development.
+
+**Step 1 — install the extra:**
+
+```bash
+pip install -e ".[agentcore]"
+```
+
+**Step 2 — set env vars:**
+
+```bash
+export FIRM_REPORTS_ROOT=/tmp/reports
+export FIRM_DB_PATH=/tmp/firm.db   # omit to skip SQLite persistence
+```
+
+These are consumed at module import time — changing them after `import
+firm.agentcore.reporter_adapter` has no effect without `importlib.reload`.
+
+**Step 3 — invoke via the local runtime:**
+
+```python
+import json
+from bedrock_agentcore_sdk import InvocationRequest
+from firm.agentcore.reporter_adapter import reporter
+
+# Construct a minimal WorkingState payload
+payload = json.dumps({
+    "decisions": [],
+    "as_of": "2024-03-13T14:30:00+00:00",
+    # ... other WorkingState fields
+})
+request = InvocationRequest(payload=payload)
+response = reporter(request)
+result = json.loads(response.body)  # {"report_path": "/tmp/reports/2024-03-13/decisions.jsonl"}
+assert "report_path" in result
+```
+
+The local runtime does not require AWS credentials — it runs the `@agent` function
+in-process.
+
+### Deployed Runtime (AWS)
+
+**Prerequisites:**
+
+1. `terraform apply` has completed successfully (the `bedrock` module provisions the
+   IAM role; the AgentCore Runtime entity itself is created via the CLI — see below).
+2. The Docker image includes the `[agentcore]` extra.  **This is NOT included in the
+   default production build** — the Dockerfile must be updated to install
+   `pip install -e ".[agentcore]"` in addition to the base dependencies before the
+   first deployed-runtime invocation.
+
+**Deployment steps (after `terraform apply`):**
+
+```bash
+# TODO: confirm exact CLI shape after first prod deploy
+aws bedrock-agentcore create-runtime \
+  --name firm-reporter \
+  --role-arn <output from terraform: module.bedrock.agentcore_runtime_role_arn> \
+  --execution-role-arn <agentcore_runtime_role_arn>
+```
+
+**Production env vars** must be set in the ECS task definition or injected via
+Secrets Manager before the container starts:
+
+| Variable | Dev value | Production value |
+|----------|-----------|-----------------|
+| `FIRM_REPORTS_ROOT` | `/tmp/reports` | S3 mount path or fixed EFS path |
+| `FIRM_DB_PATH` | `/tmp/firm.db` | RDS Postgres connection string or omit for JSONL-only |
+
+**Verification (post-deploy):**
+
+```bash
+# TODO: confirm exact CLI shape after first prod deploy
+aws bedrock-agent invoke-agent \
+  --agent-id <firm-reporter-agent-id> \
+  --agent-alias-id <alias-id> \
+  --session-id test-session-001 \
+  --input-text '{"decisions": [], "as_of": "2024-03-13T14:30:00+00:00"}'
+```
+
+See `docs/agentcore_mapping.md` for the migration table.
+See `firm/agentcore/reporter_adapter.py` for the entry point.
 
 ---
 
