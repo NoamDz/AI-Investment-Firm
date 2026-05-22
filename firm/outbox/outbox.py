@@ -5,6 +5,7 @@ import hashlib
 from contextlib import closing
 from pathlib import Path
 
+from firm.broker.capability import ToolPermissionDeniedError
 from firm.broker.protocol import Broker, OrderResult
 from firm.core.clock import Clock
 from firm.core.models import Decision
@@ -108,6 +109,14 @@ def place_order_via_outbox(
         for _ in range(max_attempts):
             try:
                 result = broker.submit(payload_dump, idempotency_key=key)
+            except ToolPermissionDeniedError:
+                # T23: capability-layer rejections are NOT transient — retrying
+                # the same (role, tool) pair will deterministically fail again.
+                # Surface immediately so the execution agent can stamp a REFUSE
+                # Decision with FailureMode.TOOL_PERMISSION_DENIED instead of
+                # the misclassified BROKER_UNAVAILABLE that the generic
+                # exhausted-retries path would emit.
+                raise
             except Exception as exc:  # noqa: BLE001 -- broker exceptions are opaque/3rd-party
                 last_exc = exc
                 continue

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from firm.agents.reporter import _persist_decisions_from_state
+from firm.broker.capability import ToolPermissionDeniedError
 from firm.broker.protocol import Broker
 from firm.core.clock import Clock
 from firm.core.ids import sign_nonce, ulid_new
@@ -63,6 +64,58 @@ def _build_broker_unavailable_refuse(
     )
 
 
+def _build_tool_permission_denied_refuse(
+    *,
+    executable: Decision,
+    exc: ToolPermissionDeniedError,
+    clock: Clock,
+    nonce_secret: bytes,
+) -> Decision:
+    """Construct a REFUSE Decision stamped with TOOL_PERMISSION_DENIED.
+
+    T23: parallel to :func:`_build_broker_unavailable_refuse`, but for the
+    capability-layer rejection path.  Permission errors are NOT transient,
+    so we do NOT retry — we emit a REFUSE with the failure_mode the dashboards
+    expect (TOOL_PERMISSION_DENIED, not BROKER_UNAVAILABLE) and the
+    ``(role, tool)`` pair lifted into metadata for audit-log forensics.
+
+    ``decision_id_chain`` points back to the ``executable`` upstream Decision
+    (risk-approved BUY/SELL) so the audit trail follows the same shape as
+    the BROKER_UNAVAILABLE refuse.
+    """
+    now = clock.now()
+    refuse_id = ulid_new()
+    nonce = sign_nonce(
+        nonce_secret,
+        decision_id=refuse_id,
+        timestamp=int(now.timestamp()),
+    )
+    return Decision(
+        id=refuse_id,
+        decision_id_chain=[executable.id],
+        action=ActionEnum.REFUSE,
+        payload=RefusePayload(reason="capability:tool_permission_denied"),
+        rationale=(
+            f"broker capability layer denied tool={exc.tool!r} for "
+            f"agent_role={exc.role!r}; order NOT placed"
+        ),
+        confidence=0.0,
+        citations=[],
+        falsification_condition=(
+            "the broker reference passed to the execution agent is rebound "
+            "to a role on the privileged allowlist"
+        ),
+        escalation_reason=None,
+        failure_mode=FailureMode.TOOL_PERMISSION_DENIED,
+        metadata={
+            "agent": "execution",
+            "role": exc.role,
+            "tool": exc.tool,
+        },
+        nonce=nonce,
+    )
+
+
 def make_execution(
     *, db_path: Path, broker: Broker, clock: Clock, nonce_secret: bytes
 ) -> Callable[[WorkingState], dict[str, Any]]:
@@ -101,6 +154,24 @@ def make_execution(
             _persist_decisions_from_state({"risk_decision": risk}, db_path, clock)
             try:
                 result = place_order_via_outbox(executable, db_path, broker, clock)
+            except ToolPermissionDeniedError as exc:
+                refuse = _build_tool_permission_denied_refuse(
+                    executable=executable,
+                    exc=exc,
+                    clock=clock,
+                    nonce_secret=nonce_secret,
+                )
+                _persist_decisions_from_state(
+                    {"risk_decision": refuse}, db_path, clock
+                )
+                return {
+                    "execution_result": {
+                        "skipped": True,
+                        "reason": "tool_permission_denied",
+                        "role": exc.role,
+                        "tool": exc.tool,
+                    }
+                }
             except BrokerUnavailableError as exc:
                 refuse = _build_broker_unavailable_refuse(
                     executable=executable,
@@ -130,6 +201,24 @@ def make_execution(
 
         try:
             result = place_order_via_outbox(risk, db_path, broker, clock)
+        except ToolPermissionDeniedError as exc:
+            refuse = _build_tool_permission_denied_refuse(
+                executable=risk,
+                exc=exc,
+                clock=clock,
+                nonce_secret=nonce_secret,
+            )
+            _persist_decisions_from_state(
+                {"risk_decision": refuse}, db_path, clock
+            )
+            return {
+                "execution_result": {
+                    "skipped": True,
+                    "reason": "tool_permission_denied",
+                    "role": exc.role,
+                    "tool": exc.tool,
+                }
+            }
         except BrokerUnavailableError as exc:
             refuse = _build_broker_unavailable_refuse(
                 executable=risk,
