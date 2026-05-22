@@ -617,17 +617,19 @@ Requires: AWS credentials (`AWS_PROFILE` set or `~/.aws/credentials` populated),
 `terraform >= 1.6.0`, and `infra/terraform/envs/dev.tfvars` reviewed.
 
 ```bash
-# Step 1 — produce the binary plan
-terraform -chdir=infra/terraform plan \
-  -var-file=envs/dev.tfvars \
-  -out=tfplan.bin
+# Step 1 — binary plan (inspectable via `terraform show tfplan.bin`)
+terraform -chdir=infra/terraform plan -var-file=envs/dev.tfvars -out=tfplan.bin
 
-# Step 2 — render to human-readable text (update PLAN.md)
-terraform -chdir=infra/terraform show -no-color tfplan.bin > infra/terraform/PLAN.md
-
-# Step 3 — strip sensitive values before committing (optional but recommended)
-bash scripts/sanitise_plan.sh infra/terraform/PLAN.md
+# Step 2 — render + sanitise in one pipe (sanitisation is mandatory; it strips
+# live AWS account IDs and region tokens from ARNs)
+terraform -chdir=infra/terraform show -no-color tfplan.bin \
+  | bash scripts/sanitise_plan.sh > infra/terraform/PLAN.md
 ```
+
+Sanitisation is mandatory — `sanitise_plan.sh` strips AWS account IDs, region
+tokens, and timestamps that would otherwise leak into the committed snapshot.
+The script reads stdin and writes stdout; do not pass `PLAN.md` as a positional
+argument (it would be silently ignored, leaving the file unsanitised).
 
 The binary `tfplan.bin` is `.gitignore`d; only `PLAN.md` is committed.
 
