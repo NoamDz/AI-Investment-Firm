@@ -144,6 +144,19 @@ jobs:
         run: make eval REGIME=all
       - name: scripts/check_reports_clean.sh
         run: bash scripts/check_reports_clean.sh
+      # Publish the eval summary as a workflow artifact so release.yml
+      # (which runs on a separate tag-push event) can download it via
+      # `gh run download` and inline it into the GitHub Release body.
+      # 90-day retention matches the release-zip retention on release.yml
+      # so the two artifacts age out together.
+      - name: Upload eval-summary artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-summary
+          path: reports/eval/summary.md
+          if-no-files-found: warn
+          retention-days: 90
 
   # -------------------------------------------------------------------------
   # Red-team suite: invariant-based adversarial tests over the 10 failure
