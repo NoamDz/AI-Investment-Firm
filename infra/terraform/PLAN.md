@@ -43,13 +43,28 @@
 Terraform will perform the following actions:
 
 ```
-Plan: 47 to add, 0 to change, 0 to destroy.
+Plan: 66 to add, 0 to change, 0 to destroy.
 ```
 
-Resource counts are derived from the HCL across the six modules and will
-match `terraform plan` once AWS credentials are available. Counts may drift
-±2 as the AWS provider evolves attribute defaults; the `main.yml` CI artifact
-is the authoritative source.
+Resource counts are derived from the HCL across the six modules, with
+`count` / `for_each` expansions accounted for (e.g. `aws_subnet.public`
+has `count = 2`, `aws_s3_bucket.this` has `for_each` over a 3-element set).
+Per-block annotations like `(×2 count)` or `(×3 for_each)` appear inline
+next to multi-instance blocks below so the math is reader-checkable.
+Counts may still drift ±2 as the AWS provider evolves attribute defaults;
+the `main.yml` CI artifact is the authoritative source.
+
+Per-module subtotals (sum to grand total 66):
+
+| Module          | Resources |
+|-----------------|-----------|
+| network         | 20        |
+| compute         | 10        |
+| storage         | 16        |
+| secrets         | 8         |
+| bedrock         | 3         |
+| observability   | 9         |
+| **Total**       | **66**    |
 
 ---
 
@@ -90,17 +105,13 @@ is the authoritative source.
       + subnet_id     = <computed>
     }
 
-  # aws_subnet.public[0] will be created  (10.0.0.0/24, us-east-1a)
-  # aws_subnet.public[1] will be created  (10.0.1.0/24, us-east-1b)
-  # aws_subnet.private[0] will be created (10.0.10.0/24, us-east-1a)
-  # aws_subnet.private[1] will be created (10.0.11.0/24, us-east-1b)
+  # aws_subnet.public[*] will be created  (×2 count: 10.0.0.0/24 AZ-a, 10.0.1.0/24 AZ-b)
+  # aws_subnet.private[*] will be created (×2 count: 10.0.10.0/24 AZ-a, 10.0.11.0/24 AZ-b)
 
   # aws_route_table.public will be created  (default route → IGW)
   # aws_route_table.private will be created (default route → NAT)
-  # aws_route_table_association.public[0]  will be created
-  # aws_route_table_association.public[1]  will be created
-  # aws_route_table_association.private[0] will be created
-  # aws_route_table_association.private[1] will be created
+  # aws_route_table_association.public[*]  will be created (×2 count)
+  # aws_route_table_association.private[*] will be created (×2 count)
 
   # aws_security_group.ecs_task will be created
   + resource "aws_security_group" "ecs_task" {
@@ -130,7 +141,12 @@ is the authoritative source.
   # aws_security_group_rule.otlp_ingress_from_ecs will be created (tcp/4317)
 ```
 
-**module.network subtotal: 18 resources to add**
+**module.network subtotal: 20 resources to add**
+
+> Math: 12 single-instance blocks (vpc, igw, eip, nat, 2×route_table,
+> 3×security_group, 3×security_group_rule) + 4 count=2 blocks expanded to
+> 8 instances (subnet.public×2, subnet.private×2, route_table_association.public×2,
+> route_table_association.private×2) = 12 + 8 = 20.
 
 ---
 
@@ -221,22 +237,26 @@ is the authoritative source.
 
 **module.compute subtotal: 10 resources to add**
 
+> Math: 10 single-instance blocks (ecs_cluster, cloudwatch_log_group.ecs,
+> iam_role.task_execution, iam_role_policy_attachment.task_execution_managed,
+> iam_role.task, iam_role_policy.task_policy, ecs_task_definition,
+> ecs_service, appautoscaling_target, appautoscaling_policy) = 10. No
+> count/for_each in this module.
+
 ---
 
 ## module.storage (`infra/terraform/modules/storage`)
 
 ```
-  # aws_s3_bucket.this["cassettes"] will be created
-  # aws_s3_bucket.this["reports"] will be created
-  # aws_s3_bucket.this["traces"] will be created
+  # aws_s3_bucket.this[*] will be created (×3 for_each: reports, traces, cassettes)
   + resource "aws_s3_bucket" "this" {
       + bucket        = "firm-dev-<each.key>"
       + id            = <computed>
     }
 
-  # aws_s3_bucket_versioning.this[*] — 3 resources (Enabled for all buckets)
-  # aws_s3_bucket_server_side_encryption_configuration.this[*] — 3 resources (AES256)
-  # aws_s3_bucket_public_access_block.this[*] — 3 resources
+  # aws_s3_bucket_versioning.this[*] will be created (×3 for_each, Enabled on all)
+  # aws_s3_bucket_server_side_encryption_configuration.this[*] will be created (×3 for_each, AES256)
+  # aws_s3_bucket_public_access_block.this[*] will be created (×3 for_each)
   #   block_public_acls=true, block_public_policy=true,
   #   ignore_public_acls=true, restrict_public_buckets=true
 
@@ -285,7 +305,12 @@ is the authoritative source.
     }
 ```
 
-**module.storage subtotal: 13 resources to add**
+**module.storage subtotal: 16 resources to add**
+
+> Math: 4 for_each=3-set blocks expanded to 12 instances (aws_s3_bucket×3,
+> aws_s3_bucket_versioning×3, aws_s3_bucket_server_side_encryption_configuration×3,
+> aws_s3_bucket_public_access_block×3) + 4 single-instance blocks (lifecycle
+> on traces, db_subnet_group, db_parameter_group, db_instance) = 12 + 4 = 16.
 
 ---
 
@@ -308,12 +333,9 @@ is the authoritative source.
       + target_key_id = <computed>
     }
 
-  # aws_secretsmanager_secret.this["firm/anthropic_api_key"] will be created
-  # aws_secretsmanager_secret.this["firm/firm_hmac_rotated_at"] will be created
-  # aws_secretsmanager_secret.this["firm/firm_hmac_secret"] will be created
-  # aws_secretsmanager_secret.this["firm/firm_hmac_secret_prev"] will be created
-  # aws_secretsmanager_secret.this["firm/slack_bot_token"] will be created
-  # aws_secretsmanager_secret.this["firm/slack_signing_secret"] will be created
+  # aws_secretsmanager_secret.this[*] will be created (×6 for_each):
+  #   firm/anthropic_api_key, firm/slack_signing_secret, firm/slack_bot_token,
+  #   firm/firm_hmac_secret, firm/firm_hmac_secret_prev, firm/firm_hmac_rotated_at
   + resource "aws_secretsmanager_secret" "this" {
       + arn                     = <computed>
       + description             = "firm-dev secret — value written out-of-band by operators"
@@ -326,6 +348,10 @@ is the authoritative source.
 ```
 
 **module.secrets subtotal: 8 resources to add**
+
+> Math: 2 single-instance blocks (kms_key.secrets, kms_alias.secrets) +
+> 1 for_each=6-set block expanded to 6 instances (secretsmanager_secret×6)
+> = 2 + 6 = 8.
 
 ---
 
@@ -364,6 +390,11 @@ is the authoritative source.
 ```
 
 **module.bedrock subtotal: 3 resources to add**
+
+> Math: 3 single-instance blocks (iam_role.agentcore_runtime,
+> iam_role_policy.agentcore_runtime, cloudwatch_log_group.agentcore_reporter)
+> = 3. Symbolic AgentCore Layer B entities are CLI-managed (T39), not
+> Terraform resources, so they do not contribute to the count.
 
 ---
 
@@ -450,6 +481,12 @@ is the authoritative source.
 
 **module.observability subtotal: 9 resources to add**
 
+> Math: 9 single-instance blocks (2× cloudwatch_log_group {firm, otelcol},
+> iam_role.otelcol_task_execution, iam_role_policy_attachment.otelcol_task_execution_managed,
+> iam_role.otelcol_task, iam_role_policy.otelcol_task_policy,
+> ecs_task_definition.otelcol, ecs_service.otelcol, cloudwatch_dashboard.firm)
+> = 9. No count/for_each in this module.
+
 ---
 
 ## Outputs (all `<computed>` at plan-time)
@@ -488,7 +525,9 @@ is the authoritative source.
 ```
 ------------------------------------------------------------------------
 
-Plan: 47 to add, 0 to change, 0 to destroy.
+Plan: 66 to add, 0 to change, 0 to destroy.
+      (network 20 + compute 10 + storage 16 + secrets 8 + bedrock 3 +
+       observability 9 = 66)
 
 Note: Exact resource count may drift ±2 as the AWS provider evolves
       attribute defaults. The main.yml CI artifact (tfplan.txt) is the
