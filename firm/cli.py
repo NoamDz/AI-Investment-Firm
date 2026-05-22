@@ -81,6 +81,61 @@ def _resolve_clock() -> Clock:
     return WallClock()
 
 
+def _compute_quote_age_seconds(quote: Any, clock: Clock) -> int:
+    """Compute age of a broker Quote in whole seconds against ``clock.now()``.
+
+    Returns ``max(0, int((now - ts).total_seconds()))``.  Falls back to 0
+    on malformed timestamps — STALE_DATA is risk-side disposition we
+    surface deterministically when the parse succeeds, and we deliberately
+    do NOT crash the heartbeat on a single bad timestamp (the risk
+    evaluator's deterministic kernel still gets exercised).
+    """
+    try:
+        ts = datetime.fromisoformat(quote.timestamp)
+    except (ValueError, TypeError):
+        return 0
+    delta = clock.now() - ts
+    return max(0, int(delta.total_seconds()))
+
+
+def _count_trades_today(db_path: Path, clock: Clock) -> int:
+    """Count BUY/SELL decisions persisted today (UTC) for the trades_today gate.
+
+    "Today" = today's UTC midnight onwards.  The risk evaluator uses this
+    count against ``policy.max_trades_per_day``; over-counting (e.g., counting
+    REFUSE/HOLD rows) would falsely trip the limit.  Inline SQL — there is
+    no existing helper for this read pattern.
+    """
+    now_utc = clock.now().astimezone(timezone.utc)
+    sod = datetime.combine(now_utc.date(), time.min, tzinfo=timezone.utc)
+    with closing(get_conn(db_path)) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM decisions "
+            "WHERE action IN ('BUY','SELL') AND created_at >= ?",
+            (sod.isoformat(),),
+        ).fetchone()
+    return int(row["n"]) if row is not None else 0
+
+
+def _compute_daily_pnl_pct(
+    db_path: Path, clock: Clock, current_nav: Decimal
+) -> float:
+    """Compute daily P&L percentage vs. start-of-day NAV.
+
+    No SOD-NAV snapshotter exists in the codebase today (positions/cash
+    tables are mutable with no time-series).  Return 0.0 to keep the
+    daily_pnl_pct gate inert until the snapshotter ships, rather than
+    shipping a half-working measurement that could trip the limit on
+    spurious values.
+    """
+    # TODO(plan5): wire SOD nav snapshotter (time-series of EOD/SOD NAV) and
+    # compute (current_nav - sod_nav) / sod_nav here.  Until then the gate
+    # is intentionally inert (0.0) — production policy.max_daily_loss_pct
+    # is still wired into the deterministic kernel; only the input is stubbed.
+    _ = db_path, clock, current_nav  # parameters reserved for the wired path
+    return 0.0
+
+
 def _db_path() -> Path:
     return Path(os.environ.get("FIRM_DB_PATH", "data/firm.db"))
 
@@ -344,12 +399,22 @@ def run(once: bool) -> None:
             ticker = proposal.payload.ticker
             quote = broker.get_quote(ticker)
             positions = {p.ticker: p.shares for p in broker.list_positions()}
-            # TODO(Plan 2): wire live quote_age_seconds / trades_today / daily_pnl_pct; stubs disable those checks
+            current_nav = broker.get_cash() + sum(
+                (p.shares * broker.get_quote(p.ticker).price for p in broker.list_positions()),
+                Decimal("0"),
+            )
+            # T21 (Plan 4): live inputs for the previously-stubbed risk gates.
+            # quote_age_seconds + trades_today are computed against real
+            # inputs; daily_pnl_pct stays at 0.0 (see _compute_daily_pnl_pct
+            # docstring — no SOD-NAV snapshotter exists yet).
             decision = evaluate_risk(RiskInput(
-                proposal=proposal, quote_price=quote.price, quote_age_seconds=0,
+                proposal=proposal, quote_price=quote.price,
+                quote_age_seconds=_compute_quote_age_seconds(quote, clock),
                 cash=broker.get_cash(), positions=positions, sector_map=universe.sector_map,
-                trades_today=0, nav=broker.get_cash() + sum((p.shares * broker.get_quote(p.ticker).price for p in broker.list_positions()), Decimal("0")),
-                daily_pnl_pct=0.0, policy=policy,
+                trades_today=_count_trades_today(db, clock),
+                nav=current_nav,
+                daily_pnl_pct=_compute_daily_pnl_pct(db, clock, current_nav),
+                policy=policy,
             ))
             # T03: propagate the deterministic failure_mode onto the span so
             # dashboards can split RISK_LIMIT_BREACHED vs STALE_DATA vs the
