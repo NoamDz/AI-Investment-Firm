@@ -6,6 +6,16 @@ Multi-agent paper-trading firm. Take-home for Cato Networks — Agentic AI Engin
 [![Main CI](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/main.yml/badge.svg?branch=main)](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/main.yml)
 [![Release](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/release.yml/badge.svg)](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/release.yml)
 
+## CI workflows
+
+Three GitHub Actions workflows gate every commit through release:
+
+- **pr.yml** — runs on every PR to `main`. Gates: lint (ruff+mypy), pytest (non-models + soft requires-models), 1-regime eval (`make eval REGIME=r1`) + determinism check, red-team suite, terraform validate (graceful skip until `infra/` exists), docker build (no push).
+- **main.yml** — runs on every merge to `main`. Adds the full 3-regime eval (`make eval REGIME=all`), terraform plan, docker push to GHCR (`:latest` + `:<sha>`), and uploads `reports/eval/summary.md` as a workflow artifact for downstream releases.
+- **release.yml** — runs on every semver tag push (`v[0-9]+.[0-9]+.[0-9]+*`, prereleases allowed via `-rc1` etc.). Re-verifies the tagged commit (lint + pytest + red-team + 1-regime eval + terraform validate), builds the release zip with sha256, downloads the matching main.yml `eval-summary` artifact, and publishes a GitHub Release with the zip + checksum + eval summary attached.
+
+Each badge above links to that workflow's run history.
+
 ## Quickstart (hybrid: GPU ingest on host → container runtime)
 
 Embedding the FinanceBench corpus is the only heavy step. We do it on the host so it
