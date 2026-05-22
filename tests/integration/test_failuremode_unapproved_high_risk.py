@@ -25,40 +25,27 @@ in the conservative-default policy documented below.
 
 Test mechanics
 --------------
-The test mocks the timer via the module-level sentinel
-``_TIMEOUT_DEADLINE_SECONDS = 1800`` (30 min, matching spec §8.5)
-and the :class:`ReplayClock.advance` API in
-``firm/core/clock.py``.
-
-Because production has no HITL timeout reaper yet (the production
-``firm/agents/hitl.py`` only inserts pending rows; it never sweeps
-them), the test inlines a test-scoped helper
-:func:`_reap_expired_high_risk_hitl_entries` that scans
-``hitl_queue`` for rows whose age has exceeded the deadline and, for
-each, constructs and persists a REFUSE Decision with
-``failure_mode=UNAPPROVED_HIGH_RISK`` and a
-``decision_id_chain`` pointing back to the aged-out ESCALATE.  The
-helper docstring explicitly says **a future production reaper would
-implement this same policy** so a reader does not mistake the
-helper for a stub patching over missing production code; rather,
-this fixture is the test-side specification of what that production
-reaper must do.
+The test mocks the timer via the production module constant
+:data:`firm.agents.hitl.DEFAULT_HITL_TIMEOUT_SECONDS` (1800s = 30 min,
+matching spec §8.5) and the :class:`ReplayClock.advance` API in
+``firm/core/clock.py``.  The reaper itself is exercised via the
+production function :func:`firm.agents.hitl.reap_expired_hitl_entries`
+— Bundle E lifted this from a test-local helper into production code
+and wired one sweep per heartbeat in ``firm/cli.py:run``.
 
 Intentional non-decisions
 -------------------------
-The reaper helper does **not** mutate the ``hitl_queue`` row (it
-remains ``'pending'``).  Whether the queue-row lifecycle should
-transition (``'pending'`` → ``'timed_out'``, for instance) is a
-separate question the production reaper will resolve; this fixture
-exercises only the disposition-Decision emission and leaves the
-queue lifecycle untouched as an explicit, documented non-decision.
+The reaper does **not** mutate the ``hitl_queue`` row (it remains
+``'pending'``).  Whether the queue-row lifecycle should transition
+(``'pending'`` → ``'timed_out'``, for instance) is a separate question
+deferred to a future iteration; this fixture pins the current behavior
+explicitly so a future change there is visible.
 
 Complements (does not replace)
 ``tests/integration/test_failuremode_stale_data.py``; the
 FAILURE_MODE_FIXTURES registry entry for UNAPPROVED_HIGH_RISK
 points at this fixture.  The closely related ``HITL_TIMEOUT`` mode
-remains in ALLOWED_GAPS for now — its triggering site is out of
-scope for T24.
+has its own fixture at ``test_failuremode_hitl_timeout.py``.
 """
 from __future__ import annotations
 
@@ -68,8 +55,12 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
+from firm.agents.hitl import (
+    DEFAULT_HITL_TIMEOUT_SECONDS,
+    reap_expired_hitl_entries,
+)
 from firm.agents.reporter import _persist_decisions_from_state
-from firm.core.clock import Clock, ReplayClock
+from firm.core.clock import ReplayClock
 from firm.core.ids import sign_nonce, ulid_new
 from firm.core.models import (
     ActionEnum,
@@ -77,7 +68,6 @@ from firm.core.models import (
     Decision,
     EscalatePayload,
     FailureMode,
-    RefusePayload,
 )
 from firm.db.connection import get_conn
 from firm.db.migrations import init_db
@@ -90,90 +80,10 @@ from firm.db.migrations import init_db
 _T0 = datetime(2024, 3, 13, tzinfo=timezone.utc)
 _NONCE_SECRET = b"x" * 32
 
-# Spec §8.5 default: HITL approvals must arrive within 30 minutes or the
-# pending row is treated as unapproved-high-risk.  Encoded here as a
-# module-level sentinel so the test mocks the "timer" by advancing the
-# ReplayClock past this many seconds.
-_TIMEOUT_DEADLINE_SECONDS = 1800
-
-
-# ---------------------------------------------------------------------------
-# Test-scoped reaper (a future production reaper would implement this policy)
-# ---------------------------------------------------------------------------
-
-
-def _reap_expired_high_risk_hitl_entries(
-    *,
-    db_path: Path,
-    clock: Clock,
-    deadline_seconds: int,
-    nonce_secret: bytes,
-) -> list[Decision]:
-    """Sweep ``hitl_queue`` for aged-out pending rows and emit refusals.
-
-    For every row where ``status='pending'`` and ``clock.now() - queued_at``
-    exceeds ``deadline_seconds``, construct a REFUSE :class:`Decision` with
-    ``failure_mode=UNAPPROVED_HIGH_RISK`` and a ``decision_id_chain``
-    pointing back to the expired ESCALATE.  Persist each new disposition
-    Decision via :func:`_persist_decisions_from_state` and return the
-    list.
-
-    Conservative-default policy: when a high-risk trade ages out without
-    an explicit human approval, the disposition is NOT a bare
-    ``HITL_TIMEOUT`` (which would be a transport/UX failure mode); it is
-    ``UNAPPROVED_HIGH_RISK`` — the trade is refused on the substantive
-    grounds that no authorised human signed off, which is materially
-    different from "the message didn't arrive".
-
-    This helper is test-scoped (leading underscore).  A future production
-    reaper would implement this same policy in
-    ``firm/agents/hitl.py`` (or a sibling reaper module); this fixture
-    is the test-side specification of what that production reaper must
-    do.  The helper deliberately does NOT mutate the ``hitl_queue`` row
-    — whether the queue-row lifecycle should transition (e.g.,
-    ``'pending'`` → ``'timed_out'``) is an open question the production
-    reaper will resolve.
-    """
-    now = clock.now()
-    refused: list[Decision] = []
-    with closing(get_conn(db_path)) as conn:
-        rows = conn.execute(
-            "SELECT decision_id, queued_at FROM hitl_queue WHERE status='pending'"
-        ).fetchall()
-    for row in rows:
-        queued_at = datetime.fromisoformat(row["queued_at"])
-        age_seconds = (now - queued_at).total_seconds()
-        if age_seconds < deadline_seconds:
-            continue
-        refuse_id = ulid_new()
-        nonce = sign_nonce(
-            nonce_secret,
-            decision_id=refuse_id,
-            timestamp=int(now.timestamp()),
-        )
-        refuse = Decision(
-            id=refuse_id,
-            decision_id_chain=[row["decision_id"]],
-            action=ActionEnum.REFUSE,
-            payload=RefusePayload(reason="hitl:unapproved_high_risk"),
-            rationale=(
-                f"hitl_queue entry {row['decision_id']!r} aged "
-                f"{int(age_seconds)}s past the {deadline_seconds}s deadline "
-                f"without an approval; conservative default applied"
-            ),
-            confidence=0.0,
-            citations=[],
-            falsification_condition=(
-                "an authorised human posts an approval within the deadline"
-            ),
-            escalation_reason=None,
-            failure_mode=FailureMode.UNAPPROVED_HIGH_RISK,
-            metadata={"agent": "hitl", "expired_decision_id": row["decision_id"]},
-            nonce=nonce,
-        )
-        _persist_decisions_from_state({"risk_decision": refuse}, db_path, clock)
-        refused.append(refuse)
-    return refused
+# Use the same canonical deadline the production reaper applies (spec §8.5,
+# 30 min).  The test mocks the "timer" by advancing the ReplayClock past
+# this many seconds.
+_TIMEOUT_DEADLINE_SECONDS = DEFAULT_HITL_TIMEOUT_SECONDS
 
 
 # ---------------------------------------------------------------------------
@@ -271,8 +181,11 @@ def test_aged_pending_high_risk_hitl_row_emits_refuse_with_unapproved_high_risk_
     # over the 30-minute deadline encoded in _TIMEOUT_DEADLINE_SECONDS).
     clock.advance(31 * 60)
 
-    # --- Step 5: invoke the test-scoped reaper -------------------------------
-    refused = _reap_expired_high_risk_hitl_entries(
+    # --- Step 5: invoke the production reaper --------------------------------
+    # Bundle E lifted this helper out of the test module into
+    # firm/agents/hitl.py so the production path stamps UNAPPROVED_HIGH_RISK
+    # end-to-end; the test now exercises that production function directly.
+    refused = reap_expired_hitl_entries(
         db_path=db_path,
         clock=clock,
         deadline_seconds=_TIMEOUT_DEADLINE_SECONDS,
