@@ -55,12 +55,18 @@ def _set_offline_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _patch_run_regime_benchmarks(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Inject fixed benchmark returns so ``run_regime`` doesn't hit T10.
+    """Inject fixed benchmark returns so neither ``run_regime`` nor the
+    ``firm eval`` CLI subcommand call T10.
 
     T10's compute_spy_return / compute_basket_return raise
     PriceCassetteMissError without ``data/prices_eval/*.parquet`` populated
-    (T17). For T15's tests we pre-empt that by patching them.
+    (T17). Plan 4 T16.1 made the CLI raise click.ClickException on a missing
+    cassette instead of silently emitting a 0.0 stub, so the test fixture
+    MUST patch both the source module (which the CLI imports inline at
+    function-call time) AND the runner module (used by direct run_regime
+    callers in tests/eval/test_runner.py).
     """
+    import firm.eval.benchmarks as benchmarks_mod
     import firm.eval.runner as runner_mod
 
     def _fake_spy(*_a: Any, **_kw: Any) -> float:
@@ -71,6 +77,8 @@ def _patch_run_regime_benchmarks(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(runner_mod, "compute_spy_return", _fake_spy)
     monkeypatch.setattr(runner_mod, "compute_basket_return", _fake_basket)
+    monkeypatch.setattr(benchmarks_mod, "compute_spy_return", _fake_spy)
+    monkeypatch.setattr(benchmarks_mod, "compute_basket_return", _fake_basket)
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +182,48 @@ def test_eval_single_regime(
     assert "REGIME 1:" in summary
     assert "REGIME 2:" not in summary
     assert "REGIME 3:" not in summary
+
+
+# ---------------------------------------------------------------------------
+# Test 3b — T16.1: cassette missing makes the CLI fail loudly.
+# ---------------------------------------------------------------------------
+
+
+def test_eval_loud_fails_when_price_cassette_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard for T16.1: a missing parquet must raise click.ClickException
+    instead of silently emitting a 0.0 stub."""
+    from firm.eval.benchmarks import PriceCassetteMissError
+
+    _set_offline_env(monkeypatch)
+
+    # Patch the SOURCE module that cli.py imports inline so the CLI sees the
+    # cassette-missing error path (no patching of fake_spy / fake_basket).
+    import firm.eval.benchmarks as benchmarks_mod
+
+    def _raises(*_a: Any, **_kw: Any) -> float:
+        raise PriceCassetteMissError("no fixture (test injection)")
+
+    monkeypatch.setattr(benchmarks_mod, "compute_spy_return", _raises)
+    monkeypatch.setattr(benchmarks_mod, "compute_basket_return", _raises)
+    monkeypatch.setattr(
+        "firm.eval.heartbeat.make_eval_heartbeat", _stub_heartbeat_factory
+    )
+
+    out_dir = tmp_path / "eval"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["eval", "--regime", "r1", "--output-dir", str(out_dir)],
+        catch_exceptions=False,
+    )
+    # ClickException → non-zero exit.
+    assert result.exit_code != 0
+    # Operator-actionable guidance: mentions both the eval_capture remediation
+    # and the failing benchmark.
+    assert "scripts/eval_capture.py" in result.output
+    assert "SPY" in result.output
 
 
 # ---------------------------------------------------------------------------

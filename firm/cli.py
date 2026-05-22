@@ -995,10 +995,10 @@ def eval_cmd(
             regimes_to_run = [regime_map[regime_id.lower()]]
 
         # Per-regime: pre-resolve benchmarks at the TOP of the loop so a
-        # missing cassette degrades to a 0.0 stub WITHOUT re-running the
-        # heartbeat. T15 ships before T17 populates data/prices_eval/*.parquet
-        # and the spec's load-bearing assertion is byte-for-byte idempotency;
-        # the deterministic stub keeps re-runs byte-identical until T17.
+        # missing cassette fails the run BEFORE the heartbeat does any work
+        # (Plan 4 T16.1 fix-up). Previously a missing cassette emitted a
+        # silent 0.0 stub which masked broken determinism gates; the run
+        # now raises click.ClickException with operator-actionable guidance.
         prices_dir = Path("data/prices_eval")
         reports: list[RegimeReport] = []
         for regime in regimes_to_run:
@@ -1009,13 +1009,14 @@ def eval_cmd(
                     prices_dir=prices_dir,
                 )
             except PriceCassetteMissError as exc:
-                click.echo(
-                    f"[firm eval] {regime.regime_id}: SPY cassette missing "
-                    f"({exc}) — using 0.0 stub. Populate data/prices_eval/ "
-                    f"via scripts/eval_capture.py (T16) for real benchmarks.",
-                    err=True,
-                )
-                spy_return = 0.0
+                raise click.ClickException(
+                    f"Price cassette missing for SPY benchmark in regime "
+                    f"{regime.regime_id}: {exc}. Run `python "
+                    f"scripts/eval_capture.py --stub` to generate fixture "
+                    f"cassettes, or `python scripts/eval_capture.py` (with "
+                    f"ANTHROPIC_API_KEY) for production-fidelity recording. "
+                    f"See docs/runbook.md §'make eval'."
+                ) from exc
             try:
                 basket_return = compute_basket_return(
                     list(regime.universe),
@@ -1024,12 +1025,14 @@ def eval_cmd(
                     prices_dir=prices_dir,
                 )
             except PriceCassetteMissError as exc:
-                click.echo(
-                    f"[firm eval] {regime.regime_id}: basket cassette "
-                    f"missing ({exc}) — using 0.0 stub.",
-                    err=True,
-                )
-                basket_return = 0.0
+                raise click.ClickException(
+                    f"Price cassette missing for basket benchmark in regime "
+                    f"{regime.regime_id}: {exc}. Run `python "
+                    f"scripts/eval_capture.py --stub` to generate fixture "
+                    f"cassettes, or `python scripts/eval_capture.py` (with "
+                    f"ANTHROPIC_API_KEY) for production-fidelity recording. "
+                    f"See docs/runbook.md §'make eval'."
+                ) from exc
 
             heartbeat = make_eval_heartbeat(
                 regime, reports_root=artifacts_root / regime.regime_id
