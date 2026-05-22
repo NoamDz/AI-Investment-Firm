@@ -64,7 +64,7 @@ class FundamentalsTool:
     """
 
     tool_def: ClassVar[ToolDef] = ToolDef(
-        name="fundamentals.get_ratio",
+        name="fundamentals_get_ratio",
         description=(
             "Return a pre-computed fundamental ratio for a publicly-traded ticker "
             "as of a given date, using point-in-time (PIT) semantics: the value from "

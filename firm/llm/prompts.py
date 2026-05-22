@@ -55,10 +55,10 @@ You must not perform arithmetic. You may not add, subtract, multiply, divide, \
 compute ratios, compute growth rates, average, or otherwise derive numeric \
 values yourself. For ANY numeric ratio, margin, leverage figure, growth rate, \
 or financial multiple, you MUST call the tool \
-`fundamentals.get_ratio(ticker, ratio_name, as_of)` and cite the returned \
+`fundamentals_get_ratio(ticker, ratio_name, as_of)` and cite the returned \
 value via its `tool_call_id`. For ANY risk metric (volatility, drawdown, \
 beta, VaR, etc.), you MUST call the tool \
-`risk.get_metric(ticker, metric, as_of)` and cite the returned value via \
+`risk_get_metric(ticker, metric, as_of)` and cite the returned value via \
 its `tool_call_id`. Raw numbers that appear verbatim inside a retrieved \
 chunk may be quoted directly without arithmetic, but any derived figure must \
 come from a tool call.

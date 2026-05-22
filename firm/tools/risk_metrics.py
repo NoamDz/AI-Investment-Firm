@@ -45,7 +45,7 @@ class RiskMetricsTool:
     """
 
     tool_def: ClassVar[ToolDef] = ToolDef(
-        name="risk.get_metric",
+        name="risk_get_metric",
         description=(
             "Return a pre-computed risk metric for a publicly-traded ticker "
             "as of a given date, using point-in-time (PIT) semantics: the value from "

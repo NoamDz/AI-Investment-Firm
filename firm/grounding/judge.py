@@ -101,10 +101,24 @@ class SufficiencyJudge:
                 overall_reasoning="no claims to assess",
             )
 
-        content_lines = [f"- c{i + 1}: {claim.text}" for i, claim in enumerate(claims)]
+        # Build one block per claim: the claim assertion plus its verbatim
+        # supporting evidence wrapped in <retrieved_content> tags. The
+        # SUFFICIENCY_SYSTEM prompt promises this wrapping; without it the
+        # judge has no evidence to ground its SUPPORTED/PARTIAL/UNSUPPORTED
+        # decision against.
+        content_blocks: list[str] = []
+        for i, claim in enumerate(claims):
+            cid = f"c{i + 1}"
+            evidence = claim.source_quote or "(no verbatim source text recorded)"
+            content_blocks.append(
+                f"- {cid}: {claim.text}\n"
+                f"  <retrieved_content>\n"
+                f"  {evidence}\n"
+                f"  </retrieved_content>"
+            )
         user_content = (
             f"Question: {question}\n\n"
-            "Cited claims to assess:\n" + "\n".join(content_lines)
+            "Cited claims to assess:\n" + "\n".join(content_blocks)
         )
         messages: list[dict[str, object]] = [
             {"role": "user", "content": user_content},

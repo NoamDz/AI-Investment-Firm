@@ -126,5 +126,5 @@ def test_get_metric_signature_matches_mcp_tool_schema(
     metric_enum = props["metric"]["enum"]
     assert set(metric_enum) == {"volatility_30d", "beta_180d", "max_drawdown_90d"}
     # tool_def name and description
-    assert RiskMetricsTool.tool_def.name == "risk.get_metric"
+    assert RiskMetricsTool.tool_def.name == "risk_get_metric"
     assert len(RiskMetricsTool.tool_def.description) > 10

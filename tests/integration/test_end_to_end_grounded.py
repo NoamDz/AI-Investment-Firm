@@ -556,17 +556,23 @@ def _seed_extractor_cache(db_path: Path, chunks: list[Chunk]) -> list[Claim]:
             output_tokens=50,
         )
 
-    # Return the Claims the canned response would produce.
+    # Return the Claims the canned response would produce. ``source_quote``
+    # must match the real extractor's behaviour (which copies ``cited_text``
+    # from the citation block onto the Claim) so the sufficiency judge sees
+    # the same prompt text at seed time and at run time — otherwise the cache
+    # hash diverges and the run-time judge call misses cache.
     return [
         Claim(
             text="Apple Inc. reported strong revenue growth driven by Services and iPhone.",
             source_chunk_id=first_chunk.id,
             source_span=(0, min(50, len(first_chunk.text))),
+            source_quote=first_chunk.text[:50],
         ),
         Claim(
             text="Operating margin expanded year over year with capital returns continued.",
             source_chunk_id=first_chunk.id,
             source_span=(0, min(80, len(first_chunk.text))),
+            source_quote=first_chunk.text[:80],
         ),
     ]
 

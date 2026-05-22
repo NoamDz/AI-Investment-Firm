@@ -358,7 +358,7 @@ class _StubTool:
     """Minimal tool stub satisfying the Tool Protocol for citations tests."""
 
     tool_def: ClassVar[ToolDef] = ToolDef(
-        name="fundamentals.get_ratio",
+        name="fundamentals_get_ratio",
         description="Return a pre-computed fundamental ratio.",
         input_schema=MappingProxyType(
             {
@@ -442,7 +442,7 @@ def test_extractor_passes_tools_when_provided() -> None:
     assert len(tools_arg) == 1
     tool_payload = tools_arg[0]
     assert isinstance(tool_payload, dict)
-    assert tool_payload["name"] == "fundamentals.get_ratio"
+    assert tool_payload["name"] == "fundamentals_get_ratio"
     assert "description" in tool_payload
     assert "input_schema" in tool_payload
     # input_schema must be a plain dict (not MappingProxyType) for JSON serialisation.
@@ -476,7 +476,7 @@ def test_extractor_attaches_tool_call_id_to_claim() -> None:
             {
                 "type": "tool_use",
                 "id": "toolu_abc",
-                "name": "fundamentals.get_ratio",
+                "name": "fundamentals_get_ratio",
                 "input": {
                     "ticker": "AAPL",
                     "ratio_name": "pe_ratio",
