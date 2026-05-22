@@ -26,7 +26,7 @@ variable "private_subnet_ids" {
 }
 
 variable "otlp_security_group_id" {
-  description = "Security group ID from modules/network (T32) that permits ingress 4317 from the ECS task SG. Attached to the collector service."
+  description = "Security group ID from modules/network (T32) that permits ingress 4317 + 4318 from the ECS task SG. Attached to the collector service."
   type        = string
 }
 

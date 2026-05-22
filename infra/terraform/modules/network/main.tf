@@ -8,7 +8,7 @@
 #   * 1 Internet Gateway (public egress) + 1 NAT Gateway (private egress)
 #   * Public + private route tables with the corresponding default routes
 #   * 3 Security Groups: ECS task (egress only), RDS Postgres (5432 from
-#     ECS only), OTLP collector (4317 from ECS only)
+#     ECS only), OTLP collector (4317 + 4318 from ECS only)
 #
 # Tagging note: providers.tf in the orchestrator declares default_tags with
 # project / env / managed_by / repo, so each resource here only needs a Name
@@ -210,12 +210,13 @@ resource "aws_security_group_rule" "rds_ingress_from_ecs" {
   description              = "Allow Postgres ingress from ECS tasks only."
 }
 
-# OTLP collector SG — only the ECS task SG may reach 4317/tcp (gRPC).
+# OTLP collector SG — only the ECS task SG may reach 4317/tcp (gRPC) or
+# 4318/tcp (HTTP).
 # Default allow-all egress is sufficient: the collector pushes spans/metrics
 # to CloudWatch via the IGW (or future VPC endpoint), no explicit rule needed.
 resource "aws_security_group" "otlp_collector" {
   name        = "${var.project_name}-${var.env}-otlp-sg"
-  description = "OTLP collector: 4317 from ECS only"
+  description = "OTLP collector: 4317 + 4318 from ECS only"
   vpc_id      = aws_vpc.this.id
 
   tags = {
@@ -231,4 +232,14 @@ resource "aws_security_group_rule" "otlp_ingress_from_ecs" {
   protocol                 = "tcp"
   source_security_group_id = aws_security_group.ecs_task.id
   description              = "Allow OTLP/gRPC ingress from ECS tasks only."
+}
+
+resource "aws_security_group_rule" "otlp_http_ingress_from_ecs" {
+  type                     = "ingress"
+  security_group_id        = aws_security_group.otlp_collector.id
+  from_port                = 4318
+  to_port                  = 4318
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.ecs_task.id
+  description              = "Allow OTLP/HTTP ingress from ECS tasks only."
 }

@@ -651,7 +651,7 @@ The file is the raw output of `terraform show -no-color tfplan.bin`.  Key landma
 
 | Module | Owns |
 |--------|------|
-| `network` | VPC (`/16`), 2 public + 2 private subnets across 2 AZs, Internet Gateway, NAT Gateway (single AZ for dev), public + private route tables, 3 security groups (ECS task egress-only, RDS 5432 from ECS, OTLP 4317 from ECS) |
+| `network` | VPC (`/16`), 2 public + 2 private subnets across 2 AZs, Internet Gateway, NAT Gateway (single AZ for dev), public + private route tables, 3 security groups (ECS task egress-only, RDS 5432 from ECS, OTLP 4317 + 4318 from ECS) |
 | `compute` | ECS Fargate cluster (Container Insights on), ECS task execution + task IAM roles, task definition (`FARGATE`/`awsvpc`, `:8080`), ECS service (desired 1, autoscaling 1–3 @ CPU 70 %) |
 | `storage` | 3 S3 buckets (`reports`, `traces`, `cassettes`) — versioned, AES-256 SSE, public-access blocked; RDS Postgres 15 (`db.t4g.micro`) in private subnets, master credentials auto-rotated via Secrets Manager |
 | `secrets` | Customer-managed KMS key (annual rotation), KMS alias, 6 Secrets Manager entries (`firm/anthropic_api_key`, `firm/slack_signing_secret`, `firm/slack_bot_token`, `firm/firm_hmac_secret`, `firm/firm_hmac_secret_prev`, `firm/firm_hmac_rotated_at`) |

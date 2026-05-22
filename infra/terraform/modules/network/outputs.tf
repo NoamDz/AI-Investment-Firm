@@ -35,6 +35,6 @@ output "rds_security_group_id" {
 }
 
 output "otlp_security_group_id" {
-  description = "Security group ID to attach to the OTLP collector (ingress 4317 from ECS only)."
+  description = "Security group ID to attach to the OTLP collector (ingress 4317 + 4318 from ECS only)."
   value       = aws_security_group.otlp_collector.id
 }
