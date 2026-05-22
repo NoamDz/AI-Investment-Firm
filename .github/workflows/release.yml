@@ -250,6 +250,27 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: firm-release-${{ env.TAG_REF }}
+      # Fetch the eval-summary artifact published by the latest main.yml run
+      # against the tagged commit. Best-effort: continue-on-error keeps the
+      # release green if no main.yml run exists yet (e.g. tag pushed before
+      # the merge commit's main.yml finished, or tag points to a commit that
+      # bypassed main entirely). The Assemble step downstream substitutes a
+      # placeholder when the file is absent.
+      - name: Download eval-summary from main.yml
+        id: dl_eval
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          RUN_ID="$(gh run list --workflow=main.yml --branch=main --commit="${{ github.sha }}" --json databaseId,conclusion --limit 1 --jq '.[0].databaseId')"
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "No main.yml run found for commit ${{ github.sha }}"
+            exit 0
+          fi
+          mkdir -p /tmp/release_eval
+          gh run download "$RUN_ID" -n eval-summary -D /tmp/release_eval || echo "eval-summary artifact not found"
+          ls -la /tmp/release_eval || true
       - name: Assemble release body
         id: body
         run: |
@@ -266,6 +287,17 @@ jobs:
             echo "sha256: \`${SHA}\`"
             echo ''
             echo "Built from commit \`${{ github.sha }}\`."
+            echo ''
+            if [ -f /tmp/release_eval/summary.md ]; then
+              echo '---'
+              echo '### Eval summary (first 40 lines from main.yml run)'
+              echo ''
+              echo '```'
+              head -n 40 /tmp/release_eval/summary.md
+              echo '```'
+            else
+              echo '_Eval summary not available for this tag._'
+            fi
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
       - name: Create GitHub Release
@@ -274,8 +306,13 @@ jobs:
           tag_name: ${{ env.TAG_REF }}
           name: ${{ env.TAG_REF }}
           body: ${{ steps.body.outputs.body }}
+          # The eval summary is a best-effort attachment: fail_on_unmatched_files
+          # is false so a tag without a matching main.yml run still publishes
+          # the zip + checksum cleanly.
           files: |
             firm-${{ env.TAG_REF }}.zip
             firm-${{ env.TAG_REF }}.zip.sha256
+            /tmp/release_eval/summary.md
+          fail_on_unmatched_files: false
           draft: false
           prerelease: ${{ contains(env.TAG_REF, '-') }}
