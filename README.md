@@ -205,8 +205,21 @@ AWS infrastructure is sketched in Terraform (`infra/terraform/`). The Reporter
 agent also runs on AWS Bedrock AgentCore's local runtime via an adapter in
 `firm/agentcore/reporter_adapter.py`.
 
+A captured dry-run plan lives at `infra/terraform/PLAN.md` — it's already
+committed; read it to see what would be created without touching AWS.
+
+To regenerate the plan locally (requires AWS credentials + the `terraform` CLI):
+
 ```powershell
-# Terraform plan — writes infra/terraform/PLAN.md (dry-run, no real AWS calls)
+terraform -chdir=infra/terraform plan -var-file=envs/dev.tfvars
+```
+
+To actually provision the dev stack:
+
+```powershell
+# HUMAN-GATED live apply against the AWS dev account — prompts for 'DEPLOY'
+# confirmation and creates real resources (~$60/mo idle). Don't run this
+# unless you actually want to spin up infrastructure.
 make deploy-dev
 ```
 
