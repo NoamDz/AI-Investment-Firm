@@ -2,7 +2,13 @@
 # Release workflow (Plan 4 T29)
 #
 # Triggers:
-#   - push of a semver tag matching `v*.*.*` (e.g. v0.1.0, v1.2.3-rc1)
+#   - push of a strict semver tag matching `v[0-9]+.[0-9]+.[0-9]+*`
+#     (e.g. v0.1.0, v1.2.3, v1.2.3-rc1). The numeric character classes
+#     reject malformed tags like `vabc.def.ghi` or `v.1.2.3` that the
+#     looser `v*.*.*` glob would have accepted. The trailing `*` keeps
+#     prerelease suffixes (`-rc1`, `-beta.3`) eligible — auto-flagged
+#     as prerelease=true via the `contains(env.TAG_REF, '-')` expression
+#     on the `create-release` job.
 #   - workflow_dispatch (manual fallback; the `tag` input lets an operator
 #     dispatch from any branch — e.g. `main` — and still build/release
 #     against a real tag. On tag-push runs the input is empty and the
@@ -35,7 +41,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
   workflow_dispatch:
     inputs:
       tag:
