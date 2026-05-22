@@ -88,9 +88,19 @@ jobs:
   # the whole release aborts before any artifact is produced.
   # -------------------------------------------------------------------------
   verify:
-    name: verify (lint + unit-tests + red-team)
+    name: verify (lint + unit-tests + red-team + terraform + eval-r1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # Fixture-grade HMAC secret (64 hex zeros) — mirrors
+      # scripts/eval_capture.py::_DEFAULT_HMAC_SECRET. NEVER a real secret;
+      # only used to satisfy HMAC verification during replay.
+      FIRM_HMAC_SECRET: '0000000000000000000000000000000000000000000000000000000000000000'
+      # Use recorded cassettes; the release runner has no Anthropic API key.
+      FIRM_VCR_MODE: 'replay'
+      FIRM_LLM_MODE: 'cached'
+      FIRM_PRICES_MODE: 'replay'
+      FIRM_RANDOM_SEED: '42'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -98,6 +108,7 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
           cache-dependency-path: 'pyproject.toml'
+      - uses: hashicorp/setup-terraform@v3
       - name: Install dev extras
         run: pip install -e ".[dev]"
       - name: ruff + mypy + pytest (not requires_models) + red-team
@@ -106,6 +117,30 @@ jobs:
           mypy firm/
           pytest -m "not requires_models" -q
           make red-team
+      # Terraform validate: skip gracefully until T31 lands infra/terraform/.
+      # Mirrors main.yml's terraform-validate job so a release-tag run can't
+      # diverge from main-branch IaC posture.
+      - name: terraform -chdir=infra/terraform validate
+        run: |
+          if [ -d infra/terraform ]; then
+            terraform -chdir=infra/terraform init -backend=false
+            terraform -chdir=infra/terraform validate
+          else
+            echo "infra/terraform/ not yet created (lands in Plan 4 T31); skipping."
+          fi
+      # Single-regime eval gate (matches pr.yml's eval-r1, NOT main.yml's
+      # full r1+r2+r3 sweep — releases prioritize fast verification and the
+      # full sweep already ran on the merge commit that produced this tag).
+      # Skip gracefully when cassettes have not been committed yet so the
+      # release isn't blocked on an absent fixture directory.
+      - name: make eval REGIME=r1 (if cassettes present)
+        run: |
+          if [ -d tests/eval/cassettes ]; then
+            make eval REGIME=r1
+            bash scripts/check_reports_clean.sh
+          else
+            echo "::warning::No cassettes committed at tests/eval/cassettes/; skipping eval gate"
+          fi
 
   # -------------------------------------------------------------------------
   # Build the release artifact. Strategy:
