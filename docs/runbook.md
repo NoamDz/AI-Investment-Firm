@@ -453,6 +453,76 @@ sqlite3 data/firm.db "SELECT decision_id, ROUND(SUM(cost_usd),4) as total FROM c
 
 ---
 
+## Deploying to dev
+
+### When to run
+
+Run `make deploy-dev` **only** for the one-time bring-up of a dev environment that does not already exist. It is not a replacement for the iterative Terraform workflow: day-to-day infrastructure changes should be reviewed with `terraform plan` first, then applied manually with `terraform -chdir=infra/terraform apply -var-file=envs/dev.tfvars` after inspecting the plan output.
+
+### Cost warning
+
+`make deploy-dev` provisions real AWS resources that accrue charges immediately:
+
+| Resource | Approximate cost |
+|---|---|
+| ECS Fargate cluster | ~$15/mo |
+| RDS Postgres `db.t4g.micro` | ~$15/mo |
+| NAT Gateway | ~$32/mo + per-GB data-processing fee |
+| S3 buckets, CloudWatch logs, Secrets Manager | Negligible at idle |
+
+**When you are done**, run the destroy command manually to avoid ongoing charges:
+
+```bash
+terraform -chdir=infra/terraform destroy -var-file=envs/dev.tfvars
+```
+
+`make destroy-dev` does **not** exist — this is intentional. Destroys are higher-risk than applies (they delete data), so operators must invoke the destroy command directly after confirming the blast radius.
+
+### Prerequisites
+
+Before running `make deploy-dev`:
+
+1. **`AWS_PROFILE` configured** — ensure `~/.aws/credentials` or `~/.aws/config` contains a profile with sufficient IAM permissions (ECS, RDS, VPC, S3, Secrets Manager, CloudWatch Logs, IAM roles).
+2. **Terraform >= 1.6.0 installed** — verify with `terraform version`.
+3. **`envs/dev.tfvars` reviewed** — open `infra/terraform/envs/dev.tfvars` and confirm the VPC CIDR, instance sizes, region, and any secret ARN references are correct for your account before continuing.
+
+### Running the target
+
+```bash
+make deploy-dev
+```
+
+The target prints a WARNING block listing the resources and estimated costs, then prompts:
+
+```
+Type 'DEPLOY' to continue:
+```
+
+Type exactly `DEPLOY` (all uppercase) and press Enter. Any other input — including lowercase `deploy`, a typo, or an empty string — aborts with a non-zero exit code and no Terraform invocation.
+
+### How to abort at the confirmation prompt
+
+If you triggered `make deploy-dev` accidentally:
+
+- **Before pressing Enter**: press `Ctrl+C`. The shell process is interrupted; no Terraform command runs.
+- **After pressing Enter with `DEPLOY`**: the `terraform apply -auto-approve` has already started. You cannot abort cleanly mid-apply without risking a partially-provisioned environment. Let the apply complete, verify the outputs, then run the manual destroy command above.
+
+### Undoing a dev deployment
+
+There is no `make destroy-dev` target (intentional — see above). To tear down the environment:
+
+```bash
+terraform -chdir=infra/terraform destroy -var-file=envs/dev.tfvars
+```
+
+Review the plan Terraform prints before typing `yes`. Confirm you are targeting the correct AWS account and region before proceeding.
+
+### CI never runs `deploy-dev`
+
+The `make deploy-dev` target is explicitly absent from all CI workflows. The `.github/workflows/main.yml` workflow runs only `terraform plan` (in read-only mode) to catch configuration drift. `terraform apply` and `terraform destroy` are operator-only operations and must be run locally with valid AWS credentials.
+
+---
+
 ## Known Limitations
 
 ### Forward-reference leakage in PIT-filtered RAG (spec §6.4)
