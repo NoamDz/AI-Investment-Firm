@@ -8,7 +8,7 @@
 > cd infra/terraform
 > terraform init -backend=false
 > terraform plan -no-color -var-file=envs/dev.tfvars \
->   | bash ../../scripts/sanitise_plan.sh \
+>   | bash ../../firm/ops/sanitise_plan.sh \
 >   > PLAN.md
 > ```
 >
@@ -20,7 +20,7 @@
 > Last refresh: hand-curated 2026-05-22 (Plan 4 T38; branch
 > `worktree-plan4-eval-redteam-cicd-deploy`). AWS account IDs and ARN region
 > tokens have been replaced with `<account-id>` / `<region>` placeholders by
-> `scripts/sanitise_plan.sh`.
+> `firm/ops/sanitise_plan.sh`.
 
 ---
 

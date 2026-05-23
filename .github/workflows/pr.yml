@@ -4,7 +4,7 @@
 # Triggers on every pull request. Mirrors the gating tape in the task spec:
 #   checkout -> setup Python 3.11 -> pip install -e ".[dev]"
 #   -> ruff -> mypy -> pytest (non-models) -> pytest (requires_models, soft)
-#   -> make eval REGIME=r1 -> scripts/check_reports_clean.sh
+#   -> make eval REGIME=r1 -> firm/ops/check_reports_clean.sh
 #   -> make red-team -> terraform validate -> docker build (no push)
 #
 # Wall-clock budget: <=10 min wall via full job parallelism (within the
@@ -113,7 +113,7 @@ jobs:
     timeout-minutes: 8
     env:
       # Fixture-grade HMAC secret (64 hex zeros) — mirrors
-      # scripts/eval_capture.py::_DEFAULT_HMAC_SECRET. NEVER a real secret;
+      # firm/ops/eval_capture.py::_DEFAULT_HMAC_SECRET. NEVER a real secret;
       # only used to satisfy HMAC verification during replay.
       FIRM_HMAC_SECRET: '0000000000000000000000000000000000000000000000000000000000000000'
       # Use recorded cassettes; the PR runner has no Anthropic API key.
@@ -132,8 +132,8 @@ jobs:
         run: pip install -e ".[dev]"
       - name: make eval REGIME=r1
         run: make eval REGIME=r1
-      - name: scripts/check_reports_clean.sh
-        run: bash scripts/check_reports_clean.sh
+      - name: firm/ops/check_reports_clean.sh
+        run: bash firm/ops/check_reports_clean.sh
 
   # -------------------------------------------------------------------------
   # Red-team suite: invariant-based adversarial tests over the 10 failure

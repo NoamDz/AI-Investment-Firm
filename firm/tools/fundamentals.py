@@ -6,7 +6,7 @@ a point-in-time (PIT) lookup: it returns the value from the latest filing
 whose ``as_of`` date is on or before the requested ``as_of`` date.
 
 Design rationale (spec §7.3): the LLM must NOT perform arithmetic. All ratio
-values are pre-computed by ``scripts/precompute_fundamentals.py`` and stored
+values are pre-computed by ``firm/ops/precompute_fundamentals.py`` and stored
 as ``Decimal`` strings in the parquet. The LLM calls this tool by name
 (``fundamentals.get_ratio``) via the Anthropic ``tools=`` parameter; it
 receives a ``Decimal`` value back without ever computing it.
@@ -64,7 +64,7 @@ class FundamentalsTool:
     """
 
     tool_def: ClassVar[ToolDef] = ToolDef(
-        name="fundamentals.get_ratio",
+        name="fundamentals_get_ratio",
         description=(
             "Return a pre-computed fundamental ratio for a publicly-traded ticker "
             "as of a given date, using point-in-time (PIT) semantics: the value from "
@@ -110,7 +110,7 @@ class FundamentalsTool:
         ----------
         parquet_path:
             Path to the pre-computed parquet written by
-            ``scripts/precompute_fundamentals.py``.
+            ``firm/ops/precompute_fundamentals.py``.
         """
         table = pq.read_table(str(parquet_path))
         index: _Index = {}
@@ -131,7 +131,7 @@ class FundamentalsTool:
                 # fallback: parse string
                 as_of_date = date.fromisoformat(str(as_of_val))
             # Fail-fast if the parquet column type drifts away from string;
-            # see scripts/precompute_fundamentals.py: value is stored as str(Decimal)
+            # see firm/ops/precompute_fundamentals.py: value is stored as str(Decimal)
             # specifically so we can avoid float-precision loss on read.
             assert isinstance(value_val, str), (
                 f"value column must be string, got {type(value_val)}"
@@ -187,7 +187,7 @@ class FundamentalsTool:
         if not ticker_keys:
             raise KeyError(
                 f"Ticker {ticker!r} not found in fundamentals index. "
-                "Run scripts/precompute_fundamentals.py to refresh the parquet."
+                "Run firm/ops/precompute_fundamentals.py to refresh the parquet."
             )
 
         key = (ticker, ratio_name)

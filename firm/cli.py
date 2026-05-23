@@ -1098,8 +1098,8 @@ def eval_cmd(
                 raise click.ClickException(
                     f"Price cassette missing for SPY benchmark in regime "
                     f"{regime.regime_id}: {exc}. Run `python "
-                    f"scripts/eval_capture.py --stub` to generate fixture "
-                    f"cassettes, or `python scripts/eval_capture.py` (with "
+                    f"firm/ops/eval_capture.py --stub` to generate fixture "
+                    f"cassettes, or `python firm/ops/eval_capture.py` (with "
                     f"ANTHROPIC_API_KEY) for production-fidelity recording. "
                     f"See docs/runbook.md §'make eval'."
                 ) from exc
@@ -1114,8 +1114,8 @@ def eval_cmd(
                 raise click.ClickException(
                     f"Price cassette missing for basket benchmark in regime "
                     f"{regime.regime_id}: {exc}. Run `python "
-                    f"scripts/eval_capture.py --stub` to generate fixture "
-                    f"cassettes, or `python scripts/eval_capture.py` (with "
+                    f"firm/ops/eval_capture.py --stub` to generate fixture "
+                    f"cassettes, or `python firm/ops/eval_capture.py` (with "
                     f"ANTHROPIC_API_KEY) for production-fidelity recording. "
                     f"See docs/runbook.md §'make eval'."
                 ) from exc

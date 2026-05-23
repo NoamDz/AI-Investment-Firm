@@ -3,7 +3,7 @@
 A single ``get_rng()`` returns a ``random.Random`` instance seeded from
 the ``FIRM_RANDOM_SEED`` environment variable (default ``42``). All firm
 code that needs randomness should import this facade instead of using
-``random.*`` directly, so the eval determinism gate (``scripts/check_reports_clean.sh``)
+``random.*`` directly, so the eval determinism gate (``firm/ops/check_reports_clean.sh``)
 remains valid.
 
 The seed resolution is **process-level**: the same Python interpreter

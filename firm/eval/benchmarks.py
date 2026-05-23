@@ -22,7 +22,7 @@ to ``FIRM_VCR_MODE``, which governs LLM cassettes):
   requires an explicit ``unlink`` first so everyday code paths never silently
   re-hit the network. The eval-capture script (T16) owns the re-record flow.
 * ``live``: bypass the cache entirely; always call yfinance. Used only by
-  ``scripts/eval_capture.py`` in T16.
+  ``firm/ops/eval_capture.py`` in T16.
 """
 from __future__ import annotations
 

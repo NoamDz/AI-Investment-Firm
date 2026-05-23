@@ -1,4 +1,4 @@
-"""Tests for ``scripts/eval_capture.py`` (Plan 4 T16).
+"""Tests for ``firm/ops/eval_capture.py`` (Plan 4 T16).
 
 The script can't be exercised end-to-end without real API access, so these
 tests cover what's testable: argument plumbing, dry-run plan emission,
@@ -12,7 +12,7 @@ from unittest import mock
 import pytest
 from click.testing import CliRunner
 
-from scripts import eval_capture
+from firm.ops import eval_capture
 
 
 # ---------------------------------------------------------------------------
@@ -24,7 +24,7 @@ def test_dry_run_prints_plan_without_subprocess(
     runner = CliRunner()
     # If subprocess.run is called during dry-run, fail the test loudly.
     with mock.patch(
-        "scripts.eval_capture.subprocess.run",
+        "firm.ops.eval_capture.subprocess.run",
         side_effect=AssertionError("subprocess.run must not be called in dry-run"),
     ):
         result = runner.invoke(
@@ -50,7 +50,7 @@ def test_missing_api_key_fails_fast(
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     runner = CliRunner()
     with mock.patch(
-        "scripts.eval_capture.subprocess.run",
+        "firm.ops.eval_capture.subprocess.run",
         side_effect=AssertionError("subprocess.run must not be called when API key missing"),
     ):
         result = runner.invoke(
@@ -75,7 +75,7 @@ def test_dispatches_one_subprocess_per_regime(
 
     fake_completed = mock.Mock(returncode=0)
     with mock.patch(
-        "scripts.eval_capture.subprocess.run",
+        "firm.ops.eval_capture.subprocess.run",
         return_value=fake_completed,
     ) as mock_run:
         result = runner.invoke(
@@ -123,11 +123,11 @@ def test_cost_prompt_aborts_on_no(
 
     with (
         mock.patch(
-            "scripts.eval_capture.click.confirm",
+            "firm.ops.eval_capture.click.confirm",
             return_value=False,
         ) as mock_confirm,
         mock.patch(
-            "scripts.eval_capture.subprocess.run",
+            "firm.ops.eval_capture.subprocess.run",
             side_effect=AssertionError("subprocess.run must not be called when operator aborts"),
         ) as mock_run,
     ):
@@ -153,7 +153,7 @@ def test_stub_flag_raises_not_implemented(
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     runner = CliRunner()
     with mock.patch(
-        "scripts.eval_capture.subprocess.run",
+        "firm.ops.eval_capture.subprocess.run",
         side_effect=AssertionError("subprocess.run must not be called when --stub is used"),
     ):
         result = runner.invoke(

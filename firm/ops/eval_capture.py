@@ -9,7 +9,7 @@ doing so would burn API budget on every push.
 
 Surface
 -------
-``python scripts/eval_capture.py [--regime r1|r2|r3|all] [--dry-run] [--yes]``
+``python firm/ops/eval_capture.py [--regime r1|r2|r3|all] [--dry-run] [--yes]``
 
 * ``--regime``  defaults to ``all``.
 * ``--dry-run`` prints the per-regime plan (env vars, target paths) without
@@ -245,7 +245,7 @@ def main(regime_arg: str, dry_run: bool, yes_flag: bool, stub_flag: bool) -> Non
             "+ BM25 corpus. Run with a real ANTHROPIC_API_KEY (omit "
             "--stub) to populate tests/eval/cassettes/ and "
             "data/prices_eval/, then commit the resulting fixtures. See "
-            "scripts/eval_capture.py module docstring for the planned "
+            "firm/ops/eval_capture.py module docstring for the planned "
             "--stub rollout."
         )
 
@@ -261,7 +261,7 @@ def main(regime_arg: str, dry_run: bool, yes_flag: bool, stub_flag: bool) -> Non
     if not os.environ.get("ANTHROPIC_API_KEY"):
         click.echo(
             "ERROR: ANTHROPIC_API_KEY is not set. Export the key before "
-            "running scripts/eval_capture.py (or use --dry-run to preview).",
+            "running firm/ops/eval_capture.py (or use --dry-run to preview).",
             err=True,
         )
         sys.exit(1)

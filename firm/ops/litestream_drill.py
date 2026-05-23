@@ -10,7 +10,7 @@ Exits 0 on success or graceful skip.  Non-zero only on a real failure
 (restore-mismatch, oversized WAL).
 
 Usage:
-  python scripts/litestream_drill.py [--force] [--db PATH]
+  python firm/ops/litestream_drill.py [--force] [--db PATH]
 
 Environment:
   FIRM_LITESTREAM_DRILL_SKIP_REPLICATE=1  Skip the replicate-restore cycle

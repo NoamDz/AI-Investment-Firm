@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# scripts/sanitise_plan.sh — strip volatile content from `terraform plan` output.
+# firm/ops/sanitise_plan.sh — strip volatile content from `terraform plan` output.
 #
 # Usage:
 #   terraform -chdir=infra/terraform plan -no-color -var-file=envs/dev.tfvars \
-#     | bash scripts/sanitise_plan.sh > infra/terraform/PLAN.md
+#     | bash firm/ops/sanitise_plan.sh > infra/terraform/PLAN.md
 #
 # Transforms (in order, all in ONE sed -E call — no grep stage):
 #   1. Refresh / read-complete chatter dropped (sed /pattern/d)

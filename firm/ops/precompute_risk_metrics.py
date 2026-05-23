@@ -17,14 +17,14 @@ Real corpus mode (default):
 Usage
 -----
     # fixture mode (used by tests):
-    FIRM_RISK_FIXTURE=1 python scripts/precompute_risk_metrics.py
+    FIRM_RISK_FIXTURE=1 python firm/ops/precompute_risk_metrics.py
 
     # fixture mode with custom output path:
     FIRM_RISK_FIXTURE=1 FIRM_RISK_OUT=/tmp/x.parquet \\
-        python scripts/precompute_risk_metrics.py
+        python firm/ops/precompute_risk_metrics.py
 
     # real corpus (not yet implemented):
-    python scripts/precompute_risk_metrics.py
+    python firm/ops/precompute_risk_metrics.py
 """
 from __future__ import annotations
 
@@ -112,7 +112,7 @@ def _write_real_parquet() -> None:
     """
     raise NotImplementedError(
         "Real risk metric computation is not implemented in Plan 2. "
-        "See the TODO(plan-3) comment in scripts/precompute_risk_metrics.py "
+        "See the TODO(plan-3) comment in firm/ops/precompute_risk_metrics.py "
         "for the planned implementation."
     )
 

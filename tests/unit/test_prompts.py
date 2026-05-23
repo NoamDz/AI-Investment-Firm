@@ -29,8 +29,8 @@ def test_research_prompt_includes_retrieved_content_safeguard() -> None:
 
 
 def test_research_prompt_includes_tool_names() -> None:
-    assert "fundamentals.get_ratio" in RESEARCH_SYSTEM
-    assert "risk.get_metric" in RESEARCH_SYSTEM
+    assert "fundamentals_get_ratio" in RESEARCH_SYSTEM
+    assert "risk_get_metric" in RESEARCH_SYSTEM
 
 
 def test_sufficiency_prompt_lists_three_status_values() -> None:

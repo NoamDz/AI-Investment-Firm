@@ -19,7 +19,7 @@ import pytest
 from firm.tools.fundamentals import FundamentalsTool
 
 SCRIPT = (
-    Path(__file__).parent.parent.parent / "scripts" / "precompute_fundamentals.py"
+    Path(__file__).parent.parent.parent / "firm" / "ops" / "precompute_fundamentals.py"
 )
 
 
@@ -128,5 +128,5 @@ def test_get_ratio_signature_matches_mcp_tool_schema(
         "current_ratio",
     }
     # tool_def fields
-    assert FundamentalsTool.tool_def.name == "fundamentals.get_ratio"
+    assert FundamentalsTool.tool_def.name == "fundamentals_get_ratio"
     assert len(FundamentalsTool.tool_def.description) > 10

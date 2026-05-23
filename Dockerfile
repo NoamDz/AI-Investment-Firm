@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir --timeout 600 --retries 5 -e ".[dev]"
 
 COPY firm/ ./firm/
 COPY config/ ./config/
-COPY scripts/ ./scripts/
+# scripts/ folded into firm/ops/; COPY firm/ above already pulls them in.
 COPY data/precomputed/ ./data/precomputed/
 
 ENV FIRM_DB_PATH=/data/firm.db

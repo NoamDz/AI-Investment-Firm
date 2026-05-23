@@ -17,14 +17,14 @@ Real corpus mode (default):
 Usage
 -----
     # fixture mode (used by tests):
-    FIRM_FUNDAMENTALS_FIXTURE=1 python scripts/precompute_fundamentals.py
+    FIRM_FUNDAMENTALS_FIXTURE=1 python firm/ops/precompute_fundamentals.py
 
     # fixture mode with custom output path:
     FIRM_FUNDAMENTALS_FIXTURE=1 FIRM_FUNDAMENTALS_OUT=/tmp/x.parquet \
-        python scripts/precompute_fundamentals.py
+        python firm/ops/precompute_fundamentals.py
 
     # real corpus (not yet implemented):
-    python scripts/precompute_fundamentals.py
+    python firm/ops/precompute_fundamentals.py
 """
 from __future__ import annotations
 
@@ -116,7 +116,7 @@ def _write_real_parquet() -> None:
     """
     raise NotImplementedError(
         "Real ratio extraction is not implemented in Plan 2. "
-        "See the TODO(plan-3) comment in scripts/precompute_fundamentals.py "
+        "See the TODO(plan-3) comment in firm/ops/precompute_fundamentals.py "
         "for the planned implementation."
     )
 

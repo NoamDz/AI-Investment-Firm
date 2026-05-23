@@ -101,10 +101,46 @@ class SufficiencyJudge:
                 overall_reasoning="no claims to assess",
             )
 
-        content_lines = [f"- c{i + 1}: {claim.text}" for i, claim in enumerate(claims)]
+        # Build one block per claim, with provenance-aware framing:
+        #   * text-cited claims (have source_quote) -> wrap the verbatim
+        #     cited_text in <retrieved_content> tags, as SUFFICIENCY_SYSTEM
+        #     promises;
+        #   * tool-derived claims (have tool_call_id, no source_quote) -> render
+        #     the tool result as <tool_result> instead, so the judge does not
+        #     mark deterministically-computed values UNSUPPORTED just because
+        #     there is no document chunk to quote. The SUFFICIENCY_SYSTEM
+        #     prompt instructs the judge to treat tool_result blocks as
+        #     deterministic provenance.
+        content_blocks: list[str] = []
+        for i, claim in enumerate(claims):
+            cid = f"c{i + 1}"
+            if claim.source_quote:
+                evidence_block = (
+                    f"  <retrieved_content>\n"
+                    f"  {claim.source_quote}\n"
+                    f"  </retrieved_content>"
+                )
+            elif claim.tool_call_id:
+                value_part = (
+                    f"value={claim.value} unit={claim.unit or 'n/a'}"
+                    if claim.value is not None
+                    else "value=n/a"
+                )
+                evidence_block = (
+                    f"  <tool_result tool_call_id=\"{claim.tool_call_id}\">\n"
+                    f"  {value_part}\n"
+                    f"  </tool_result>"
+                )
+            else:
+                evidence_block = (
+                    f"  <retrieved_content>\n"
+                    f"  (no verbatim source text recorded)\n"
+                    f"  </retrieved_content>"
+                )
+            content_blocks.append(f"- {cid}: {claim.text}\n{evidence_block}")
         user_content = (
             f"Question: {question}\n\n"
-            "Cited claims to assess:\n" + "\n".join(content_lines)
+            "Cited claims to assess:\n" + "\n".join(content_blocks)
         )
         messages: list[dict[str, object]] = [
             {"role": "user", "content": user_content},
