@@ -26,7 +26,6 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-import pytest
 
 from firm.agents.execution import make_execution
 from firm.agents.pm import PmVoter, make_pm
@@ -47,7 +46,7 @@ from firm.core.models import (
 from firm.db.migrations import init_db
 from firm.obs import agent_span, stamp_decision
 from firm.orchestrator.state import WorkingState
-from tests.red_team.conftest import BrokerCall, CallLoggingBroker
+from tests.red_team.conftest import CallLoggingBroker
 
 
 # ---------------------------------------------------------------------------

@@ -57,7 +57,6 @@ from firm.core.models import (
     ActionEnum,
     BuyPayload,
     Decision,
-    FailureMode,
 )
 from firm.db.migrations import init_db
 

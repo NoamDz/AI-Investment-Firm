@@ -1,5 +1,5 @@
 """Probe FinanceBench evidence structure — what text fields exist?"""
-from datasets import load_dataset
+from datasets import load_dataset  # type: ignore[import-untyped]
 from collections import defaultdict
 
 ds = load_dataset("PatronusAI/financebench")

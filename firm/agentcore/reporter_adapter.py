@@ -84,7 +84,7 @@ _reporter = make_reporter(
 # lockstep. ``memory_namespace=None`` because the Reporter is stateless —
 # every invocation is fully driven by the incoming ``WorkingState`` and the
 # on-disk JSONL.
-@agent(name="firm-reporter", memory_namespace=None)
+@agent(name="firm-reporter", memory_namespace=None)  # type: ignore[untyped-decorator]
 def reporter(request: "InvocationRequest") -> "InvocationResponse":
     """AgentCore entrypoint for the Reporter agent.
 

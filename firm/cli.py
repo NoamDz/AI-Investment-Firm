@@ -321,9 +321,26 @@ def cli() -> None:
 
 
 @cli.command()
-@click.option("--once/--loop", default=True, help="Single heartbeat (default) or loop (loop is Plan 3+).")
-def run(once: bool) -> None:
-    """Run one heartbeat of the firm end-to-end."""
+@click.option(
+    "--once/--loop",
+    default=True,
+    help="Single heartbeat (default) or loop until SIGINT/SIGTERM.",
+)
+@click.option(
+    "--interval-seconds",
+    default=60,
+    type=int,
+    show_default=True,
+    help="Seconds between heartbeats in --loop mode.",
+)
+def run(once: bool, interval_seconds: int) -> None:
+    """Run heartbeats of the firm end-to-end.
+
+    Default is a single heartbeat. ``--loop`` runs continuously, sleeping
+    ``--interval-seconds`` between heartbeats; one bad heartbeat is logged
+    and the loop continues. SIGINT/SIGTERM stops cleanly after the current
+    heartbeat (a second signal exits immediately).
+    """
     db = _db_path()
     init_db(db)
     clock = _resolve_clock()
@@ -455,46 +472,76 @@ def run(once: bool) -> None:
         risk_node=risk_node, hitl_node=hitl, execution_node=execution, reporter_node=reporter,
     )
 
-    # T24 (Plan 4): one HITL aging sweep per heartbeat.
-    # The graph topology routes risk → (hitl | execution) → reporter via a
-    # conditional edge; clean insertion of a reaper "between hitl and
-    # execution" would require non-trivial graph rewiring (the conditional
-    # router currently dispatches on risk.action == ESCALATE, not on a
-    # hitl-output sentinel). The reaper is conceptually a maintenance
-    # sweep over rows queued by PRIOR heartbeats, so running it once per
-    # `firm run` invocation (before the current heartbeat's graph kick-off)
-    # is the natural placement: any pending hitl_queue row whose deadline
-    # has elapsed is reaped and a REFUSE/UNAPPROVED_HIGH_RISK Decision is
-    # written before this heartbeat proceeds. The reaper is no-op when no
-    # rows have aged out.
-    reap_expired_hitl_entries(
-        db_path=db, clock=clock, nonce_secret=nonce_secret
+    def _do_heartbeat(seq: int) -> None:
+        # T24 (Plan 4): HITL aging sweep before each heartbeat — reaps any
+        # hitl_queue row whose deadline has elapsed (REFUSE / UNAPPROVED_HIGH_RISK).
+        # No-op when nothing has aged out.
+        reap_expired_hitl_entries(db_path=db, clock=clock, nonce_secret=nonce_secret)
+
+        # Unique thread_id per heartbeat. ``clock.now()`` is fixed under
+        # ReplayClock so we suffix with ``seq`` to avoid checkpoint collisions
+        # when running multiple ticks in deterministic replay mode.
+        thread_id = f"{clock.now().isoformat()}-{seq}"
+        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+
+        # Resume an interrupted graph (HITL waiting on approval) rather than
+        # restarting. LangGraph: None → resume from checkpoint; dict → fresh run.
+        existing = graph.get_state(config)
+        invoke_input: dict[str, Any] | None = None if existing.next else {}
+
+        # T03: one outer ``agent.heartbeat`` span so every child node span
+        # shares a single trace_id (otherwise each node becomes its own root).
+        with agent_span("heartbeat"):
+            final = graph.invoke(invoke_input, config=config)
+        click.echo(f"Heartbeat #{seq} complete. Report: {final.get('report_path')}")
+
+    if once:
+        _do_heartbeat(1)
+        return
+
+    # ---- Loop mode -------------------------------------------------------
+    # Continuous operation per home-assignment §2.2. SIGINT/SIGTERM stops
+    # cleanly after the current heartbeat; second signal exits immediately.
+    # Per-heartbeat exceptions are logged and the loop continues so a single
+    # transient failure (e.g. broker hiccup) doesn't kill a multi-day run.
+    import signal
+    import time as _time
+
+    stop = {"requested": False}
+
+    def _on_signal(signum: int, _frame: Any) -> None:
+        if stop["requested"]:
+            click.echo("\n[firm run] second signal — exiting now.", err=True)
+            sys.exit(130)
+        stop["requested"] = True
+        click.echo(f"\n[firm run] signal {signum} — stopping after current heartbeat.")
+
+    signal.signal(signal.SIGINT, _on_signal)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _on_signal)
+
+    click.echo(
+        f"[firm run] loop mode: heartbeat every {interval_seconds}s. Ctrl-C to stop."
     )
+    seq = 0
+    while not stop["requested"]:
+        seq += 1
+        try:
+            _do_heartbeat(seq)
+        except Exception as exc:  # noqa: BLE001
+            click.echo(
+                f"[firm run] heartbeat #{seq} failed: {type(exc).__name__}: {exc}",
+                err=True,
+            )
+        if stop["requested"]:
+            break
+        # Sleep in 1s ticks so Ctrl-C is responsive across long intervals.
+        slept = 0
+        while slept < interval_seconds and not stop["requested"]:
+            _time.sleep(1)
+            slept += 1
 
-    config: RunnableConfig = {"configurable": {"thread_id": clock.now().isoformat()}}
-
-    # Resume an interrupted graph (e.g. pending HITL approval) rather than
-    # restarting it with a fresh empty-state invoke.  LangGraph distinguishes
-    # "resume" from "new run" by the input argument: None → resume from the
-    # saved checkpoint; dict → start a new run (clobbering the checkpoint).
-    # T31 surfaced that invoke({}) always restarts, so approved HITL decisions
-    # were never processed — the graph re-entered research and hit the interrupt
-    # again instead of continuing to execution.
-    existing = graph.get_state(config)
-    if existing.next:
-        # Pending checkpoint: resume (HITL gate waiting for approval, etc.).
-        invoke_input: dict[str, Any] | None = None
-    else:
-        # No checkpoint or completed checkpoint: start a fresh heartbeat.
-        invoke_input = {}
-
-    # T03: wrap a single heartbeat in one outer ``agent.heartbeat`` span so
-    # every child node span (research/pm/risk/reporter + their llm/retrieval
-    # children) shares a single trace_id.  Without this each node becomes its
-    # own trace root and a heartbeat fragments into 4+ disjoint traces.
-    with agent_span("heartbeat"):
-        final = graph.invoke(invoke_input, config=config)
-    click.echo(f"Heartbeat complete. Report: {final.get('report_path')}")
+    click.echo(f"[firm run] stopped after {seq} heartbeats.")
 
 
 def _is_test_environment() -> bool:

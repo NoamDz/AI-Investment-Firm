@@ -1,13 +1,11 @@
 """Smoke test for the `firm red-team` CLI command."""
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 
 
 _REPO_ROOT = Path(__file__).parent.parent.parent

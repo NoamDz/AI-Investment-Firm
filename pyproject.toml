@@ -55,6 +55,12 @@ dev = [
 agentcore = [
     "bedrock-agentcore-sdk>=0.1",
 ]
+# Web dashboard — primary demoable report channel (with positions.xlsx).
+# Streamlit is opt-in so the core agent runtime stays lean.
+dashboard = [
+    "streamlit>=1.36",
+    "pandas>=2.2",
+]
 
 [project.scripts]
 firm = "firm.cli:main"
@@ -73,6 +79,15 @@ line-length = 100
 
 [tool.mypy]
 strict = true
+# Opt-in Streamlit dashboard — only loaded when `pip install -e ".[dashboard]"`.
+# Skipping mypy here because pandas/streamlit imports are not available in the
+# default dev install, and the dashboard is a thin read-only projection over
+# firm.db (no business logic worth type-checking).
+exclude = ["firm/dashboard\\.py$"]
+
+[[tool.mypy.overrides]]
+module = ["firm.dashboard"]
+ignore_errors = true
 
 [tool.setuptools.packages.find]
 include = ["firm*"]

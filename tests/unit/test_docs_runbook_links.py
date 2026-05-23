@@ -10,8 +10,10 @@ that the target either:
   tests), OR
 * is a same-doc anchor link (starts with ``#``).
 
-Also asserts the doc is non-trivially long (>646 lines — the original 546
-plus the 100+ lines added by T46).
+Also asserts the doc is non-trivially long (>=200 lines — the floor was
+lowered from 646 in the polish pass that compressed the runbook from a
+verbose 786-line walkthrough into a 207-line operational reference;
+sections moved into ``docs/technical-overview.md`` and ``docs/quickstart.md``).
 """
 from __future__ import annotations
 
@@ -43,9 +45,9 @@ def test_docs_runbook_md_is_non_trivially_long() -> None:
     doc = _doc_path()
     assert doc.exists(), f"{doc} does not exist"
     line_count = sum(1 for _ in doc.read_text(encoding="utf-8").splitlines())
-    assert line_count > 646, (
+    assert line_count >= 200, (
         f"docs/runbook.md too short: {line_count} lines "
-        "(expected > 646 after T46 added three new sections)"
+        "(expected >= 200 — the polished operational reference)"
     )
 
 

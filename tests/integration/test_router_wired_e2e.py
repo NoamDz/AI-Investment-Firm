@@ -30,7 +30,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-import pytest
 
 from firm.agents.pm import PmVoter, make_pm
 from firm.agents.research import make_research
@@ -43,7 +42,6 @@ from firm.db.connection import get_conn
 from firm.db.cost_ledger import write_cost_ledger_row
 from firm.db.migrations import init_db
 from firm.grounding.judge import SufficiencyJudge
-from firm.grounding.schema import ClaimAssessment, ClaimSupport, SufficiencyResult
 from firm.llm.anthropic_client import CachedAnthropicClient, LlmMode
 from firm.llm.cache import LlmCache
 from firm.llm.citations import AnthropicCitationsExtractor
