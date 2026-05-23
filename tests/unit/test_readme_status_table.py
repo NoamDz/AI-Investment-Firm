@@ -8,7 +8,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
 
 _README = Path(__file__).resolve().parents[2] / "README.md"
 _PLAN_ROW = re.compile(r"^- \[(?P<mark>[ x])\] Plan (?P<n>\d+):", re.MULTILINE)

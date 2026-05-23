@@ -324,8 +324,8 @@ def test_grounded_demo_live_api_structural_invariants(tmp_path: Path) -> None:
     # Action-dependent invariants.
     if research_action == "REFUSE":
         assert research.get("failure_mode"), (
-            f"research action=REFUSE but failure_mode is empty; "
-            f"every refusal must be classified."
+            "research action=REFUSE but failure_mode is empty; "
+            "every refusal must be classified."
         )
     else:
         # BUY / SELL / HOLD — production grounding rule: at least one citation

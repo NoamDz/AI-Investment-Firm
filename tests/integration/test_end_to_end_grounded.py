@@ -1199,9 +1199,11 @@ def test_grounded_demo_new_ticker_routes_through_hitl(
     # ------------------------------------------------------------------ #
     # Phase 8a: first firm run --once → interrupt before hitl            #
     # ------------------------------------------------------------------ #
-    # The thread_id used by cli.py is clock.now().isoformat() which, for a
-    # ReplayClock seeded with FIRM_REPLAY_AT, is always _REPLAY_AT.
-    thread_id = _REPLAY_AT
+    # The CLI builds thread_id as f"{clock.now().isoformat()}-{seq}" so that
+    # replay-mode reruns under a fixed ReplayClock don't collide. Both
+    # `firm run --once` calls below take the seq=1 branch in _do_heartbeat,
+    # so the resume-checkpoint must be addressed at the same suffixed id.
+    thread_id = f"{_REPLAY_AT}-1"
 
     run1_result = subprocess.run(
         [sys.executable, "-m", "firm.cli", "run", "--once"],

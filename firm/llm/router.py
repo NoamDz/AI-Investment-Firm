@@ -46,7 +46,7 @@ import math
 from dataclasses import dataclass
 from typing import Protocol
 
-from firm.core.config import RouterConfig
+from firm.core.config import RouterConfig, RouterProfile
 from firm.core.models import ProfileName, RouterFeatures
 from firm.llm.anthropic_client import (
     CachedAnthropicClient,
@@ -306,7 +306,7 @@ class CostRouter:
             cost_usd=fields.cost_usd,
         )
 
-    def _lookup_profile(self, name: ProfileName):
+    def _lookup_profile(self, name: ProfileName) -> RouterProfile:
         """Look up a profile by name; raise KeyError if absent.
 
         T06's :class:`RouterConfig` validator guarantees the three

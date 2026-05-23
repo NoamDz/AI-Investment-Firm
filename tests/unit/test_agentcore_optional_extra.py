@@ -146,8 +146,21 @@ def test_core_firm_modules_import_without_agentcore_extra(module_name: str) -> N
     the SDK is entirely absent from the environment.
     """
     # Force a fresh import so we don't fall back to a cached module that
-    # was imported by a previous test that may have side-effects.
+    # was imported by a previous test that may have side-effects. Save
+    # the original module so we can restore it once the assertion passes:
+    # leaving the freshly-imported replacement in ``sys.modules`` would
+    # invalidate references that earlier-loaded tests hold (e.g. test
+    # modules that did ``from firm.cli import cli`` at import time would
+    # still reference functions whose ``__globals__`` point at the OLD
+    # module dict, so later ``patch("firm.cli.X", ...)`` calls patch the
+    # new module while the in-flight code still resolves names from the
+    # old one).
+    original = sys.modules.get(module_name)
     sys.modules.pop(module_name, None)
 
-    mod = importlib.import_module(module_name)
-    assert mod is not None
+    try:
+        mod = importlib.import_module(module_name)
+        assert mod is not None
+    finally:
+        if original is not None:
+            sys.modules[module_name] = original

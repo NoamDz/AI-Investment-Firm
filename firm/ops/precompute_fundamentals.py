@@ -33,8 +33,8 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
-import pyarrow as pa  # type: ignore[import-untyped]
-import pyarrow.parquet as pq  # type: ignore[import-untyped]
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -105,7 +105,7 @@ def _write_fixture_parquet(out_path: Path) -> None:
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(table, str(out_path))
+    pq.write_table(table, str(out_path))  # type: ignore[no-untyped-call]
     print(f"Written {len(_FIXTURE_ROWS)} rows to {out_path}")
 
 

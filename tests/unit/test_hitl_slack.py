@@ -14,7 +14,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote_plus
 
-import pytest
 from fastapi.testclient import TestClient
 
 from firm.core.clock import ReplayClock

@@ -22,7 +22,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-import pytest
 
 from firm.agents.execution import make_execution
 from firm.agents.reporter import make_reporter

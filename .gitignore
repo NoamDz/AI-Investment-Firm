@@ -12,6 +12,12 @@ data/backups/
 data/qdrant/
 data/reports/
 data/precomputed/
+# Per-run working directories (dashboard_smoke, demo_run, e2e_run, ...)
+data/*/firm.db*
+data/*/qdrant/
+data/*/reports/
+data/*/*.yaml
+data/*/*.json
 .env
 .env.local
 *.egg-info/

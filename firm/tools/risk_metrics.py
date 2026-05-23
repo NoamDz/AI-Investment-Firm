@@ -16,7 +16,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, ClassVar
 
-import pyarrow.parquet as pq  # type: ignore[import-untyped]
+import pyarrow.parquet as pq
 
 from firm.tools.fundamentals import ToolDef
 
@@ -93,7 +93,7 @@ class RiskMetricsTool:
             Path to the pre-computed parquet written by
             ``firm/ops/precompute_risk_metrics.py``.
         """
-        table = pq.read_table(str(parquet_path))
+        table = pq.read_table(str(parquet_path))  # type: ignore[no-untyped-call]
         index: _Index = {}
 
         tickers = table.column("ticker").to_pylist()

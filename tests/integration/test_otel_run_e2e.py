@@ -30,7 +30,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-import pytest
 
 from firm.agents.pm import PmVoter, make_pm
 from firm.agents.reporter import make_reporter
@@ -40,7 +39,6 @@ from firm.broker.fake_broker import FakeBroker
 from firm.core.clock import ReplayClock
 from firm.core.config import PolicyConfig, load_policy, load_universe
 from firm.core.models import (
-    ActionEnum,
     BuyPayload,
     Claim,
     Decision,

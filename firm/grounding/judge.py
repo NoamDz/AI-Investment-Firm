@@ -133,9 +133,9 @@ class SufficiencyJudge:
                 )
             else:
                 evidence_block = (
-                    f"  <retrieved_content>\n"
-                    f"  (no verbatim source text recorded)\n"
-                    f"  </retrieved_content>"
+                    "  <retrieved_content>\n"
+                    "  (no verbatim source text recorded)\n"
+                    "  </retrieved_content>"
                 )
             content_blocks.append(f"- {cid}: {claim.text}\n{evidence_block}")
         user_content = (
