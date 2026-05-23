@@ -10,7 +10,7 @@ Multi-agent paper-trading firm. Take-home for Cato Networks — Agentic AI Engin
 
 A small AI-run trading desk. Seven agents take turns each minute: read the market, pick a trade, debate it, check the rules, ask a human if the trade is large, place the order with a paper broker, and write the day's report. All state lives in one SQLite file, so the desk picks up exactly where it left off after a restart.
 
-The interesting part is the back-and-forth. A trade only reaches the broker after research has quoted a real SEC filing, a separate reader has agreed the quotes actually support the claims, three independent voters have agreed it's worth doing, a plain-Python rule book has cleared every limit, and (for big trades) a human has approved it in Slack.
+The interesting part is the back-and-forth. A trade only reaches the broker after research has quoted a real SEC filing, a separate reader has agreed the quotes actually support the claims, three independent voters have agreed it's worth doing, a plain-Python rule book has cleared every limit, and (for big trades) a human has approved it from the dashboard or the CLI.
 
 ## Architecture
 
@@ -22,7 +22,7 @@ flowchart LR
     R --> P["PM<br/>3 voters in parallel"]
     P --> RK[risk]
     RK -- approve --> X[execution]
-    RK -- escalate --> H["human<br/>via Slack"]
+    RK -- escalate --> H["human<br/>(dashboard / CLI)"]
     RK -- refuse --> HALT((HALT))
     H -- approve --> X
     H -- timeout --> HALT
@@ -92,7 +92,7 @@ Each agent does one job and hands off to the next:
 
    Each one votes BUY / HOLD / VETO independently. A majority is required to move the trade forward. One bad day from one model can't carry a trade to the floor.
 4. **risk** — runs the rule book in plain Python: max **10%** in one name, **30%** per sector, gross book ≤ **100%** of capital, daily loss ≤ **3%**. An LLM cannot argue past it.
-5. **HITL (human-in-the-loop)** — pauses the workflow and posts a signed Slack message ("approve / edit / reject?"). The pause is real — you can stop the process, walk away, come back tomorrow, and the trade is still waiting. Nobody answers in 30 minutes → the trade is auto-refused.
+5. **HITL (human-in-the-loop)** — pauses the workflow and writes a signed entry to the approval queue. The approver sees it in the **dashboard** (or runs `firm hitl ack <id>` from the CLI) and clicks approve / reject. The pause is real — you can stop the process, walk away, come back tomorrow, and the trade is still waiting. Nobody answers in 30 minutes → the trade is auto-refused. Slack is supported as an optional notifier but not required.
 6. **execution** — places the order with the broker. The same order can't fill twice — every fill carries a unique nonce, so a network retry is safe.
 7. **reporter** — writes the day's Markdown report and refreshes the dashboard.
 
@@ -104,7 +104,7 @@ Research never paraphrases. Qdrant pulls candidate passages from an index of SEC
 
 ### Human-in-the-loop for big trades
 
-The risk gate has three exits: *approve* (→ execution), *refuse* (heartbeat ends), or *escalate* (→ human). On escalate, the graph saves a checkpoint and posts to Slack. When the human approves, the graph resumes from the same checkpoint. If the human *edits* the size, the new size goes back through the same risk check on the next tick — the human can't shortcut the rules, only the threshold for escalation.
+The risk gate has three exits: *approve* (→ execution), *refuse* (heartbeat ends), or *escalate* (→ human). On escalate, the graph saves a checkpoint and adds a signed row to the `hitl_queue` table. The approver acts on it from the dashboard or via `firm hitl ack <id>` — both write back to the same queue. When the row flips to `approved`, the graph resumes from the same checkpoint. If the human *edits* the size, the new size goes back through the same risk check on the next tick — the human can't shortcut the rules, only the threshold for escalation.
 
 ### Observability — replay any trade from the trace
 
@@ -129,10 +129,12 @@ That prints the whole heartbeat in order: monitor → research → sufficiency �
 
 Both read `data/firm.db`, so they cannot disagree.
 
-- **Streamlit dashboard** — live positions, recent decisions, the human-approval queue, today's spend, reconciliation status. Auto-refreshes.
-- **Daily `positions.xlsx`** — written by the reporter at end-of-day.
+- **Streamlit dashboard** — live positions, recent decisions, the human-approval queue, today's spend, reconciliation status. Auto-refreshes every 5 s.
+- **Daily report bundle** — written by the reporter at end-of-day: `daily_report.md` (decision counts, cost summary, reconciliation), `positions.xlsx` (operator spreadsheet), `decisions.jsonl` (audit log), `trace.jsonl` (OpenTelemetry stream).
 
-Why both: operators who pivot in Excel get a spreadsheet; reviewers who want a live view get the dashboard. Two mediums for two audiences, one database underneath.
+Why both: operators who pivot in Excel get the spreadsheet; reviewers who want a live view get the dashboard. Two mediums for two audiences, one database underneath.
+
+![Dashboard](docs/images/dashboard.png)
 
 ### Reproducible eval — return + process metrics
 
@@ -162,12 +164,17 @@ Reproducibility is enforced by `firm/ops/check_reports_clean.sh` — it runs the
 
 Every failure has a name. There are **15 in a `FailureMode` enum** with a catch-all `UNKNOWN`, and each one has a coverage test in `tests/integration/`. On top of that, a **51-case red-team suite** (citation forgery, role hijack, confused-deputy, unicode homoglyphs, spoofed approvals, multi-step chains) proves each guardrail fires when it should — and stays quiet when it shouldn't. Full threat model: [`docs/threat_model.md`](docs/threat_model.md).
 
-### Production-shaped thinking
+### Improving from past decisions
 
-- **Token cost** — every LLM call goes through a cost router that picks the cheapest model that can do the job (Haiku first, fall through to Sonnet on overload). A content-addressed prompt cache means the same prompt is never billed twice. A `cost_ledger` row records the spend per decision.
-- **Scalability** — heartbeats are stateless between ticks; horizontal scale is N firm processes against shared Postgres (RDS in the Terraform), each owning a thread id.
-- **High availability** — Litestream replication of `firm.db`, an idle reaper that auto-refuses stale human approvals, crash-resumes from the LangGraph checkpoint.
-- **Standardization** — Terraform under `infra/terraform/` (network, compute, storage, secrets, observability, bedrock modules); CI on every PR (lint + types + tests + docker build + eval-clean diff). Take-home → prod delta: [`docs/path-to-production.md`](docs/path-to-production.md).
+The firm doesn't update model weights at runtime — but every heartbeat reads what previous heartbeats decided, and several loops are closed automatically:
+
+- **The risk gate stands on prior outcomes.** Current positions are the residue of every past trade. The 10%-per-name and 30%-per-sector limits are checked against those positions every tick, so yesterday's BUY automatically constrains today's sizing.
+- **Research recognises familiar tickers.** Before each retrieval, research scans the `decisions` table for any prior trade on the same ticker (`firm/agents/research.py:186`). A novel ticker bumps the router to the stronger model (Sonnet) because there is no prior context to lean on; a familiar one stays on Haiku.
+- **End-of-day reconciliation surfaces drift.** The reporter diffs local positions against the broker and writes the result to `reconciliations`. A mismatch is visible the next morning in the dashboard and blocks the next tick until acked.
+- **The reversal-rate metric measures real mistakes.** The eval harness asks: of trades that opened in the last 5-day window, what percentage closed at a loss within 3 days? Threshold ≤30%. A rising number is the firm telling on itself.
+- **Audit trail is the substrate for prompt iteration.** Every decision, every retrieval hit, every LLM call is on disk (the `decisions` table + the trace JSONL). An operator scanning a week of REFUSE outcomes by `failure_mode` can pinpoint whether the sufficiency judge is too strict, the citations are too weak, or a prompt needs work — then re-record cassettes and re-run the determinism gate.
+
+What the system deliberately does **not** do: re-tune prompts at runtime, run a nightly reflection LLM over its own decisions, or update weights. Those are the next layer of work, called out in [`docs/path-to-production.md`](docs/path-to-production.md).
 
 ### Where the data comes from
 
@@ -205,14 +212,14 @@ Open `daily_report.md` for the human-readable summary; `grep` `trace.jsonl` by `
 - **IaC** — Terraform with six modules; the deployment diagram in `docs/architecture.md` is what these modules build.
 - **CI/CD** — three GitHub workflows (`pr.yml`, `main.yml`, `release.yml`); badges above.
 - **Advanced RAG** — hybrid retrieval (BM25 + dense + re-ranker) with a contextual-augment pass at index time.
-- **Cost-aware model routing** — the router described above.
+- **Cost-aware model routing** — every LLM call picks Haiku first and falls through to Sonnet on overload; a content-addressed prompt cache means the same prompt is never billed twice; each call writes one row to `cost_ledger`.
 - **Prompt-injection defenses** — input sanitizer + sufficiency judge + the red-team corpus.
 
 ## Documentation index
 
 | File | Purpose |
 |------|---------|
-| [`docs/quickstart.md`](docs/quickstart.md) | Full host + Docker setup, GPU notes, Alpaca, Slack exercise |
+| [`docs/quickstart.md`](docs/quickstart.md) | Full host + Docker setup, GPU notes, Alpaca, HITL exercise |
 | [`docs/architecture.md`](docs/architecture.md) | Logical + deployment diagrams, where each safety net sits |
 | [`docs/technical-overview.md`](docs/technical-overview.md) | Agent contracts, state lifecycle, partial-failure model |
 | [`docs/runbook.md`](docs/runbook.md) | Operator playbooks — approvals, restore, incidents |
