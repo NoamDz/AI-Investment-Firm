@@ -106,9 +106,24 @@ Research never paraphrases. Qdrant pulls candidate passages from an index of SEC
 
 The risk gate has three exits: *approve* (→ execution), *refuse* (heartbeat ends), or *escalate* (→ human). On escalate, the graph saves a checkpoint and posts to Slack. When the human approves, the graph resumes from the same checkpoint. If the human *edits* the size, the new size goes back through the same risk check on the next tick — the human can't shortcut the rules, only the threshold for escalation.
 
-### Replay any trade from the trace
+### Observability — replay any trade from the trace
 
-Every agent call, every LLM call, every tool call, and every retrieval writes one line to `data/traces/<date>/run-<id>.jsonl`. Each line carries the decision ID, the parent decision, the failure mode (if any), the model used, tokens, and cost. `grep` one decision ID and you have the whole heartbeat — research → vote → risk check → fill — without standing up any monitoring stack. The same tracer ships to a real OTLP backend in production.
+Every agent call, every LLM call, every tool call, and every retrieval emits one OpenTelemetry span, written one-per-line to `data/traces/<date>/run-<id>.jsonl`. Each span carries:
+
+- `name` — which agent or tool ran (`agent.research`, `llm.anthropic`, `retrieve.qdrant`, …)
+- `decision_id` — the trade being decided
+- `parent_id` — which span called this one (research → vote → risk → fill chain)
+- `attributes.model`, `attributes.tokens_in`, `attributes.tokens_out`, `attributes.cost_usd`
+- `attributes.failure_mode` if the call failed (one of the 15 named failures)
+- `start_time_unix_nano`, `duration_ms`
+
+To replay one trade end-to-end with no tooling:
+
+```bash
+grep '"decision_id":"<id>"' data/traces/2024-03-13/run-*.jsonl | jq .name
+```
+
+That prints the whole heartbeat in order: monitor → research → sufficiency → 3 PM voters → risk → execution → reporter. The file *is* the audit log. The same tracer ships to a real OTLP backend in production by setting `OTEL_EXPORTER_OTLP_ENDPOINT`.
 
 ### Two report channels, one source of truth
 
@@ -121,7 +136,22 @@ Why both: operators who pivot in Excel get a spreadsheet; reviewers who want a l
 
 ### Reproducible eval — return + process metrics
 
-`make eval` replays three historical regimes (a bull month, a chop month, a stress month) from recorded prices and recorded LLM responses; no API key needed in cached mode. It reports both **portfolio performance vs. SPY** *and* **process-quality metrics**: groundedness rate, citation coverage, refusal rate, guardrail-fire rate, cost per decision. Byte-identical run-to-run — `scripts/check_reports_clean.sh` runs the eval twice and diffs the output; any leaking randomness breaks CI. Methodology and what's deliberately *not* measured: [`docs/eval.md`](docs/eval.md).
+`make eval` (or `python -m firm.cli eval --regime all --mode cached`) replays three historical 5-day windows with frozen clock, cached prices, and recorded LLM responses. **No API key needed.** It writes per-regime markdown to `reports/eval/<regime_id>/summary.md` plus daily report bundles under each date.
+
+The three regimes (declared in `firm/eval/regimes.py:91-116` *before* any prompt was tuned, so this is not a fit):
+
+| ID | Window | Character | Why included |
+|---|---|---|---|
+| `r1_earnings` | 2024-03-11 → 03-15 | NVDA, ORCL, ADBE all report | Most signal for the research and PM agents |
+| `r2_drawdown` | 2024-08-05 → 08-09 | Post-Aug-5 sell-off | Stresses the risk gate and human-approval path |
+| `r3_quiet` | 2023-11-06 → 11-10 | Low-volatility quiet | Negative control — the firm should *not* trade aggressively |
+
+What the report contains:
+
+- **Portfolio side** — per-trade returns (FIFO-matched, commission folded in), hit rate (with `n=...` caveat), total return vs SPY, total return vs an equal-weight basket of the universe.
+- **Process side** — ten measurements (groundedness ≥99.5%, decision discipline 100%, red-team pass 51/51, risk-policy compliance 0 breaches at broker, HITL correctness 100%, FailureMode coverage 14/14, sufficiency precision/recall ≥0.80, reversal rate ≤30%, citation diversity, schema rejections). These are the load-bearing numbers — performance vs SPY is reported because the brief asks for it, but at N≈15 trades total it's noise, and the report says so in a mandatory "Not Measured" block.
+
+Reproducibility is enforced by `firm/ops/check_reports_clean.sh` — it runs the eval twice and diffs the output. Any leaking randomness exits non-zero in CI. Full methodology, what each metric measures, and what's deliberately *not* measured: [`docs/eval.md`](docs/eval.md).
 
 ### Guardrails — every input, output, and trade limit
 
@@ -139,9 +169,35 @@ Every failure has a name. There are **15 in a `FailureMode` enum** with a catch-
 - **High availability** — Litestream replication of `firm.db`, an idle reaper that auto-refuses stale human approvals, crash-resumes from the LangGraph checkpoint.
 - **Standardization** — Terraform under `infra/terraform/` (network, compute, storage, secrets, observability, bedrock modules); CI on every PR (lint + types + tests + docker build + eval-clean diff). Take-home → prod delta: [`docs/path-to-production.md`](docs/path-to-production.md).
 
+### Where the data comes from
+
+| What the firm reads | Source | When |
+|---|---|---|
+| **SEC 10-Ks** (research grounding) | 84 filings from the **FinanceBench** dataset (`PatronusAI/financebench` on Hugging Face). Loaded once at `firm.cli ingest` time, chunked, embedded, and stored in Qdrant. The 150 Q&A holdout pairs (`config/financebench_eval_holdout.json`) are excluded from ingest so they stay unseen. | One-time |
+| **Historical adjusted close prices** (eval benchmarks) | `yfinance` pulls once and caches each ticker as parquet at `data/eval/prices/<TICKER>.parquet`. Eval runs in `replay` mode and never touches the network; a missing parquet is a hard error. | One-time per ticker, cached after first hit |
+| **Quotes during a live run** | `firm/broker/fake_broker.py` — quote price is a deterministic function of `SHA256(ticker, market timestamp)`, so the same heartbeat produces the same number every replay. Swap to Alpaca live quotes with `FIRM_BROKER=ALPACA`. | Every heartbeat |
+| **LLM responses** (eval and CI) | Anthropic API responses are recorded under `tests/_fixtures/cassettes/` keyed by `SHA256(model, system, messages, tools)`. `FIRM_LLM_MODE=cached` replays only; a cache miss is a hard error. This is what makes the eval byte-identical with no API key. | First record from live API, then replayed forever |
+
+Deeper retrieval-pipeline detail (chunking, hybrid search, re-rank): [`docs/architecture.md`](docs/architecture.md) and `config/rag.yaml`.
+
 ### Sample run committed
 
-Three full historical days are checked into `sample_runs/` (2023-11-08, 2024-03-13, 2024-08-07), each with `daily_report.md`, `decisions.jsonl`, `trace.jsonl`, and `positions.xlsx`. Open one to see exactly what a reviewer would see at end-of-day.
+The three windows the eval replays are checked into `sample_runs/` as snapshots, one trading day per regime:
+
+| Date | Regime | What you can see |
+|---|---|---|
+| `sample_runs/2024-03-13/` | `r1_earnings` (signal-heavy) | A day during the NVDA/ORCL/ADBE earnings week — research has the most to chew on |
+| `sample_runs/2024-08-07/` | `r2_drawdown` (risk gate stressed) | Mid sell-off — expect more REFUSE / ESCALATE outcomes |
+| `sample_runs/2023-11-08/` | `r3_quiet` (negative control) | Low-vol day — the firm should *not* trade aggressively |
+
+Each directory contains:
+
+- `daily_report.md` — what the reporter wrote at end-of-day (decision counts, cost summary, EOD reconciliation)
+- `decisions.jsonl` — full audit log, one decision per line
+- `trace.jsonl` — the OpenTelemetry stream described in the Observability section
+- `positions.xlsx` — the operator spreadsheet
+
+Open `daily_report.md` for the human-readable summary; `grep` `trace.jsonl` by `decision_id` to walk one trade end-to-end. The methodology behind which dates and why is in [`docs/eval.md`](docs/eval.md).
 
 ### Bonuses
 
@@ -152,13 +208,6 @@ Three full historical days are checked into `sample_runs/` (2023-11-08, 2024-03-
 - **Cost-aware model routing** — the router described above.
 - **Prompt-injection defenses** — input sanitizer + sufficiency judge + the red-team corpus.
 
-## Status
-
-- [x] Plan 1: Foundation + Walking Skeleton
-- [x] Plan 2: RAG + Citations + Grounding
-- [x] Plan 3: HITL + Daily Reports + Observability
-- [x] Plan 4: Eval Harness + Red Team + CI/CD + Bonuses
-
 ## Documentation index
 
 | File | Purpose |
@@ -167,7 +216,7 @@ Three full historical days are checked into `sample_runs/` (2023-11-08, 2024-03-
 | [`docs/architecture.md`](docs/architecture.md) | Logical + deployment diagrams, where each safety net sits |
 | [`docs/technical-overview.md`](docs/technical-overview.md) | Agent contracts, state lifecycle, partial-failure model |
 | [`docs/runbook.md`](docs/runbook.md) | Operator playbooks — approvals, restore, incidents |
-| [`docs/eval.md`](docs/eval.md) | Eval methodology, regimes, process metrics |
+| [`docs/eval.md`](docs/eval.md) | Eval methodology, regimes, process metrics, determinism gate |
 | [`docs/threat_model.md`](docs/threat_model.md) | STRIDE + red-team corpus |
 | [`docs/path-to-production.md`](docs/path-to-production.md) | Take-home → production delta map |
 | [`docs/agentcore_mapping.md`](docs/agentcore_mapping.md) | Bedrock AgentCore mapping |
