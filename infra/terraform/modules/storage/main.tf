@@ -93,6 +93,11 @@ resource "aws_s3_bucket_lifecycle_configuration" "traces" {
     id     = "expire-traces-after-90d"
     status = "Enabled"
 
+    # Empty filter = apply to all objects in the bucket. AWS provider v4.x+
+    # warns (will become an error) if neither `filter` nor the deprecated
+    # `prefix` is specified.
+    filter {}
+
     expiration {
       days = 90
     }

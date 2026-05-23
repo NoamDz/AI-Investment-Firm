@@ -230,15 +230,31 @@ jobs:
       # dev tfvars: main-branch plan previews the dev env; prod plans are
       # gated separately (T44 path-to-production). var.env has no default
       # in variables.tf, so -var-file is required to satisfy it in CI.
+      # `terraform plan` initialises the AWS provider, which fails if no
+      # credentials are configured. The take-home repo has no AWS account /
+      # OIDC role wired up, so skip the plan in that case — `terraform validate`
+      # in the sibling job still covers HCL correctness. To opt in, an operator
+      # sets repo secrets AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (or
+      # configures OIDC) and the plan will run end-to-end.
       - name: terraform -chdir=infra/terraform plan
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
         run: |
-          if [ -d infra/terraform ]; then
-            terraform -chdir=infra/terraform init -backend=false
-            terraform -chdir=infra/terraform plan -no-color -var-file=envs/dev.tfvars -out=tfplan.binary
-            terraform -chdir=infra/terraform show -no-color tfplan.binary > tfplan.txt
-          else
+          if [ ! -d infra/terraform ]; then
             echo "infra/terraform/ not yet created (lands in Plan 4 T31); skipping plan."
+            exit 0
           fi
+          if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+            echo "No AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY repo secrets set."
+            echo "terraform validate covers HCL correctness; skipping plan."
+            echo "To enable: configure AWS creds in repo settings; see docs/path-to-production.md."
+            exit 0
+          fi
+          terraform -chdir=infra/terraform init -backend=false
+          terraform -chdir=infra/terraform plan -no-color -var-file=envs/dev.tfvars -out=tfplan.binary
+          terraform -chdir=infra/terraform show -no-color tfplan.binary > tfplan.txt
       - name: Upload tfplan.txt artifact
         if: hashFiles('tfplan.txt') != ''
         uses: actions/upload-artifact@v4
@@ -271,9 +287,17 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # GHCR rejects mixed-case tags ("repository name must be lowercase"), but
+      # ${{ github.repository }} is `OwnerName/RepoName`. Down-case once here
+      # and reuse in both tags below.
+      - name: Compute lowercase image name
+        id: img
+        env:
+          IMAGE: ${{ github.repository }}
+        run: echo "name=${IMAGE,,}" >> "$GITHUB_OUTPUT"
       - name: docker build + push
         run: |
           docker build . \
-            --tag 'ghcr.io/${{ github.repository }}:latest' \
-            --tag 'ghcr.io/${{ github.repository }}:${{ github.sha }}' \
+            --tag "ghcr.io/${{ steps.img.outputs.name }}:latest" \
+            --tag "ghcr.io/${{ steps.img.outputs.name }}:${{ github.sha }}" \
             --push
