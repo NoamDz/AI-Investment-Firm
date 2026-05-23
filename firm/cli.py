@@ -5,8 +5,10 @@ import functools
 import itertools
 import json
 import os
+import shutil
 import sys
-from contextlib import closing
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from datetime import datetime, time, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -14,8 +16,15 @@ from typing import Any
 
 import click
 
+from jinja2 import Environment, FileSystemLoader
+
 from firm.agents.execution import make_execution
-from firm.agents.hitl import make_hitl, mark_approved, mark_rejected
+from firm.agents.hitl import (
+    make_hitl,
+    mark_approved,
+    mark_rejected,
+    reap_expired_hitl_entries,
+)
 from firm.agents.monitor import make_monitor
 from firm.agents.pm import PmVoter, make_pm
 from firm.agents.reporter import make_reporter
@@ -75,6 +84,61 @@ def _resolve_clock() -> Clock:
     if replay:
         return ReplayClock(datetime.fromisoformat(replay))
     return WallClock()
+
+
+def _compute_quote_age_seconds(quote: Any, clock: Clock) -> int:
+    """Compute age of a broker Quote in whole seconds against ``clock.now()``.
+
+    Returns ``max(0, int((now - ts).total_seconds()))``.  Falls back to 0
+    on malformed timestamps — STALE_DATA is risk-side disposition we
+    surface deterministically when the parse succeeds, and we deliberately
+    do NOT crash the heartbeat on a single bad timestamp (the risk
+    evaluator's deterministic kernel still gets exercised).
+    """
+    try:
+        ts = datetime.fromisoformat(quote.timestamp)
+    except (ValueError, TypeError):
+        return 0
+    delta = clock.now() - ts
+    return max(0, int(delta.total_seconds()))
+
+
+def _count_trades_today(db_path: Path, clock: Clock) -> int:
+    """Count BUY/SELL decisions persisted today (UTC) for the trades_today gate.
+
+    "Today" = today's UTC midnight onwards.  The risk evaluator uses this
+    count against ``policy.max_trades_per_day``; over-counting (e.g., counting
+    REFUSE/HOLD rows) would falsely trip the limit.  Inline SQL — there is
+    no existing helper for this read pattern.
+    """
+    now_utc = clock.now().astimezone(timezone.utc)
+    sod = datetime.combine(now_utc.date(), time.min, tzinfo=timezone.utc)
+    with closing(get_conn(db_path)) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM decisions "
+            "WHERE action IN ('BUY','SELL') AND created_at >= ?",
+            (sod.isoformat(),),
+        ).fetchone()
+    return int(row["n"]) if row is not None else 0
+
+
+def _compute_daily_pnl_pct(
+    db_path: Path, clock: Clock, current_nav: Decimal
+) -> float:
+    """Compute daily P&L percentage vs. start-of-day NAV.
+
+    No SOD-NAV snapshotter exists in the codebase today (positions/cash
+    tables are mutable with no time-series).  Return 0.0 to keep the
+    daily_pnl_pct gate inert until the snapshotter ships, rather than
+    shipping a half-working measurement that could trip the limit on
+    spurious values.
+    """
+    # TODO(plan5): wire SOD nav snapshotter (time-series of EOD/SOD NAV) and
+    # compute (current_nav - sod_nav) / sod_nav here.  Until then the gate
+    # is intentionally inert (0.0) — production policy.max_daily_loss_pct
+    # is still wired into the deterministic kernel; only the input is stubbed.
+    _ = db_path, clock, current_nav  # parameters reserved for the wired path
+    return 0.0
 
 
 def _db_path() -> Path:
@@ -340,12 +404,22 @@ def run(once: bool) -> None:
             ticker = proposal.payload.ticker
             quote = broker.get_quote(ticker)
             positions = {p.ticker: p.shares for p in broker.list_positions()}
-            # TODO(Plan 2): wire live quote_age_seconds / trades_today / daily_pnl_pct; stubs disable those checks
+            current_nav = broker.get_cash() + sum(
+                (p.shares * broker.get_quote(p.ticker).price for p in broker.list_positions()),
+                Decimal("0"),
+            )
+            # T21 (Plan 4): live inputs for the previously-stubbed risk gates.
+            # quote_age_seconds + trades_today are computed against real
+            # inputs; daily_pnl_pct stays at 0.0 (see _compute_daily_pnl_pct
+            # docstring — no SOD-NAV snapshotter exists yet).
             decision = evaluate_risk(RiskInput(
-                proposal=proposal, quote_price=quote.price, quote_age_seconds=0,
+                proposal=proposal, quote_price=quote.price,
+                quote_age_seconds=_compute_quote_age_seconds(quote, clock),
                 cash=broker.get_cash(), positions=positions, sector_map=universe.sector_map,
-                trades_today=0, nav=broker.get_cash() + sum((p.shares * broker.get_quote(p.ticker).price for p in broker.list_positions()), Decimal("0")),
-                daily_pnl_pct=0.0, policy=policy,
+                trades_today=_count_trades_today(db, clock),
+                nav=current_nav,
+                daily_pnl_pct=_compute_daily_pnl_pct(db, clock, current_nav),
+                policy=policy,
             ))
             # T03: propagate the deterministic failure_mode onto the span so
             # dashboards can split RISK_LIMIT_BREACHED vs STALE_DATA vs the
@@ -371,12 +445,30 @@ def run(once: bool) -> None:
             click.echo(f"[firm run] Slack notifier unavailable: {_exc}", err=True)
 
     hitl = make_hitl(db_path=db, clock=clock, notifier=_notifier)
-    execution = make_execution(db_path=db, broker=broker, clock=clock)
+    execution = make_execution(
+        db_path=db, broker=broker, clock=clock, nonce_secret=nonce_secret
+    )
     reporter = make_reporter(reports_root=_reports_root(), clock=clock, db_path=db)
 
     graph = build_graph(
         db_path=db, monitor_node=monitor, research_node=research, pm_node=pm,
         risk_node=risk_node, hitl_node=hitl, execution_node=execution, reporter_node=reporter,
+    )
+
+    # T24 (Plan 4): one HITL aging sweep per heartbeat.
+    # The graph topology routes risk → (hitl | execution) → reporter via a
+    # conditional edge; clean insertion of a reaper "between hitl and
+    # execution" would require non-trivial graph rewiring (the conditional
+    # router currently dispatches on risk.action == ESCALATE, not on a
+    # hitl-output sentinel). The reaper is conceptually a maintenance
+    # sweep over rows queued by PRIOR heartbeats, so running it once per
+    # `firm run` invocation (before the current heartbeat's graph kick-off)
+    # is the natural placement: any pending hitl_queue row whose deadline
+    # has elapsed is reaped and a REFUSE/UNAPPROVED_HIGH_RISK Decision is
+    # written before this heartbeat proceeds. The reaper is no-op when no
+    # rows have aged out.
+    reap_expired_hitl_entries(
+        db_path=db, clock=clock, nonce_secret=nonce_secret
     )
 
     config: RunnableConfig = {"configurable": {"thread_id": clock.now().isoformat()}}
@@ -555,8 +647,6 @@ def _make_fixture_loader(fixture_path: str) -> Any:
 )
 def ingest(config: str, max_docs: int | None, source_name: str) -> None:
     """Ingest one or more corpora into Qdrant. Idempotent — already-indexed docs are skipped."""
-    from collections.abc import Iterator
-
     from firm.llm.anthropic_client import CachedAnthropicClient
     from firm.llm.cache import LlmCache
     from firm.rag.chunk import chunk_document
@@ -764,6 +854,296 @@ def doctor(db_path_str: str | None, litestream_dir: str, rag_config_path_str: st
     click.echo(format_results(results))
     non_ok = sum(1 for r in results if r.status != "OK")
     sys.exit(non_ok)
+
+
+@cli.command(name="red-team")
+@click.option(
+    "--vcr-mode",
+    default="replay",
+    type=click.Choice(["replay", "record", "live"]),
+    show_default=True,
+    help="VCR cassette mode passed to FIRM_VCR_MODE.",
+)
+@click.option(
+    "--timeout",
+    default=60,
+    type=int,
+    show_default=True,
+    help="Soft wall-clock budget in seconds (warning only, not a hard fail).",
+)
+def red_team(vcr_mode: str, timeout: int) -> None:
+    """Run the red-team injection corpus (50 cases × 10 classes)."""
+    import time
+
+    import pytest
+
+    os.environ["FIRM_VCR_MODE"] = vcr_mode
+
+    # 10 per-class test files (T07) — enumerate explicitly to exclude schema/helper files.
+    test_files = [
+        "tests/red_team/test_direct_override.py",
+        "tests/red_team/test_role_hijack.py",
+        "tests/red_team/test_delimiter_break.py",
+        "tests/red_team/test_unicode_homoglyph.py",
+        "tests/red_team/test_encoded_payload.py",
+        "tests/red_team/test_indirect_tool_output.py",
+        "tests/red_team/test_multi_step_chain.py",
+        "tests/red_team/test_citation_forgery.py",
+        "tests/red_team/test_spoofed_approval.py",
+        "tests/red_team/test_confused_deputy.py",
+    ]
+
+    class _CountPlugin:
+        passed: int = 0
+        failed: int = 0
+        total: int = 0
+
+        def pytest_runtest_logreport(self, report: Any) -> None:
+            if report.when == "call":
+                self.total += 1
+                if report.outcome == "passed":
+                    self.passed += 1
+                elif report.outcome != "skipped":
+                    self.failed += 1
+
+    plugin = _CountPlugin()
+    start = time.monotonic()
+    rc = pytest.main(["-q", *test_files], plugins=[plugin])
+    elapsed = time.monotonic() - start
+
+    click.echo(f"{plugin.passed}/{plugin.total} passed")
+    if elapsed > timeout:
+        click.echo(
+            f"WARN: suite took {elapsed:.1f}s > {timeout}s budget", err=True
+        )
+    if rc != 0 or plugin.failed > 0:
+        sys.exit(1)
+
+
+_EVAL_DEFAULT_ENV: dict[str, str] = {
+    # Deterministic defaults for ``firm eval``. Set ONLY if the env var is
+    # unset — operator overrides win. The HMAC default is 64 hex zeros; it
+    # is fixture-grade and MUST NOT be used in production.
+    "FIRM_LLM_MODE": "cached",
+    "FIRM_VCR_MODE": "replay",
+    "FIRM_PRICES_MODE": "replay",
+    "FIRM_RANDOM_SEED": "42",
+    "FIRM_HMAC_SECRET": "0" * 64,
+}
+
+# Env vars the eval command may mutate. Captured + restored by
+# ``_with_env_restored`` so CliRunner.invoke (or any in-process re-entry)
+# doesn't leak state — most importantly FIRM_REPORTS_ROOT, which the
+# command points into a tmp-scoped artifacts dir that the test harness
+# may delete after the invocation.
+_EVAL_MUTATED_ENV: tuple[str, ...] = (
+    "FIRM_REPORTS_ROOT",
+    "FIRM_LLM_MODE",
+    "FIRM_VCR_MODE",
+    "FIRM_PRICES_MODE",
+    "FIRM_RANDOM_SEED",
+    "FIRM_HMAC_SECRET",
+    "FIRM_EVAL_SKIP_MISCONFIG",
+)
+
+
+def _apply_eval_env_defaults() -> None:
+    """Set each :data:`_EVAL_DEFAULT_ENV` key iff the env var is unset.
+
+    Determinism for ``firm eval`` rests on cached LLM / replayed VCR /
+    replayed prices / pinned RNG seed. The CLI sets these once at entry
+    time so the heartbeat factory + run_regime never see drift between
+    calls within the same process.
+    """
+    for k, v in _EVAL_DEFAULT_ENV.items():
+        os.environ.setdefault(k, v)
+
+
+@contextmanager
+def _with_env_restored(*keys: str) -> Iterator[None]:
+    """Capture env vars in *keys* on entry, restore them on exit.
+
+    Vars that were absent on entry are deleted on exit (not left as the
+    empty string). Used to scope eval-command mutations to the duration
+    of the invocation so in-process re-entry (CliRunner.invoke + tests)
+    doesn't see stale FIRM_REPORTS_ROOT etc.
+    """
+    sentinel: object = object()
+    prior: dict[str, object] = {k: os.environ.get(k, sentinel) for k in keys}
+    try:
+        yield
+    finally:
+        for k, v in prior.items():
+            if v is sentinel:
+                os.environ.pop(k, None)
+            else:
+                assert isinstance(v, str)
+                os.environ[k] = v
+
+
+def _load_summary_template() -> Any:
+    """Load the ``summary.md.j2`` template from ``firm/reports/templates``."""
+    templates_dir = Path(__file__).resolve().parent / "reports" / "templates"
+    env = Environment(
+        loader=FileSystemLoader(str(templates_dir)),
+        autoescape=False,
+        keep_trailing_newline=True,
+    )
+    return env.get_template("summary.md.j2")
+
+
+@cli.command(name="eval")
+@click.option(
+    "--regime",
+    "regime_id",
+    type=click.Choice(["r1", "r2", "r3", "all"], case_sensitive=False),
+    default="all",
+    show_default=True,
+    help="Which regime to run (r1/r2/r3) or 'all' for the full sweep.",
+)
+@click.option(
+    "--output-dir",
+    "output_dir_str",
+    default=None,
+    show_default=True,
+    help="Where to write per-regime + summary reports (default: reports/eval).",
+)
+@click.option(
+    "--db-dir",
+    "db_dir_str",
+    default=None,
+    help="Where to write per-regime sqlite DBs (default: <output-dir>/_dbs).",
+)
+def eval_cmd(
+    regime_id: str, output_dir_str: str | None, db_dir_str: str | None
+) -> None:
+    """Run the eval harness on one or all regimes; write reports/eval/.
+
+    Idempotent: deleting the output directory and re-running produces
+    byte-identical files. Determinism is pinned by env-var defaults
+    (see :data:`_EVAL_DEFAULT_ENV`); operator overrides are respected.
+
+    The body is wrapped in ``_with_env_restored`` so the env vars the
+    command mutates (notably ``FIRM_REPORTS_ROOT``) are restored on exit;
+    this prevents in-process re-entry (CliRunner.invoke in tests) from
+    inheriting a stale path that points into a deleted tmp dir.
+    """
+    from firm.eval.aggregate import build_summary_context
+    from firm.eval.benchmarks import (
+        PriceCassetteMissError,
+        compute_basket_return,
+        compute_spy_return,
+    )
+    from firm.eval.heartbeat import make_eval_heartbeat
+    from firm.eval.regimes import (
+        ALL_REGIMES,
+        R1_EARNINGS,
+        R2_DRAWDOWN,
+        R3_QUIET,
+        RegimeConfig,
+    )
+    from firm.eval.runner import RegimeReport, run_regime
+
+    with _with_env_restored(*_EVAL_MUTATED_ENV):
+        # Determinism defaults BEFORE any subsystem reads them.
+        _apply_eval_env_defaults()
+
+        # Resolve output + db dirs.
+        output_dir = (
+            Path(output_dir_str)
+            if output_dir_str
+            else Path("reports") / "eval"
+        )
+        db_dir = Path(db_dir_str) if db_dir_str else (output_dir / "_dbs")
+
+        # Redirect reporter side-effects into the eval-scoped artifacts dir so
+        # ``firm eval`` never mutates ``data/reports/`` from ``firm run``.
+        artifacts_root = output_dir / "_artifacts"
+        os.environ["FIRM_REPORTS_ROOT"] = str(artifacts_root)
+
+        # Idempotency: nuke + recreate output + db dirs so a second invocation
+        # starts from the same blank slate as the first.
+        for d in (output_dir, db_dir):
+            if d.exists():
+                shutil.rmtree(d)
+            d.mkdir(parents=True, exist_ok=True)
+        artifacts_root.mkdir(parents=True, exist_ok=True)
+
+        # Resolve the regime list.
+        regime_map: dict[str, RegimeConfig] = {
+            "r1": R1_EARNINGS,
+            "r2": R2_DRAWDOWN,
+            "r3": R3_QUIET,
+        }
+        if regime_id.lower() == "all":
+            regimes_to_run: list[RegimeConfig] = list(ALL_REGIMES)
+        else:
+            regimes_to_run = [regime_map[regime_id.lower()]]
+
+        # Per-regime: pre-resolve benchmarks at the TOP of the loop so a
+        # missing cassette fails the run BEFORE the heartbeat does any work
+        # (Plan 4 T16.1 fix-up). Previously a missing cassette emitted a
+        # silent 0.0 stub which masked broken determinism gates; the run
+        # now raises click.ClickException with operator-actionable guidance.
+        prices_dir = Path("data/prices_eval")
+        reports: list[RegimeReport] = []
+        for regime in regimes_to_run:
+            try:
+                spy_return = compute_spy_return(
+                    regime.start_date,
+                    regime.end_date,
+                    prices_dir=prices_dir,
+                )
+            except PriceCassetteMissError as exc:
+                raise click.ClickException(
+                    f"Price cassette missing for SPY benchmark in regime "
+                    f"{regime.regime_id}: {exc}. Run `python "
+                    f"scripts/eval_capture.py --stub` to generate fixture "
+                    f"cassettes, or `python scripts/eval_capture.py` (with "
+                    f"ANTHROPIC_API_KEY) for production-fidelity recording. "
+                    f"See docs/runbook.md §'make eval'."
+                ) from exc
+            try:
+                basket_return = compute_basket_return(
+                    list(regime.universe),
+                    regime.start_date,
+                    regime.end_date,
+                    prices_dir=prices_dir,
+                )
+            except PriceCassetteMissError as exc:
+                raise click.ClickException(
+                    f"Price cassette missing for basket benchmark in regime "
+                    f"{regime.regime_id}: {exc}. Run `python "
+                    f"scripts/eval_capture.py --stub` to generate fixture "
+                    f"cassettes, or `python scripts/eval_capture.py` (with "
+                    f"ANTHROPIC_API_KEY) for production-fidelity recording. "
+                    f"See docs/runbook.md §'make eval'."
+                ) from exc
+
+            heartbeat = make_eval_heartbeat(
+                regime, reports_root=artifacts_root / regime.regime_id
+            )
+            report = run_regime(
+                regime,
+                output_dir=output_dir,
+                db_path=db_dir / f"{regime.regime_id}.db",
+                heartbeat=heartbeat,
+                spy_return=spy_return,
+                basket_return=basket_return,
+                final_marks={},
+            )
+            reports.append(report)
+
+        # Cross-regime summary.
+        template = _load_summary_template()
+        ctx = build_summary_context(reports)
+        rendered = template.render(**ctx)
+        summary_path = output_dir / "summary.md"
+        summary_path.write_bytes(rendered.encode("utf-8"))
+
+        click.echo(
+            f"Eval done. {len(reports)} regimes. Summary: {summary_path}"
+        )
 
 
 def _collect_chunk_texts(

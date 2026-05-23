@@ -2,6 +2,20 @@
 
 Multi-agent paper-trading firm. Take-home for Cato Networks — Agentic AI Engineer.
 
+[![PR CI](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/pr.yml/badge.svg)](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/pr.yml)
+[![Main CI](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/main.yml/badge.svg?branch=main)](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/main.yml)
+[![Release](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/release.yml/badge.svg)](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/release.yml)
+
+## CI workflows
+
+Three GitHub Actions workflows gate every commit through release:
+
+- **pr.yml** — runs on every PR to `main`. Gates: lint (ruff+mypy), pytest (non-models + soft requires-models), 1-regime eval (`make eval REGIME=r1`) + determinism check, red-team suite, terraform validate (graceful skip until `infra/` exists), docker build (no push).
+- **main.yml** — runs on every merge to `main`. Adds the full 3-regime eval (`make eval REGIME=all`), terraform plan, docker push to GHCR (`:latest` + `:<sha>`), and uploads `reports/eval/summary.md` as a workflow artifact for downstream releases.
+- **release.yml** — runs on every semver tag push (`v[0-9]+.[0-9]+.[0-9]+*`, prereleases allowed via `-rc1` etc.). Re-verifies the tagged commit (lint + pytest + red-team + 1-regime eval + terraform validate), builds the release zip with sha256, downloads the matching main.yml `eval-summary` artifact, and publishes a GitHub Release with the zip + checksum + eval summary attached.
+
+Each badge above links to that workflow's run history.
+
 ## Quickstart (hybrid: GPU ingest on host → container runtime)
 
 Embedding the FinanceBench corpus is the only heavy step. We do it on the host so it
@@ -170,6 +184,66 @@ Writes the bundle to `data/reports/2024-03-13/`:
 
 Equivalent without `make`: `python -m firm.cli report --date 2024-03-13`
 
+## Eval harness
+
+`make eval` runs a 3-regime smoke sweep (trending / sideways / volatile) and
+re-renders `reports/eval/summary.md`. The Main CI badge above tracks this on
+every push to main.
+
+```powershell
+make eval
+# Equivalent without make:
+python -m firm.cli eval
+```
+
+Output paths written on each run:
+
+- `reports/eval/r1/regime.md` — trending regime scorecard
+- `reports/eval/r2/regime.md` — sideways regime scorecard
+- `reports/eval/r3/regime.md` — volatile regime scorecard
+- `reports/eval/summary.md` — cross-regime aggregate
+
+**Determinism gate** — cassettes pin every LLM call and the RNG is seeded, so
+eval output is byte-stable across re-runs. CI asserts `git diff --exit-code
+reports/` after eval; any drift fails the build.
+
+See `docs/eval.md` for the full design (metrics, regimes, "not measured" list).
+
+## Deployment
+
+AWS infrastructure is sketched in Terraform (`infra/terraform/`). The Reporter
+agent also runs on AWS Bedrock AgentCore's local runtime via an adapter in
+`firm/agentcore/reporter_adapter.py`.
+
+A captured dry-run plan lives at `infra/terraform/PLAN.md` — it's already
+committed; read it to see what would be created without touching AWS.
+
+To regenerate the plan locally (requires AWS credentials + the `terraform` CLI):
+
+```powershell
+terraform -chdir=infra/terraform plan -var-file=envs/dev.tfvars
+```
+
+To actually provision the dev stack:
+
+```powershell
+# HUMAN-GATED live apply against the AWS dev account — prompts for 'DEPLOY'
+# confirmation and creates real resources (~$60/mo idle). Don't run this
+# unless you actually want to spin up infrastructure.
+make deploy-dev
+```
+
+To run the AgentCore Reporter locally:
+
+```powershell
+pip install -e ".[agentcore]"
+# Then invoke via the local runtime entry point:
+python firm/agentcore/reporter_adapter.py
+```
+
+See `docs/path-to-production.md` for the take-home → prod delta map, and
+`docs/agentcore_mapping.md` for the firm-to-AgentCore migration table.
+
 ### Restore from backup (SQLite)
 
 SQLite (`data/firm.db`) is continuously replicated by the `litestream` service.
@@ -209,10 +283,14 @@ Then `docker compose up firm`.
 - Plan 2 summary: `docs/implementation_summary_plan_2.md`
 - Full design spec: `docs/superpowers/specs/2026-05-18-ai-investment-firm-design.md`
 - Operator runbook: `docs/runbook.md`
+- AgentCore migration map: `docs/agentcore_mapping.md`
+- Eval harness design: `docs/eval.md`
+- Threat model: `docs/threat_model.md`
+- Path to production: `docs/path-to-production.md`
 
 ## Status
 
 - [x] Plan 1: Foundation + Walking Skeleton
 - [x] Plan 2: RAG + Citations + Grounding
 - [x] Plan 3: HITL + Daily Reports + Observability
-- [ ] Plan 4: Eval Harness + Red Team + CI/CD + Bonuses
+- [x] Plan 4: Eval Harness + Red Team + CI/CD + Bonuses

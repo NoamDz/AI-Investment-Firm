@@ -1,0 +1,90 @@
+{
+  "widgets": [
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 0,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "Heartbeat duration (ms)",
+        "view": "timeSeries",
+        "region": "${region}",
+        "metrics": [
+          [
+            {
+              "expression": "SELECT PERCENTILE(HeartbeatDurationMs, 50) FROM SCHEMA(\"firm/${env}\") GROUP BY ALL",
+              "label": "p50",
+              "id": "p50",
+              "period": 60
+            }
+          ],
+          [
+            {
+              "expression": "SELECT PERCENTILE(HeartbeatDurationMs, 95) FROM SCHEMA(\"firm/${env}\") GROUP BY ALL",
+              "label": "p95",
+              "id": "p95",
+              "period": 60
+            }
+          ]
+        ],
+        "period": 60,
+        "stat": "p50"
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12,
+      "y": 0,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "Cost by model (USD/hour)",
+        "view": "bar",
+        "region": "${region}",
+        "metrics": [
+          [
+            "firm/${env}",
+            "CostUsd",
+            "Model",
+            "ALL",
+            {
+              "stat": "Sum",
+              "period": 3600
+            }
+          ]
+        ],
+        "period": 3600,
+        "stat": "Sum"
+      }
+    },
+    {
+      "type": "log",
+      "x": 0,
+      "y": 6,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "failure_mode distribution",
+        "view": "pie",
+        "region": "${region}",
+        "query": "SOURCE '${log_group}' | fields @timestamp, failure_mode | filter failure_mode != \"NONE\" and ispresent(failure_mode) | stats count() by failure_mode",
+        "period": 3600
+      }
+    },
+    {
+      "type": "log",
+      "x": 12,
+      "y": 6,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "Decision actions",
+        "view": "bar",
+        "region": "${region}",
+        "query": "SOURCE '${log_group}' | fields @timestamp, action | filter ispresent(action) | stats count() by action",
+        "period": 3600
+      }
+    }
+  ]
+}

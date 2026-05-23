@@ -1,0 +1,189 @@
+# ---------------------------------------------------------------------------
+# PR workflow (Plan 4 T27)
+#
+# Triggers on every pull request. Mirrors the gating tape in the task spec:
+#   checkout -> setup Python 3.11 -> pip install -e ".[dev]"
+#   -> ruff -> mypy -> pytest (non-models) -> pytest (requires_models, soft)
+#   -> make eval REGIME=r1 -> scripts/check_reports_clean.sh
+#   -> make red-team -> terraform validate -> docker build (no push)
+#
+# Wall-clock budget: <=10 min wall via full job parallelism (within the
+# 15-min spec budget). Every job runs with no `needs:` dependencies, so
+# wall time = max(per-job timeout-minutes) = 10 min (unit-tests /
+# requires-models). Per-job timeouts are tuned so a stuck job fails fast
+# rather than burning the 15-minute envelope.
+#
+# Job graph (all parallel, no inter-job deps):
+#   lint                (5 min)
+#   unit-tests          (10 min)
+#   requires-models     (10 min; continue-on-error, informational only)
+#   eval-r1             (8 min)
+#   red-team            (5 min)
+#   terraform-validate  (3 min; skips gracefully until T31 lands infra/)
+#   docker-build        (8 min)
+#
+# Action versions are pinned to MAJOR (e.g. @v4) for supply-chain hygiene.
+# ---------------------------------------------------------------------------
+name: PR
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same PR (force-push, rebase) to free runners.
+concurrency:
+  group: 'pr-${{ github.workflow }}-${{ github.head_ref || github.ref }}'
+  cancel-in-progress: true
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Static checks: lint + type-check. Fast gate; runs in parallel with tests.
+  # -------------------------------------------------------------------------
+  lint:
+    name: lint (ruff + mypy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'pyproject.toml'
+      - name: Install dev extras
+        run: pip install -e ".[dev]"
+      - name: ruff check
+        run: ruff check .
+      - name: mypy firm/
+        run: mypy firm/
+
+  # -------------------------------------------------------------------------
+  # Unit + fast integration tests: every test NOT marked requires_models.
+  # Blocking gate for eval-r1.
+  # -------------------------------------------------------------------------
+  unit-tests:
+    name: pytest (not requires_models)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'pyproject.toml'
+      - name: Install dev extras
+        run: pip install -e ".[dev]"
+      - name: pytest -m "not requires_models"
+        run: pytest -m "not requires_models" -q
+
+  # -------------------------------------------------------------------------
+  # Heavy tests gated on a downloaded model. Allowed to time out / fail —
+  # this job is informational; PR merge does not depend on its result.
+  # -------------------------------------------------------------------------
+  requires-models:
+    name: pytest (requires_models, soft)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'pyproject.toml'
+      - name: Install dev extras
+        run: pip install -e ".[dev]"
+      - name: pytest -m "requires_models"
+        run: pytest -m "requires_models" -q
+
+  # -------------------------------------------------------------------------
+  # Eval harness, single regime (r1) for PR-speed. Also runs the
+  # determinism check on the produced reports/eval/ tree.
+  #
+  # No `needs:` on unit-tests — runs fully in parallel to keep the wall
+  # budget at <=10 min. If unit-tests fail, the PR is already red; serializing
+  # eval behind it would push the worst-case chain to 18 min (over budget)
+  # without preventing any new class of failure.
+  # -------------------------------------------------------------------------
+  eval-r1:
+    name: eval (regime r1) + determinism
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      # Fixture-grade HMAC secret (64 hex zeros) — mirrors
+      # scripts/eval_capture.py::_DEFAULT_HMAC_SECRET. NEVER a real secret;
+      # only used to satisfy HMAC verification during replay.
+      FIRM_HMAC_SECRET: '0000000000000000000000000000000000000000000000000000000000000000'
+      # Use recorded cassettes; the PR runner has no Anthropic API key.
+      FIRM_VCR_MODE: 'replay'
+      FIRM_LLM_MODE: 'cached'
+      FIRM_PRICES_MODE: 'replay'
+      FIRM_RANDOM_SEED: '42'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'pyproject.toml'
+      - name: Install dev extras
+        run: pip install -e ".[dev]"
+      - name: make eval REGIME=r1
+        run: make eval REGIME=r1
+      - name: scripts/check_reports_clean.sh
+        run: bash scripts/check_reports_clean.sh
+
+  # -------------------------------------------------------------------------
+  # Red-team suite: invariant-based adversarial tests over the 10 failure
+  # mode classes. Independent of unit-tests; runs in parallel.
+  # -------------------------------------------------------------------------
+  red-team:
+    name: red-team
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'pyproject.toml'
+      - name: Install dev extras
+        run: pip install -e ".[dev]"
+      - name: make red-team
+        run: make red-team
+
+  # -------------------------------------------------------------------------
+  # Terraform validate: lands properly once T31 creates infra/terraform/.
+  # Until then, skip gracefully so PRs aren't blocked on an absent dir.
+  # -------------------------------------------------------------------------
+  terraform-validate:
+    name: terraform validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: terraform -chdir=infra/terraform validate
+        run: |
+          if [ -d infra/terraform ]; then
+            terraform -chdir=infra/terraform init -backend=false
+            terraform -chdir=infra/terraform validate
+          else
+            echo "infra/terraform/ not yet created (lands in Plan 4 T31); skipping."
+          fi
+
+  # -------------------------------------------------------------------------
+  # Sanity: the Dockerfile still builds. No push — that is T28 (main.yml).
+  # -------------------------------------------------------------------------
+  docker-build:
+    name: docker build (no push)
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: docker build .
+        run: docker build . --tag 'firm:pr-${{ github.sha }}'

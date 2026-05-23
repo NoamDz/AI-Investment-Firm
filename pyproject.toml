@@ -31,6 +31,8 @@ dependencies = [
     "slack-sdk>=3.27",
     "python-dateutil>=2.9",  # relativedelta for rolling 12-month news window
     "requests>=2.31",  # production HTTP client for news adapter
+    "yfinance>=0.2.40",
+    "pyarrow>=15.0",   # explicit (already transitively required by fundamentals.py)
 ]
 
 [project.optional-dependencies]
@@ -41,6 +43,17 @@ dev = [
     "mypy>=1.10",
     "httpx>=0.27",  # only used by fastapi.testclient.TestClient
     "types-openpyxl>=3.1",
+    "types-PyYAML>=6.0",
+]
+# Plan 4 §T41 — AWS Bedrock AgentCore Runtime adapter (Reporter only in
+# Plan 4; see ``docs/agentcore_mapping.md`` for the full migration map).
+# The SDK is pre-1.0 (PyPI: ``bedrock-agentcore-sdk``) so the public API
+# may drift; ``firm/agentcore/reporter_adapter.py`` pins the symbol names
+# it imports and raises a friendly ImportError pointing operators back
+# here if the extra is not installed. Default ``pip install -e .`` does
+# NOT pull this in — the core LangGraph path runs without the SDK.
+agentcore = [
+    "bedrock-agentcore-sdk>=0.1",
 ]
 
 [project.scripts]
@@ -49,7 +62,11 @@ firm = "firm.cli:main"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
-markers = ["requires_models: tests that need a downloaded model"]
+markers = [
+    "requires_models: tests that need a downloaded model",
+    "vcr_replay: replay-mode integration tests using recorded LLM cassettes",
+    "live: opt-in tests that hit real external APIs; require FIRM_E2E_LIVE=1",
+]
 
 [tool.ruff]
 line-length = 100

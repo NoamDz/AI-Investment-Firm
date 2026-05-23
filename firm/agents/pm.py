@@ -49,6 +49,40 @@ from firm.orchestrator.state import WorkingState
 # to a constant so a future provider rename only changes one site.
 _PROVIDER_ANTHROPIC = "anthropic"
 
+# ---------------------------------------------------------------------------
+# T19 — PM-level prompt-injection sanitiser
+# ---------------------------------------------------------------------------
+
+# Known injection signatures. Each entry is already lower-cased so the
+# per-call check only needs to lower-case the *input* text once.
+_INJECTION_SIGNATURES: tuple[str, ...] = (
+    # Closing pseudo-XML role/tool tags used to fake conversation boundaries.
+    "</user>",
+    "</system>",
+    "</tool_output>",
+    # Opening tool-call tag fragment.
+    "<tool_call",
+    # End-of-document marker used to fake completion of the prior turn.
+    "[end of document]",
+    # Markdown section header simulating a new system prompt block.
+    "## system",
+    # Schema-bypass markers (both quote styles).
+    "schema_bypass",
+    '"override": true',
+    "'override': true",
+)
+
+
+def _detect_prompt_injection(text: str) -> bool:
+    """Return True when ``text`` matches a known prompt-injection signature.
+
+    Performs a single ``.lower()`` on the input and then checks each entry in
+    :data:`_INJECTION_SIGNATURES` (which are already lower-cased) using plain
+    substring membership — no regex backtracking, constant overhead per call.
+    """
+    lowered = text.lower()
+    return any(sig in lowered for sig in _INJECTION_SIGNATURES)
+
 # T08 escalation hook: PM default profile, and the profile used when the
 # sufficiency judge returned PARTIAL but a human ack overrode (so PM is
 # voting on a HITL-approved-but-marginal idea, where opus's deeper reasoning
@@ -77,6 +111,13 @@ class PmVote(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     rationale: str = Field(min_length=1)
     cited_claim_ids: list[str]
+    # Bundle E bonus: ids the LLM cited that were NOT in the valid set
+    # (``c1``, ``c2``, ...) and therefore filtered out by ``PmVoter.vote``.
+    # ``make_pm`` propagates the failure to a Decision-level
+    # ``FailureMode.UNCITED_CLAIM`` REFUSE when this list is non-empty on
+    # any of the three voters.  Default empty so legacy test fixtures
+    # constructing PmVote directly do not break.
+    forged_cited_claim_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _vote_is_buy_hold_or_sell(self) -> "PmVote":
@@ -241,13 +282,20 @@ class PmVoter:
             ) from exc
 
         # Server-side filter: keep only ids that were actually provided.
+        # Capture the dropped ids so ``make_pm`` can stamp UNCITED_CLAIM on the
+        # Decision when the LLM forged citation ids the caller did not supply.
         filtered_ids = [cid for cid in vote_obj.cited_claim_ids if cid in valid_id_set]
+        forged_ids = [cid for cid in vote_obj.cited_claim_ids if cid not in valid_id_set]
         # Re-instantiate via model_validate so all validators (e.g. the
         # BUY/HOLD/SELL invariant) re-run; model_copy(update=...) would
         # silently bypass them.
         try:
             vote_obj = PmVote.model_validate(
-                {**vote_obj.model_dump(), "cited_claim_ids": filtered_ids}
+                {
+                    **vote_obj.model_dump(),
+                    "cited_claim_ids": filtered_ids,
+                    "forged_cited_claim_ids": forged_ids,
+                }
             )
         except (ValidationError, KeyError, ValueError) as exc:
             raise PmVoteSchemaError(
@@ -604,6 +652,36 @@ def make_pm(
             # Use research.rationale as the question proxy (see docstring).
             question = research.rationale
 
+            # T19 — Prompt-injection gate: scan research rationale and every
+            # Claim text before any LLM call is made. Short-circuit to REFUSE
+            # with PROMPT_INJECTION_DETECTED if a signature matches.
+            _injection_texts = [research.rationale] + [c.text for c in claims]
+            if any(_detect_prompt_injection(t) for t in _injection_texts):
+                pm_decision_id = ulid_new()
+                injection_metadata: dict[str, Any] = {"agent": "pm"}
+                oldest_age = research.metadata.get("oldest_filing_age_days")
+                if oldest_age is not None:
+                    injection_metadata["oldest_filing_age_days"] = oldest_age
+                injection_refuse = Decision(
+                    id=pm_decision_id,
+                    decision_id_chain=[research.id],
+                    action=ActionEnum.REFUSE,
+                    payload=RefusePayload(reason="pm:prompt_injection_detected"),
+                    rationale=(
+                        "PM sanitiser detected prompt-injection signature in"
+                        " upstream claims or research rationale"
+                    ),
+                    confidence=0.0,
+                    citations=list(research.citations),
+                    falsification_condition=research.falsification_condition,
+                    escalation_reason=None,
+                    failure_mode=FailureMode.PROMPT_INJECTION_DETECTED,
+                    metadata=injection_metadata,
+                    nonce="pm",
+                )
+                stamp_decision(span, injection_refuse.id, injection_refuse.failure_mode)
+                return {"pm_decision": injection_refuse, "pm_votes": []}
+
             # T08 wiring: hoisted ahead of the voter loop so the same id is
             # used to bind the router client AND to stamp the emitted PM
             # Decision below. Ledger rows written by the router during
@@ -718,6 +796,51 @@ def make_pm(
                 "pm.latency_delta_ms",
                 round(sequential_estimate_ms - parallel_elapsed_ms, 2),
             )
+
+            # Bundle E bonus — UNCITED_CLAIM stamping in production.
+            # ``PmVoter.vote`` filters unknown cited_claim_ids silently
+            # (legacy behaviour preserved so downstream payloads stay clean);
+            # before that this was test-harness-only stamping in
+            # tests/red_team/conftest.py:_run_pm. Now the production path
+            # checks whether any voter dropped forged ids and emits a REFUSE
+            # Decision with FailureMode.UNCITED_CLAIM, which closes the same
+            # gap that T23/T24 closed for their respective failure modes
+            # (no test-only enforcement; no schema reference to a
+            # CitationVerifier that does not exist in the repo).
+            all_forged_ids: list[str] = []
+            for v in votes:
+                all_forged_ids.extend(v.forged_cited_claim_ids)
+            if all_forged_ids:
+                forged_metadata: dict[str, Any] = {
+                    "agent": "pm",
+                    "forged_cited_claim_ids": sorted(set(all_forged_ids)),
+                }
+                oldest_age = research.metadata.get("oldest_filing_age_days")
+                if oldest_age is not None:
+                    forged_metadata["oldest_filing_age_days"] = oldest_age
+                forged_refuse = Decision(
+                    id=pm_decision_id,
+                    decision_id_chain=[research.id],
+                    action=ActionEnum.REFUSE,
+                    payload=RefusePayload(reason="pm:uncited_claim"),
+                    rationale=(
+                        f"PM voter(s) cited claim id(s) "
+                        f"{sorted(set(all_forged_ids))!r} that were not in "
+                        f"the supplied claim set; conservative REFUSE."
+                    ),
+                    confidence=0.0,
+                    citations=list(research.citations),
+                    falsification_condition=research.falsification_condition,
+                    escalation_reason=None,
+                    failure_mode=FailureMode.UNCITED_CLAIM,
+                    metadata=forged_metadata,
+                    nonce="pm",
+                )
+                stamp_decision(span, forged_refuse.id, forged_refuse.failure_mode)
+                return {
+                    "pm_decision": forged_refuse,
+                    "pm_votes": [v.model_dump(mode="json") for v in votes],
+                }
 
             action, confidence, combined_rationale, fmode = aggregate_votes(votes)
             payload = _payload_for(action, research)

@@ -38,7 +38,7 @@ def test_execution_fires_buy(tmp_path: Path):
         failure_mode=None, metadata={}, nonce="n",
     )
     _persist(db, d, clock)
-    exe = make_execution(db_path=db, broker=broker, clock=clock)
+    exe = make_execution(db_path=db, broker=broker, clock=clock, nonce_secret=b"x" * 32)
     out = exe({"risk_decision": d, "hitl_required": False})
     assert "execution_result" in out
     assert out["execution_result"]["ticker"] == "AAPL"
@@ -57,7 +57,7 @@ def test_execution_skips_on_refuse(tmp_path: Path):
         failure_mode=None, metadata={}, nonce="n",
     )
     _persist(db, d, clock)
-    exe = make_execution(db_path=db, broker=broker, clock=clock)
+    exe = make_execution(db_path=db, broker=broker, clock=clock, nonce_secret=b"x" * 32)
     out = exe({"risk_decision": d, "hitl_required": False})
     assert out.get("execution_result") is None or out["execution_result"].get("skipped")
 
@@ -75,6 +75,6 @@ def test_execution_skips_when_hitl_not_approved(tmp_path: Path):
         failure_mode=None, metadata={}, nonce="n",
     )
     _persist(db, d, clock)
-    exe = make_execution(db_path=db, broker=broker, clock=clock)
+    exe = make_execution(db_path=db, broker=broker, clock=clock, nonce_secret=b"x" * 32)
     out = exe({"risk_decision": d, "hitl_required": True, "hitl_approved": False})
     assert out.get("execution_result") is None or out["execution_result"].get("skipped")

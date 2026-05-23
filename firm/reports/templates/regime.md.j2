@@ -1,0 +1,69 @@
+{# Per-regime detail report (Plan 4 §T14, spec §9.7).
+
+   Renders the FULL §9.7 shape for ONE regime: top banner, one
+   ``REGIME 1:`` block (the per-regime detail doc is always numbered 1;
+   the multi-regime ``summary.md`` is the one that numbers across all
+   three), the aggregated PROCESS METRICS block computed from THIS
+   regime's data, and the hard-coded NOT MEASURED block from §9.6.
+
+   Context contract (set by ``firm.eval.runner.run_regime``):
+
+     regime_id       : str  — e.g. "r1_earnings"
+     description     : str  — e.g. "earnings-heavy"
+     start_date      : str  — ISO date, e.g. "2024-03-11"
+     end_date        : str  — ISO date, e.g. "2024-03-15"
+     header_dates    : str  — pre-formatted "Mon dd–dd, YYYY" (en-dash U+2013)
+     perf            : dict — perf_metrics shape (T11 ``compute_perf_metrics``):
+                                total_return_pct, spy_return_pct,
+                                basket_return_pct, vs_spy_pp, vs_basket_pp,
+                                per_trade_returns_str, hit_rate_str
+     process_metrics : list[MetricResult] in §9.5 order (T12 output)
+     num_days, num_decisions, num_fills — counts (informational, unused here
+                                          but accepted for forward-compat)
+
+   Formatting invariants pinned by the golden file:
+     * em-dash (U+2014) in the banner header
+     * en-dash (U+2013) in REGIME-line dates
+     * fixed-gutter labels: longest label "vs equal-weight basket:" is 23
+       chars; format width is 23 then ONE space then value
+     * percentages are printed with ``%+.1f%%`` (signed, 1 d.p.)
+     * single trailing newline (``keep_trailing_newline=True`` on the env)
+#}
+{%- set labels = {
+    "groundedness": "Groundedness",
+    "decision_discipline": "Decision discipline",
+    "citation_diversity": "Citation diversity",
+    "reversal_rate": "Reversal rate",
+    "risk_policy_compliance": "Privileged-action attempts",
+    "hitl_correctness": "HITL correctness",
+    "schema_rejections": "Schema rejections",
+    "red_team_pass": "Red-team pass",
+    "sufficiency_gate": "Sufficiency gate",
+    "failure_mode_coverage": "FailureMode coverage",
+} -%}
+{%- set pct_metrics = ("groundedness", "reversal_rate") -%}
+EVAL REPORT — Replay smoke test across 3 regimes
+
+REGIME 1: {{ header_dates }} ({{ description }})
+  {{ "%-23s"|format("Total return:") }} {{ "%+.1f"|format(perf.total_return_pct) }}%
+  {{ "%-23s"|format("vs SPY (primary):") }} {{ "%+.1f"|format(perf.vs_spy_pp) }}pp (SPY: {{ "%+.1f"|format(perf.spy_return_pct) }}%)
+  {{ "%-23s"|format("vs equal-weight basket:") }} {{ "%+.1f"|format(perf.vs_basket_pp) }}pp (basket: {{ "%+.1f"|format(perf.basket_return_pct) }}%)
+  {{ "%-23s"|format("Per-trade returns:") }} {{ perf.per_trade_returns_str }}
+  {{ "%-23s"|format("Hit rate:") }} {{ perf.hit_rate_str }}
+
+PROCESS METRICS (aggregated)
+{%- for m in process_metrics %}
+{%- set label = labels.get(m.name, m.name) %}
+{%- if m.name in pct_metrics %}
+  {{ "%-30s"|format(label ~ ":") }} {{ "%.1f"|format(m.value) }}%
+{%- else %}
+  {{ "%-30s"|format(label ~ ":") }} {{ m.value }}
+{%- endif %}
+{%- endfor %}
+
+NOT MEASURED
+  - Investment quality / alpha — N too small
+  - Generalization beyond 3 declared regimes
+  - Real-world fill quality — paper sim
+  - Forward references inside chunks — known RAG limitation
+  - Long-horizon learning effects — journal too sparse

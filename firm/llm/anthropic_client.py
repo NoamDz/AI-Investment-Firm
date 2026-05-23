@@ -26,14 +26,55 @@ import json
 import os
 from collections.abc import Sequence
 from enum import StrEnum
-from typing import Protocol, runtime_checkable
+from pathlib import Path
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from opentelemetry import trace
+
+if TYPE_CHECKING:
+    from firm.llm.cassettes import CassetteMode
 
 from firm.core.clock import Clock
 from firm.llm.cache import LlmCache, hash_prompt
 from firm.llm.client import CompletionResponse
 from firm.llm.cost import extract_cost_fields, get_router_config
+
+
+# ---------------------------------------------------------------------------
+# VCR helpers — read env vars for cassette layer (T02)
+# ---------------------------------------------------------------------------
+
+def _resolve_vcr_mode() -> CassetteMode | None:
+    """Read FIRM_VCR_MODE and return the corresponding CassetteMode, or None.
+
+    Returns ``None`` if the env var is unset, empty, or holds an unrecognised
+    value (defensive default — mirrors ``from_env()``'s fallback to ``cached``
+    on unknown FIRM_LLM_MODE).
+    """
+    # Import lazily to avoid a circular import at module load time.
+    # (cassettes.py imports AnthropicTransport from this module.)
+    from firm.llm.cassettes import CassetteMode as _CassetteMode  # noqa: PLC0415
+
+    raw = os.environ.get("FIRM_VCR_MODE", "").strip().lower()
+    if not raw:
+        return None
+    try:
+        return _CassetteMode(raw)
+    except ValueError:
+        return None
+
+
+def _resolve_cassette_dir() -> Path:
+    """Return the cassette directory from ``FIRM_CASSETTE_DIR`` or the default.
+
+    The default is ``tests/eval/cassettes/`` relative to CWD (repo root when
+    invoked via ``make eval``).  The directory is *not* created here;
+    ``CassetteClient`` creates it lazily on first RECORD write.
+    """
+    env_val = os.environ.get("FIRM_CASSETTE_DIR")
+    if env_val:
+        return Path(env_val)
+    return Path("tests") / "eval" / "cassettes"
 
 
 class LlmCacheMissError(Exception):
@@ -154,21 +195,57 @@ class CachedAnthropicClient:
 
     @classmethod
     def from_env(cls, *, cache: LlmCache, clock: Clock) -> CachedAnthropicClient:
-        """Construct a client honoring the ``FIRM_LLM_MODE`` env var.
+        """Construct a client honoring ``FIRM_LLM_MODE`` and ``FIRM_VCR_MODE``.
 
-        Defaults to ``cached`` so a missing env var yields deterministic replay
-        semantics. Unknown values fall back to ``cached`` rather than crashing.
+        ``FIRM_LLM_MODE`` defaults to ``cached`` so a missing env var yields
+        deterministic replay semantics.  Unknown values fall back to ``cached``
+        rather than crashing.
+
+        When ``FIRM_LLM_MODE`` is ``live`` or ``record`` *and*
+        ``FIRM_VCR_MODE`` is set to a recognised value, the SDK transport is
+        wrapped in a :class:`~firm.llm.cassettes.CassetteClient` so that calls
+        are replayed from / recorded to ``.yaml`` cassette files under
+        ``FIRM_CASSETTE_DIR`` (default ``tests/eval/cassettes/``).
+
+        The cassette layer is **bypassed entirely** in ``cached`` mode because
+        ``CachedAnthropicClient.messages_create`` never reaches the transport
+        when serving from the SQLite cache.
         """
         raw = os.environ.get("FIRM_LLM_MODE", "cached").strip().lower()
         try:
             mode = LlmMode(raw)
         except ValueError:
             mode = LlmMode.CACHED
+
+        # Build the SDK transport only for modes that actually call the API.
+        transport: AnthropicTransport | None = None
+        if mode in (LlmMode.LIVE, LlmMode.RECORD):
+            api_key = os.environ.get("ANTHROPIC_API_KEY")
+            if not api_key:
+                raise ValueError(
+                    "ANTHROPIC_API_KEY required for LIVE/RECORD mode "
+                    "(set the env var or pass api_key explicitly)"
+                )
+            sdk_transport: AnthropicTransport = _AnthropicSdkTransport(api_key)
+
+            vcr_mode = _resolve_vcr_mode()
+            if vcr_mode is not None:
+                from firm.llm.cassettes import CassetteClient  # noqa: PLC0415
+
+                transport = CassetteClient(
+                    real_transport=sdk_transport,
+                    mode=vcr_mode,
+                    cassette_dir=_resolve_cassette_dir(),
+                )
+            else:
+                transport = sdk_transport
+
         return cls(
-            api_key=os.environ.get("ANTHROPIC_API_KEY"),
+            api_key=None,  # already resolved above; pass None to skip __init__ re-resolution
             cache=cache,
             mode=mode,
             clock=clock,
+            transport=transport,
         )
 
     def messages_create(

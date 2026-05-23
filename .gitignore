@@ -26,3 +26,17 @@ logs/
 *.log
 artifacts/
 traces/
+
+# Terraform (Plan 4 T31)
+# - .terraform/ : provider plugin cache from `terraform init`
+# - *.tfstate*  : local state files (real state lives in S3 in prod; see
+#                 commented backend in infra/terraform/providers.tf)
+# - .terraform.lock.hcl : intentionally ignored for the take-home. CI runs
+#                 `init -backend=false` on every PR and operators may be on
+#                 a different OS than CI, so a committed lock file would
+#                 churn. Production setups should COMMIT this file to pin
+#                 provider versions; see docs/path-to-production.md (T44).
+infra/terraform/.terraform/
+infra/terraform/*.tfstate
+infra/terraform/*.tfstate.backup
+infra/terraform/.terraform.lock.hcl
