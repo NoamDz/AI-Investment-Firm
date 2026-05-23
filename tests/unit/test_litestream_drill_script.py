@@ -1,4 +1,4 @@
-"""Tests for T23 scripts/litestream_drill.py — script-level behavior."""
+"""Tests for T23 firm/ops/litestream_drill.py — script-level behavior."""
 from __future__ import annotations
 
 import os
@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent.parent
-SCRIPT = ROOT / "scripts" / "litestream_drill.py"
+SCRIPT = ROOT / "firm" / "ops" / "litestream_drill.py"
 
 
 def test_drill_script_exists_and_executes():

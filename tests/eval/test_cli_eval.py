@@ -222,7 +222,7 @@ def test_eval_loud_fails_when_price_cassette_missing(
     assert result.exit_code != 0
     # Operator-actionable guidance: mentions both the eval_capture remediation
     # and the failing benchmark.
-    assert "scripts/eval_capture.py" in result.output
+    assert "firm/ops/eval_capture.py" in result.output
     assert "SPY" in result.output
 
 

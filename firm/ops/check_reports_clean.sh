@@ -19,10 +19,10 @@ set -euo pipefail
 
 # ---------------------------------------------------------------------------
 # Resolve repo root: the directory that contains the Makefile.
-# BASH_SOURCE[0] is this script; go two levels up (script → scripts/ → root).
+# BASH_SOURCE[0] is this script; go two levels up (firm/ops/ → firm/ → root).
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
 EVAL_CMD="${FIRM_EVAL_CMD:-make eval}"

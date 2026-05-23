@@ -19,7 +19,7 @@ import pytest
 from firm.tools.fundamentals import FundamentalsTool
 
 SCRIPT = (
-    Path(__file__).parent.parent.parent / "scripts" / "precompute_fundamentals.py"
+    Path(__file__).parent.parent.parent / "firm" / "ops" / "precompute_fundamentals.py"
 )
 
 

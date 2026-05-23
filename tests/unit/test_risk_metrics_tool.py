@@ -21,7 +21,7 @@ import pytest
 from firm.tools.risk_metrics import RiskMetricsTool
 
 SCRIPT = (
-    Path(__file__).parent.parent.parent / "scripts" / "precompute_risk_metrics.py"
+    Path(__file__).parent.parent.parent / "firm" / "ops" / "precompute_risk_metrics.py"
 )
 
 

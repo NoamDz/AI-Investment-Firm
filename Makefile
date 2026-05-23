@@ -27,13 +27,13 @@ report:
 	python -m firm.cli report --date $(DATE)
 
 litestream-drill:
-	python scripts/litestream_drill.py
+	python firm/ops/litestream_drill.py
 
 clean:
 	rm -rf data/firm.db data/firm.db-wal data/firm.db-shm data/reports data/litestream
 
 check-determinism:
-	bash scripts/check_reports_clean.sh
+	bash firm/ops/check_reports_clean.sh
 
 red-team:
 	python -m firm.cli red-team

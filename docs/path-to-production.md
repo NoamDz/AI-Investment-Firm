@@ -326,7 +326,7 @@ the migration.
 
 The validation gate is exactly the determinism gate from
 [`docs/eval.md`](eval.md) §2.6:
-[`scripts/check_reports_clean.sh`](../scripts/check_reports_clean.sh) runs
+[`firm/ops/check_reports_clean.sh`](../firm/ops/check_reports_clean.sh) runs
 `make eval` twice and diffs. If the Postgres-backed firm produces the
 same byte-for-byte reports as the SQLite-backed firm, the migration is
 correct. If it doesn't, the diff names exactly the column or row that
@@ -408,7 +408,7 @@ duplicate it here.
 paragraph):
 
 - Keep the determinism gate
-  ([`scripts/check_reports_clean.sh`](../scripts/check_reports_clean.sh))
+  ([`firm/ops/check_reports_clean.sh`](../firm/ops/check_reports_clean.sh))
   — it is framework-agnostic.
 - Re-implement each `compute_<metric>` function in
   [`firm/eval/process_metrics.py`](../firm/eval/process_metrics.py) as an
@@ -645,7 +645,7 @@ production-ready:
   ([`firm/broker/fake_broker.py:96`](../firm/broker/fake_broker.py))
 - Frozen RNG seed ([`firm/core/random.py:42`](../firm/core/random.py))
 - Determinism gate
-  ([`scripts/check_reports_clean.sh`](../scripts/check_reports_clean.sh))
+  ([`firm/ops/check_reports_clean.sh`](../firm/ops/check_reports_clean.sh))
 
 The same gate is the validation contract for every migration delta in
 this doc — re-run the eval after each delta and assert byte-for-byte

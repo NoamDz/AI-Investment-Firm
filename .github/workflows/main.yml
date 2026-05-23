@@ -123,7 +123,7 @@ jobs:
     timeout-minutes: 20
     env:
       # Fixture-grade HMAC secret (64 hex zeros) — mirrors
-      # scripts/eval_capture.py::_DEFAULT_HMAC_SECRET. NEVER a real secret;
+      # firm/ops/eval_capture.py::_DEFAULT_HMAC_SECRET. NEVER a real secret;
       # only used to satisfy HMAC verification during replay.
       FIRM_HMAC_SECRET: '0000000000000000000000000000000000000000000000000000000000000000'
       # Use recorded cassettes; the CI runner has no Anthropic API key.
@@ -142,8 +142,8 @@ jobs:
         run: pip install -e ".[dev]"
       - name: make eval REGIME=all
         run: make eval REGIME=all
-      - name: scripts/check_reports_clean.sh
-        run: bash scripts/check_reports_clean.sh
+      - name: firm/ops/check_reports_clean.sh
+        run: bash firm/ops/check_reports_clean.sh
       # Publish the eval summary as a workflow artifact so release.yml
       # (which runs on a separate tag-push event) can download it via
       # `gh run download` and inline it into the GitHub Release body.

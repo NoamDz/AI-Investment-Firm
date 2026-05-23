@@ -1,14 +1,14 @@
 """
-Integration tests for scripts/check_reports_clean.sh.
+Integration tests for firm/ops/check_reports_clean.sh.
 
 The script discovers the repo root by walking up from BASH_SOURCE[0] looking
 for the directory that contains the Makefile.  To exercise it in isolation we:
-  - Copy the real script into tmp_path/scripts/
+  - Copy the real script into tmp_path/firm/ops/
   - Drop a stub Makefile in tmp_path/ (so the repo-root detection works)
   - Write a small wrapper shell script that implements the fake eval command,
     then point FIRM_EVAL_CMD at it (avoids MSYS2/Git-Bash env-var mangling of
     values that contain shell metacharacters like && on Windows).
-  - Run `bash scripts/check_reports_clean.sh` with cwd=tmp_path
+  - Run `bash firm/ops/check_reports_clean.sh` with cwd=tmp_path
 
 On Windows with WSL2, the `bash` on PATH may be the WSL2 bash which does NOT
 inherit arbitrary Windows env vars unless they appear in WSLENV.  We always
@@ -17,7 +17,7 @@ is ignored, so this is harmless.
 
 On Windows, bash (Git-Bash / WSL) cannot accept Windows-style absolute paths
 as a script argument.  We work around this by running with cwd=tmp_path and
-passing the script as a relative POSIX path ("scripts/check_reports_clean.sh").
+passing the script as a relative POSIX path ("firm/ops/check_reports_clean.sh").
 """
 
 import os
@@ -26,7 +26,7 @@ import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent.parent  # worktree root
-SCRIPT_SRC = REPO_ROOT / "scripts" / "check_reports_clean.sh"
+SCRIPT_SRC = REPO_ROOT / "firm" / "ops" / "check_reports_clean.sh"
 
 
 def _to_posix_bash(p: Path) -> str:
@@ -44,10 +44,10 @@ def _to_posix_bash(p: Path) -> str:
 
 
 def _setup_sandbox(tmp_path: Path) -> None:
-    """Copy the script into tmp_path/scripts/ and create a stub Makefile."""
-    scripts_dir = tmp_path / "scripts"
-    scripts_dir.mkdir()
-    shutil.copy2(SCRIPT_SRC, scripts_dir / "check_reports_clean.sh")
+    """Copy the script into tmp_path/firm/ops/ and create a stub Makefile."""
+    ops_dir = tmp_path / "firm" / "ops"
+    ops_dir.mkdir(parents=True)
+    shutil.copy2(SCRIPT_SRC, ops_dir / "check_reports_clean.sh")
     # Stub Makefile so the repo-root detection in the script finds it.
     (tmp_path / "Makefile").write_text("# stub\n")
 
@@ -81,7 +81,7 @@ def _make_env(eval_cmd: str) -> dict:  # type: ignore[type-arg]
 def _run(eval_cmd: str, cwd: Path) -> subprocess.CompletedProcess:  # type: ignore[type-arg]
     """Run check_reports_clean.sh via a relative path so bash can find it."""
     return subprocess.run(
-        ["bash", "scripts/check_reports_clean.sh"],
+        ["bash", "firm/ops/check_reports_clean.sh"],
         env=_make_env(eval_cmd),
         cwd=str(cwd),
         capture_output=True,

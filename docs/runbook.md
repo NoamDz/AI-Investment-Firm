@@ -187,7 +187,7 @@ REPLAY mode never touches the network.  Expect the full sweep to complete in und
 
 ### Determinism gate failure
 
-CI runs `bash scripts/check_reports_clean.sh` after `make eval`.  The script runs
+CI runs `bash firm/ops/check_reports_clean.sh` after `make eval`.  The script runs
 `make eval` **twice** and diffs `reports/eval/`.  A non-empty diff exits 1 and prints
 the first 50 lines of the diff.
 
@@ -228,7 +228,7 @@ to refresh cassettes.  See `docs/eval.md` for the harness design.
 `make eval` runs in REPLAY mode (no network) and depends on two committed
 artifacts: YAML cassettes under `tests/eval/cassettes/<regime>/` and price
 parquets under `data/prices_eval/`. Both are captured by a one-time
-operator-run script — `scripts/eval_capture.py` — which is the ONLY
+operator-run script — `firm/ops/eval_capture.py` — which is the ONLY
 sanctioned way to (re)populate them.
 
 ### When to re-record
@@ -251,13 +251,13 @@ sanctioned way to (re)populate them.
 
 ```bash
 # Preview the plan first (no API calls, no key required):
-python scripts/eval_capture.py --regime all --dry-run
+python firm/ops/eval_capture.py --regime all --dry-run
 
 # Then capture for real (will prompt for cost confirmation):
-python scripts/eval_capture.py --regime all
+python firm/ops/eval_capture.py --regime all
 
 # Or capture a single regime + skip the prompt for non-interactive runs:
-python scripts/eval_capture.py --regime r1 --yes
+python firm/ops/eval_capture.py --regime r1 --yes
 ```
 
 Each regime is launched in its own subprocess with `FIRM_LLM_MODE=record`,
@@ -287,7 +287,7 @@ and a populated `summary.md`.
 
 ### DO NOT
 
-* **DO NOT** run `scripts/eval_capture.py` in CI. It would burn API budget
+* **DO NOT** run `firm/ops/eval_capture.py` in CI. It would burn API budget
   on every push and isn't deterministic across recordings.
 * **DO NOT** add a `make eval-capture` target. Capture is operator-triggered
   by design — Makefile targets invite muscle-memory re-runs.
@@ -385,7 +385,7 @@ The replicator keeps 72 h of history (see `config/litestream.yml`).
 make litestream-drill
 ```
 
-The drill (script in `scripts/litestream_drill.py`):
+The drill (script in `firm/ops/litestream_drill.py`):
 
 1. Asserts `data/firm.db-wal` is under the 16 MB ceiling from
    `config/litestream.yml` (catches a paused replicator before it
@@ -606,7 +606,7 @@ The `make deploy-dev` target is explicitly absent from all CI workflows. The `.g
 ### The committed snapshot
 
 `infra/terraform/PLAN.md` is the authoritative pre-apply dry-run snapshot.  It was
-captured via `scripts/sanitise_plan.sh` (T38), which runs a `terraform show -no-color`
+captured via `firm/ops/sanitise_plan.sh` (T38), which runs a `terraform show -no-color`
 on a binary plan file and strips account IDs / region noise before committing.  The
 CI workflow checks that this file exists and is non-empty but does not re-run
 `terraform plan` (that requires live AWS credentials).
@@ -623,7 +623,7 @@ terraform -chdir=infra/terraform plan -var-file=envs/dev.tfvars -out=tfplan.bin
 # Step 2 — render + sanitise in one pipe (sanitisation is mandatory; it strips
 # live AWS account IDs and region tokens from ARNs)
 terraform -chdir=infra/terraform show -no-color tfplan.bin \
-  | bash scripts/sanitise_plan.sh > infra/terraform/PLAN.md
+  | bash firm/ops/sanitise_plan.sh > infra/terraform/PLAN.md
 ```
 
 Sanitisation is mandatory — `sanitise_plan.sh` strips AWS account IDs, region

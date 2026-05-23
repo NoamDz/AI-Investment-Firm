@@ -31,7 +31,7 @@ days, captures every artifact, and asks two questions:
    reached a Decision.
 2. **Is the run byte-for-byte reproducible?** Re-running `make eval` twice in
    a row must produce identical files under `reports/eval/`. This is enforced
-   mechanically — see [`scripts/check_reports_clean.sh`](../scripts/check_reports_clean.sh).
+   mechanically — see [`firm/ops/check_reports_clean.sh`](../firm/ops/check_reports_clean.sh).
 
 We additionally report per-trade and total returns versus two benchmarks (SPY
 and an equal-weight basket of our 30-ticker universe) because the Cato brief
@@ -58,7 +58,7 @@ review focused on what the artifact actually proves.
 Every output under `reports/eval/` is a pure function of the inputs:
 `(regime config, code, cassette set, price parquets, RNG seed)`. Six
 mechanisms below make that contract hold. The determinism gate
-[`scripts/check_reports_clean.sh:72`](../scripts/check_reports_clean.sh) runs
+[`firm/ops/check_reports_clean.sh:72`](../firm/ops/check_reports_clean.sh) runs
 the eval twice into temp directories and `diff -ruN` between them — any
 non-empty diff fails CI.
 
@@ -69,7 +69,7 @@ non-empty diff fails CI.
 | PIT-filtered RAG | Retrieval deterministic | [`firm/rag/retrieve.py:136`](../firm/rag/retrieve.py) |
 | Deterministic broker fills (slippage as pure function of state) | Execution deterministic | [`firm/broker/fake_broker.py:96`](../firm/broker/fake_broker.py) |
 | Frozen RNG seed (`FIRM_RANDOM_SEED`, default 42) | Stochastic components reproducible | [`firm/core/random.py:42`](../firm/core/random.py) |
-| `git diff` / re-run diff in CI | Determinism gate | [`scripts/check_reports_clean.sh:72`](../scripts/check_reports_clean.sh) |
+| `git diff` / re-run diff in CI | Determinism gate | [`firm/ops/check_reports_clean.sh:72`](../firm/ops/check_reports_clean.sh) |
 
 ### 2.1 Clock injection
 
@@ -97,7 +97,7 @@ modes ([`firm/llm/cassettes.py:39`](../firm/llm/cassettes.py)):
 
 - **`live`** — pass-through to the real transport. Used by ad-hoc dev runs.
 - **`record`** — pass-through then write `{cassette_dir}/{key}.yaml`. Used by
-  [`scripts/eval_capture.py`](../scripts/eval_capture.py) once per cassette
+  [`firm/ops/eval_capture.py`](../firm/ops/eval_capture.py) once per cassette
   refresh.
 - **`replay`** — load the YAML by key, raise `CassetteMissError` on miss. This
   is what `make eval` runs.
@@ -152,7 +152,7 @@ bind the result once and reuse it.
 
 ### 2.6 The determinism gate
 
-[`scripts/check_reports_clean.sh`](../scripts/check_reports_clean.sh) is the
+[`firm/ops/check_reports_clean.sh`](../firm/ops/check_reports_clean.sh) is the
 CI-enforceable contract. It runs `make eval` (or `$FIRM_EVAL_CMD`) twice into
 two temp directories and `diff -ruN`s them; a non-empty diff prints the first
 50 lines and exits 1. A missing `reports/eval/` after the first run exits 2
@@ -578,7 +578,7 @@ template harness** over Inspect AI. Three reasons:
    is zero new framework — every Python reviewer already knows both.
 
 2. **Byte-deterministic output is what the gate requires.** The
-   [`scripts/check_reports_clean.sh`](../scripts/check_reports_clean.sh)
+   [`firm/ops/check_reports_clean.sh`](../firm/ops/check_reports_clean.sh)
    gate needs the eval to produce byte-identical output across two runs.
    Jinja templates with explicit context dicts and pinned formatting
    produce that trivially — every value, every label, every newline is
@@ -617,8 +617,8 @@ the two Jinja templates, ~500 LOC.
 | Committed sample artifacts | [`sample_runs/2024-03-13/`](../sample_runs/2024-03-13), [`sample_runs/2024-08-07/`](../sample_runs/2024-08-07), [`sample_runs/2023-11-08/`](../sample_runs/2023-11-08) |
 | CLI entrypoint | [`firm/cli.py:931`](../firm/cli.py) (`firm eval`) |
 | Make target | [`Makefile`](../Makefile) (`make eval`) |
-| Determinism gate | [`scripts/check_reports_clean.sh`](../scripts/check_reports_clean.sh) |
-| Cassette capture (record mode) | [`scripts/eval_capture.py`](../scripts/eval_capture.py) |
+| Determinism gate | [`firm/ops/check_reports_clean.sh`](../firm/ops/check_reports_clean.sh) |
+| Cassette capture (record mode) | [`firm/ops/eval_capture.py`](../firm/ops/eval_capture.py) |
 | Regimes | [`firm/eval/regimes.py`](../firm/eval/regimes.py) |
 | Benchmarks (SPY + basket) | [`firm/eval/benchmarks.py`](../firm/eval/benchmarks.py) |
 | Performance metrics | [`firm/eval/perf_metrics.py`](../firm/eval/perf_metrics.py) |

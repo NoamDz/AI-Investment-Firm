@@ -93,7 +93,7 @@ jobs:
     timeout-minutes: 15
     env:
       # Fixture-grade HMAC secret (64 hex zeros) — mirrors
-      # scripts/eval_capture.py::_DEFAULT_HMAC_SECRET. NEVER a real secret;
+      # firm/ops/eval_capture.py::_DEFAULT_HMAC_SECRET. NEVER a real secret;
       # only used to satisfy HMAC verification during replay.
       FIRM_HMAC_SECRET: '0000000000000000000000000000000000000000000000000000000000000000'
       # Use recorded cassettes; the release runner has no Anthropic API key.
@@ -137,7 +137,7 @@ jobs:
         run: |
           if [ -d tests/eval/cassettes ]; then
             make eval REGIME=r1
-            bash scripts/check_reports_clean.sh
+            bash firm/ops/check_reports_clean.sh
           else
             echo "::warning::No cassettes committed at tests/eval/cassettes/; skipping eval gate"
           fi

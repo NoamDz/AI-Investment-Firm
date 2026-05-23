@@ -91,7 +91,7 @@ class RiskMetricsTool:
         ----------
         parquet_path:
             Path to the pre-computed parquet written by
-            ``scripts/precompute_risk_metrics.py``.
+            ``firm/ops/precompute_risk_metrics.py``.
         """
         table = pq.read_table(str(parquet_path))
         index: _Index = {}
@@ -166,7 +166,7 @@ class RiskMetricsTool:
         if not ticker_keys:
             raise KeyError(
                 f"Ticker {ticker!r} not found in risk metrics index. "
-                "Run scripts/precompute_risk_metrics.py to refresh the parquet."
+                "Run firm/ops/precompute_risk_metrics.py to refresh the parquet."
             )
 
         key = (ticker, metric)

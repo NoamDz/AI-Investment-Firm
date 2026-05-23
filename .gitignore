@@ -27,6 +27,10 @@ logs/
 artifacts/
 traces/
 
+# Internal planning artefacts (per-plan task lists + master design spec).
+# Kept locally for context but not part of the reviewer-facing repo.
+docs/superpowers/
+
 # Terraform (Plan 4 T31)
 # - .terraform/ : provider plugin cache from `terraform init`
 # - *.tfstate*  : local state files (real state lives in S3 in prod; see
