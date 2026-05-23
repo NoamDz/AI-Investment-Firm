@@ -22,7 +22,14 @@ from pathlib import Path
 
 import pytest
 
-from firm.db.migrations import init_db
+# Dashboard relies on the optional ``[dashboard]`` extra (streamlit + pandas).
+# Skip gracefully when those aren't installed — the default ``pip install -e .[dev]``
+# CI gate exercises every OTHER test in this module set; dashboard-only fixtures
+# only matter when the operator has opted into the dashboard extra.
+pytest.importorskip("streamlit")
+pytest.importorskip("pandas")
+
+from firm.db.migrations import init_db  # noqa: E402
 
 
 _TS = "2024-03-13T14:30:00+00:00"

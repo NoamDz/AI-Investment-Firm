@@ -25,8 +25,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import requests as _requests  # type: ignore[import-untyped]
-from dateutil.relativedelta import relativedelta  # type: ignore[import-untyped]
+import requests as _requests  # type: ignore[import-untyped,unused-ignore]
+from dateutil.relativedelta import relativedelta  # type: ignore[import-untyped,unused-ignore]
 
 from firm.core.clock import Clock
 from firm.db.connection import get_conn

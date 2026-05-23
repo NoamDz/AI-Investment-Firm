@@ -11,7 +11,10 @@ data/firm.db-shm
 data/backups/
 data/qdrant/
 data/reports/
-data/precomputed/
+# data/precomputed/ is intentionally tracked — the Dockerfile COPYs it into
+# the image, and the parquets are small (~2 MB total) deterministic fixtures
+# regenerable via `firm/ops/precompute_fundamentals.py` /
+# `firm/ops/precompute_risk_metrics.py`.
 # Per-run working directories (dashboard_smoke, demo_run, e2e_run, ...)
 data/*/firm.db*
 data/*/qdrant/
