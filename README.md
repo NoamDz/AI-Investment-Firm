@@ -34,7 +34,23 @@ python -m firm.cli ingest                # one-time corpus embed (~2 min)
 docker compose up firm                   # one heartbeat → BUY/HOLD → daily report
 ```
 
-Full step-by-step (host venv, GPU notes, continuous loop + dashboard, human-approval exercise, live broker): [`docs/quickstart.md`](docs/quickstart.md).
+### Run continuously
+
+`docker compose up firm` runs **one** heartbeat and exits. To keep it ticking, run the firm with the `--loop` flag instead:
+
+```powershell
+docker compose run --rm firm python -m firm.cli run --loop --interval-seconds 60
+```
+
+One heartbeat per minute (research → 3 PM voters → risk → execution → reporter) until `Ctrl-C` — the first signal finishes the current heartbeat cleanly, a second exits immediately. A single bad heartbeat is logged and the loop continues.
+
+Watch it live in a separate shell:
+
+```powershell
+streamlit run firm/dashboard.py        # http://localhost:8501 → Live Desk tab
+```
+
+Full step-by-step (host venv, GPU notes, human-approval exercise, live broker): [`docs/quickstart.md`](docs/quickstart.md).
 
 ## Architecture
 
