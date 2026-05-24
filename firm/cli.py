@@ -7,7 +7,8 @@ import json
 import os
 import shutil
 import sys
-from collections.abc import Iterator
+import time as _time_module
+from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from datetime import datetime, time, timezone
 from decimal import Decimal
@@ -54,6 +55,12 @@ from firm.reports.daily import render_daily_report
 from firm.reports.html import render_daily_html
 from firm.reports.reconcile_block import render_reconcile_block
 from firm.reports.xlsx import write_positions_xlsx
+
+# Consecutive-identical-failure circuit breaker for ``firm run --loop``: a
+# heartbeat that fails the same way this many times in a row is almost
+# certainly a config/infra problem (qdrant DNS, missing API key, schema drift)
+# rather than a transient hiccup, so re-raise instead of swallowing forever.
+_LOOP_FAILURE_THRESHOLD = 3
 
 try:
     from langchain_core.runnables import RunnableConfig
@@ -503,10 +510,7 @@ def run(once: bool, interval_seconds: int) -> None:
     # ---- Loop mode -------------------------------------------------------
     # Continuous operation per home-assignment §2.2. SIGINT/SIGTERM stops
     # cleanly after the current heartbeat; second signal exits immediately.
-    # Per-heartbeat exceptions are logged and the loop continues so a single
-    # transient failure (e.g. broker hiccup) doesn't kill a multi-day run.
     import signal
-    import time as _time
 
     stop = {"requested": False}
 
@@ -524,25 +528,71 @@ def run(once: bool, interval_seconds: int) -> None:
     click.echo(
         f"[firm run] loop mode: heartbeat every {interval_seconds}s. Ctrl-C to stop."
     )
+    _run_heartbeat_loop(
+        _do_heartbeat,
+        interval_seconds=interval_seconds,
+        should_stop=lambda: stop["requested"],
+    )
+
+
+def _run_heartbeat_loop(
+    do_heartbeat: Callable[[int], None],
+    *,
+    interval_seconds: int,
+    should_stop: Callable[[], bool],
+    sleep: Callable[[float], None] = _time_module.sleep,
+    echo: Callable[..., None] = click.echo,
+    failure_threshold: int = _LOOP_FAILURE_THRESHOLD,
+) -> int:
+    """Drive heartbeats until ``should_stop()`` returns True or breaker trips.
+
+    Per-heartbeat exceptions are logged and the loop continues so a single
+    transient failure (broker hiccup, DNS blip) doesn't kill a multi-day run.
+    But ``failure_threshold`` consecutive *identical* failures (same exception
+    class + same message) re-raise — that signature pattern means the issue is
+    structural, not transient, and silent retries just delay the diagnosis.
+
+    Returns the number of heartbeats attempted.
+    """
     seq = 0
-    while not stop["requested"]:
+    last_signature: tuple[str, str] | None = None
+    consecutive_failures = 0
+    while not should_stop():
         seq += 1
         try:
-            _do_heartbeat(seq)
+            do_heartbeat(seq)
+            last_signature = None
+            consecutive_failures = 0
         except Exception as exc:  # noqa: BLE001
-            click.echo(
-                f"[firm run] heartbeat #{seq} failed: {type(exc).__name__}: {exc}",
+            signature = (type(exc).__name__, str(exc))
+            if signature == last_signature:
+                consecutive_failures += 1
+            else:
+                last_signature = signature
+                consecutive_failures = 1
+            echo(
+                f"[firm run] heartbeat #{seq} failed "
+                f"({consecutive_failures}/{failure_threshold}): "
+                f"{signature[0]}: {signature[1]}",
                 err=True,
             )
-        if stop["requested"]:
+            if consecutive_failures >= failure_threshold:
+                echo(
+                    f"[firm run] {failure_threshold} consecutive identical "
+                    f"failures — aborting loop.",
+                    err=True,
+                )
+                raise
+        if should_stop():
             break
-        # Sleep in 1s ticks so Ctrl-C is responsive across long intervals.
+        # Sleep in 1s ticks so a stop signal is responsive across long intervals.
         slept = 0
-        while slept < interval_seconds and not stop["requested"]:
-            _time.sleep(1)
+        while slept < interval_seconds and not should_stop():
+            sleep(1)
             slept += 1
 
-    click.echo(f"[firm run] stopped after {seq} heartbeats.")
+    echo(f"[firm run] stopped after {seq} heartbeats.")
+    return seq
 
 
 def _is_test_environment() -> bool:
@@ -661,13 +711,19 @@ def report(date_str: str) -> None:
 
 
 def _make_qdrant_client() -> "Any":
-    """QdrantClient backed by QDRANT_LOCAL_PATH (test override) or QDRANT_URL."""
+    """QdrantClient backed by QDRANT_LOCAL_PATH (test override) or QDRANT_URL.
+
+    ``QDRANT_URL`` defaults to ``http://localhost:6333`` — the same port the
+    bundled ``docker-compose.yml`` publishes for the qdrant service. Lets a
+    host-side ``python -m firm.cli ingest`` work out of the box after
+    ``docker compose up -d qdrant`` without an explicit env export.
+    """
     from qdrant_client import QdrantClient  # lazy import
 
     local_path = os.environ.get("QDRANT_LOCAL_PATH")
     if local_path:
         return QdrantClient(path=local_path)
-    return QdrantClient(url=os.environ["QDRANT_URL"])
+    return QdrantClient(url=os.environ.get("QDRANT_URL", "http://localhost:6333"))
 
 
 def _make_fixture_loader(fixture_path: str) -> Any:
@@ -1228,7 +1284,28 @@ def _collect_chunk_texts(
     return all_texts
 
 
+def _load_dotenv_if_available() -> None:
+    """Auto-load ``.env`` from cwd so host-side CLI invocations pick up
+    ``ANTHROPIC_API_KEY`` / ``FIRM_LLM_MODE`` / ``FIRM_HMAC_SECRET`` without
+    the operator having to source the file manually (cmd.exe and bare
+    PowerShell do not). ``override=False`` so an explicit env export still
+    wins over .env.
+
+    Invoked only from ``main()``, not at module import, so importing
+    ``firm.cli`` from a test does not pollute ``os.environ`` with whatever
+    secrets live in the developer's .env. ``python-dotenv`` is in
+    ``pyproject.toml`` but the import is guarded so a minimal install still
+    runs.
+    """
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv(override=False)
+
+
 def main() -> None:
+    _load_dotenv_if_available()
     cli()
 
 
