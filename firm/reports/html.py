@@ -93,7 +93,7 @@ def _build_decision_rows(rows: list[dict[str, object]]) -> list[dict[str, str]]:
                 "color": _ACTION_COLORS.get(action, "#444"),
                 "ticker": ticker,
                 "shares": shares,
-                "confidence": f"{float(r['confidence']):.2f}",
+                "confidence": f"{float(r['confidence']):.2f}",  # type: ignore[arg-type]
                 "citations": str(_citation_count(r.get("citations"))),  # type: ignore[arg-type]
                 "failure_mode": str(r["failure_mode"] or ""),
                 "rationale": _truncate_rationale(str(r.get("rationale") or "")),
