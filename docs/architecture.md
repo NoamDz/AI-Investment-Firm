@@ -89,6 +89,17 @@ flowchart TB
 - **`firm.db` is the single source of truth.** The dashboard and the xlsx report read from it; they cannot disagree.
 - **External APIs are optional.** Alpaca is gated by `FIRM_BROKER=ALPACA` (default `FAKE`); Slack by `FIRM_SLACK_BOT_TOKEN`. `FIRM_LLM_MODE=cached` removes the Anthropic dependency entirely (eval + red-team run offline).
 
+## Where the data comes from
+
+| What the firm reads | Source | When |
+|---|---|---|
+| **SEC 10-Ks** (research grounding) | 84 filings from the **FinanceBench** dataset (`PatronusAI/financebench` on Hugging Face). Loaded once at `firm.cli ingest` time, chunked, embedded, and stored in Qdrant. The 150 Q&A holdout pairs (`config/financebench_eval_holdout.json`) are excluded from ingest so they stay unseen. | One-time |
+| **Historical adjusted close prices** (eval benchmarks) | `yfinance` pulls once and caches each ticker as parquet at `data/eval/prices/<TICKER>.parquet`. Eval runs in `replay` mode and never touches the network; a missing parquet is a hard error. | One-time per ticker, cached after first hit |
+| **Quotes during a live run** | `firm/broker/fake_broker.py` — quote price is a deterministic function of `SHA256(ticker, market timestamp)`, so the same heartbeat produces the same number every replay. Swap to Alpaca live quotes with `FIRM_BROKER=ALPACA`. | Every heartbeat |
+| **LLM responses** (eval and CI) | Anthropic API responses are recorded under `tests/_fixtures/cassettes/` keyed by `SHA256(model, system, messages, tools)`. `FIRM_LLM_MODE=cached` replays only; a cache miss is a hard error. This is what makes the eval byte-identical with no API key. | First record from live API, then replayed forever |
+
+Retrieval-pipeline detail (chunking, hybrid search, re-rank) is in `config/rag.yaml`.
+
 ## Where to look next
 
 - [`technical-overview.md`](technical-overview.md) — agent contracts, state-key lifecycle, partial-failure model
