@@ -13,5 +13,3 @@ Operator + reviewer documentation for the AI Investment Firm.
 | [`path-to-production.md`](path-to-production.md) | Reviewer | Take-home → production delta map |
 | [`agentcore_mapping.md`](agentcore_mapping.md) | Reviewer | Firm-to-AgentCore migration table |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Contributor | Test layout, `requires_models` marker, re-recording cassettes |
-| [`implementation_summary_plan_1.md`](implementation_summary_plan_1.md) | Reviewer | Plan 1 (foundation + walking skeleton) ship notes |
-| [`implementation_summary_plan_2.md`](implementation_summary_plan_2.md) | Reviewer | Plan 2 (RAG + Citations + grounding) ship notes |

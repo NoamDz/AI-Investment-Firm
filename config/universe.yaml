@@ -1,5 +1,11 @@
 as_of: 2023-11-01
+# Position [0] is what firm/agents/research.py picks each heartbeat. "AMD" is
+# kept first because it is the only entry whose stock symbol matches its
+# FinanceBench company-name "ticker" payload — so retrieval returns chunks
+# out of the box and the demo runs the full BUY/HOLD pipeline rather than
+# REFUSE-on-insufficient-evidence.
 tickers:
+  - AMD
   - AAPL
   - MSFT
   - NVDA
@@ -7,7 +13,6 @@ tickers:
   - AMZN
   - META
   - TSLA
-  - BRK.B
   - JPM
   - V
   - JNJ
@@ -31,6 +36,7 @@ tickers:
   - NFLX
   - CRM
 sector_map:
+  AMD: tech
   AAPL: tech
   MSFT: tech
   NVDA: tech
@@ -44,7 +50,6 @@ sector_map:
   CSCO: tech
   NFLX: tech
   CRM: tech
-  BRK.B: finance
   JPM: finance
   V: finance
   MA: finance

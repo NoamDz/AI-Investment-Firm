@@ -1,16 +1,23 @@
-"""Streamlit dashboard — primary demoable report channel.
+"""Streamlit dashboard — primary report channel + live observability.
 
-Reads `firm.db` directly (positions, decisions, cost_ledger, audit_log,
-hitl_queue, reconciliations) and renders a live view that updates while
-`firm run --loop` is producing heartbeats.
+Three-tab layout (Plan 4 / PLAN_reports_overhaul.md §3):
+
+* **Tab 1 — Today's Report** (default). Embeds ``daily_report.html`` for the
+  selected date and exposes the full download bundle. No auto-refresh.
+* **Tab 2 — Live Desk**. The legacy live view that refreshes every 5 s while
+  ``firm run --loop`` is producing heartbeats — reads ``firm.db`` directly.
+* **Tab 3 — Trace**. Span-level lookup by ``decision_id`` against either
+  ``data/traces/<date>/run-*.jsonl`` (live) or ``sample_runs/<date>/trace.jsonl``.
 
 Run:
     pip install -e ".[dashboard]"
     streamlit run firm/dashboard.py
 
 Env:
-    FIRM_DB_PATH       sqlite path (default: data/firm.db)
-    FIRM_REPORTS_ROOT  reports root for the xlsx link (default: data/reports)
+    FIRM_DB_PATH           sqlite path (default: data/firm.db)
+    FIRM_REPORTS_ROOT      reports root for per-date bundles (default: data/reports)
+    FIRM_SAMPLE_RUNS_ROOT  committed sample-run snapshots (default: sample_runs)
+    FIRM_TRACES_ROOT       live trace root (default: data/traces)
 """
 from __future__ import annotations
 
@@ -27,6 +34,8 @@ import streamlit as st
 
 DB_PATH = Path(os.environ.get("FIRM_DB_PATH", "data/firm.db"))
 REPORTS_ROOT = Path(os.environ.get("FIRM_REPORTS_ROOT", "data/reports"))
+SAMPLE_RUNS_ROOT = Path(os.environ.get("FIRM_SAMPLE_RUNS_ROOT", "sample_runs"))
+TRACES_ROOT = Path(os.environ.get("FIRM_TRACES_ROOT", "data/traces"))
 REFRESH_SECONDS = 5
 
 ACTION_COLORS = {
@@ -36,6 +45,29 @@ ACTION_COLORS = {
     "REFUSE": "#8e44ad",
     "ESCALATE": "#e67e22",
 }
+
+# Download-button MIME types per artifact name.
+_BUNDLE_MIME = {
+    "daily_report.html": "text/html",
+    "daily_report.md": "text/markdown",
+    "positions.xlsx": (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    ),
+    "decisions.jsonl": "application/x-ndjson",
+}
+
+# Order matters: shown top-to-bottom under "Download bundle".
+_BUNDLE_FILES = (
+    "daily_report.html",
+    "daily_report.md",
+    "positions.xlsx",
+    "decisions.jsonl",
+)
+
+
+# ---------------------------------------------------------------------------
+# DB readers (unchanged from previous revision — read live firm.db)
+# ---------------------------------------------------------------------------
 
 
 def _connect() -> sqlite3.Connection | None:
@@ -155,19 +187,129 @@ def _read_recon(conn: sqlite3.Connection) -> dict[str, Any] | None:
     }
 
 
-def _latest_xlsx() -> Path | None:
-    if not REPORTS_ROOT.exists():
-        return None
-    candidates = sorted(REPORTS_ROOT.glob("*/positions.xlsx"), reverse=True)
-    return candidates[0] if candidates else None
+# ---------------------------------------------------------------------------
+# Per-date path helpers (Tab 1 + Tab 3)
+# ---------------------------------------------------------------------------
 
 
-def render() -> None:
-    st.set_page_config(page_title="AI Investment Firm", layout="wide", page_icon="📈")
-    st.title("AI Investment Firm — Live Desk")
+def _list_available_dates() -> list[tuple[str, Path]]:
+    """Return ``[(date_str, root_path), ...]`` sorted by date DESC.
+
+    Live ``data/reports/<date>/`` directories take precedence; committed
+    ``sample_runs/<date>/`` directories are appended only when the same date
+    is not already present in the live set. A directory only counts if its
+    name parses as ``YYYY-MM-DD`` and it actually exists as a directory.
+    """
+    seen: set[str] = set()
+    out: list[tuple[str, Path]] = []
+
+    for root in (REPORTS_ROOT, SAMPLE_RUNS_ROOT):
+        if not root.exists():
+            continue
+        for child in sorted(root.iterdir()):
+            if not child.is_dir():
+                continue
+            name = child.name
+            if len(name) != 10 or name[4] != "-" or name[7] != "-":
+                continue
+            try:
+                datetime.strptime(name, "%Y-%m-%d")
+            except ValueError:
+                continue
+            if name in seen:
+                continue
+            seen.add(name)
+            out.append((name, root))
+
+    out.sort(key=lambda t: t[0], reverse=True)
+    return out
+
+
+def _resolve_bundle_path(
+    date_str: str, source_root: Path, filename: str
+) -> Path | None:
+    """Return ``source_root/<date>/<filename>`` if it exists, else None."""
+    candidate = source_root / date_str / filename
+    return candidate if candidate.is_file() else None
+
+
+def _resolve_trace_path(date_str: str, source_root: Path) -> Path | None:
+    """Prefer ``data/traces/<date>/run-*.jsonl`` (live), else fall back to
+    ``source_root/<date>/trace.jsonl`` (committed sample). Returns None if
+    neither exists."""
+    live_dir = TRACES_ROOT / date_str
+    if live_dir.is_dir():
+        matches = sorted(live_dir.glob("run-*.jsonl"))
+        if matches:
+            return matches[0]
+    fallback = source_root / date_str / "trace.jsonl"
+    return fallback if fallback.is_file() else None
+
+
+# ---------------------------------------------------------------------------
+# Tab 1 — Today's Report
+# ---------------------------------------------------------------------------
+
+
+def _render_today_tab(date_str: str, source_root: Path) -> None:
+    """Embed the per-date HTML report and expose download buttons."""
+    st.subheader(f"Daily report — {date_str}")
+
+    html_path = _resolve_bundle_path(date_str, source_root, "daily_report.html")
+    if html_path is not None:
+        html_content = html_path.read_text(encoding="utf-8")
+        st.components.v1.html(html_content, height=1800, scrolling=True)
+    else:
+        st.info(
+            "daily_report.html not yet generated for this date. Run "
+            f"`python -m firm.cli report --date {date_str}` to create it."
+        )
+        md_path = _resolve_bundle_path(date_str, source_root, "daily_report.md")
+        if md_path is not None:
+            st.markdown(md_path.read_text(encoding="utf-8"))
+        else:
+            st.warning(
+                "No daily_report.md either — bundle has not been generated yet."
+            )
+
+    st.divider()
+    st.subheader("Download bundle")
+    any_button = False
+    for filename in _BUNDLE_FILES:
+        path = _resolve_bundle_path(date_str, source_root, filename)
+        if path is None:
+            continue
+        size_kb = path.stat().st_size / 1024.0
+        mime = _BUNDLE_MIME.get(filename, "application/octet-stream")
+        with path.open("rb") as f:
+            st.download_button(
+                label=f"Download {filename} ({size_kb:.1f} KB)",
+                data=f.read(),
+                file_name=f"{date_str}_{filename}",
+                mime=mime,
+                key=f"dl-{date_str}-{filename}",
+            )
+        any_button = True
+    if not any_button:
+        st.info("No artifacts found in the selected bundle directory.")
+
+
+# ---------------------------------------------------------------------------
+# Tab 2 — Live Desk (the demoted legacy dashboard)
+# ---------------------------------------------------------------------------
+
+
+def _render_live_desk_tab() -> None:
+    """The legacy live-observability view. Reads ``firm.db`` and self-refreshes.
+
+    Refresh strategy: we always call ``st.rerun()`` at the end of this tab,
+    even if the user is on Tab 1 or 3. Streamlit's ``st.tabs`` preserves the
+    active selection across reruns, so the user sees no flicker on the static
+    tabs while the live data behind this tab stays current.
+    """
     st.caption(
-        f"Reading {DB_PATH} · refresh every {REFRESH_SECONDS}s · "
-        f"started {datetime.utcnow().strftime('%H:%M:%S UTC')}"
+        f"Live observability — updates every {REFRESH_SECONDS}s while "
+        f"`firm run --loop` is running. Reading {DB_PATH}."
     )
 
     conn = _connect()
@@ -188,8 +330,11 @@ def render() -> None:
     gross = positions["gross_value"].sum() if not positions.empty else 0.0
     col2.metric("Gross exposure", f"${gross:,.0f}", f"{len(positions)} positions")
     col3.metric("LLM spend (today)", f"${cost.get('total_usd', 0):.3f}")
-    col4.metric("Cache hit %", f"{cost.get('cache_pct', 0):.0f}%",
-                f"{cost.get('cached_calls', 0)}c / {cost.get('live_calls', 0)}l")
+    col4.metric(
+        "Cache hit %",
+        f"{cost.get('cache_pct', 0):.0f}%",
+        f"{cost.get('cached_calls', 0)}c / {cost.get('live_calls', 0)}l",
+    )
 
     st.divider()
 
@@ -201,7 +346,9 @@ def render() -> None:
             st.info("No open positions yet.")
         else:
             st.dataframe(
-                positions[["ticker", "shares", "avg_cost", "gross_value", "updated_at"]],
+                positions[
+                    ["ticker", "shares", "avg_cost", "gross_value", "updated_at"]
+                ],
                 use_container_width=True,
                 hide_index=True,
             )
@@ -225,45 +372,149 @@ def render() -> None:
                 shares = f" × {row['shares']}" if row["shares"] else ""
                 fm = f" · {row['failure_mode']}" if row["failure_mode"] else ""
                 st.markdown(
-                    f"<div style='border-left:4px solid {color}; padding:6px 12px; margin:4px 0;"
-                    f" background:#f7f7f9; border-radius:4px;'>"
+                    f"<div style='border-left:4px solid {color}; padding:6px 12px;"
+                    f" margin:4px 0; background:#f7f7f9; border-radius:4px;'>"
                     f"<b style='color:{color}'>{row['action']}</b>{ticker}{shares}"
                     f" <span style='color:#888; font-size:0.85em'>"
-                    f"conf={row['confidence']:.2f} · {row['citations']} cite{fm} · {row['ts']}</span>"
+                    f"conf={row['confidence']:.2f} · {row['citations']} cite{fm}"
+                    f" · {row['ts']}</span>"
                     f"<br><span style='color:#333; font-size:0.9em'>{row['rationale']}</span>"
                     f"</div>",
                     unsafe_allow_html=True,
                 )
 
     st.divider()
-    foot_l, foot_r = st.columns([1, 1])
-    with foot_l:
-        st.subheader("Reconciliation")
-        if recon is None:
-            st.info("No reconciliation events yet.")
-        else:
-            status_emoji = {"ok": "✅", "mismatch": "⚠️", "acked": "🛠"}.get(recon["status"], "❓")
-            st.write(f"{status_emoji} **{recon['kind'].upper()}** @ {recon['ran_at']} — `{recon['status']}`")
-            if recon["diff"]:
-                st.json(recon["diff"], expanded=False)
-    with foot_r:
-        st.subheader("Excel export (channel #2)")
-        xlsx = _latest_xlsx()
-        if xlsx is None:
-            st.info(f"No positions.xlsx under {REPORTS_ROOT} yet.")
-        else:
-            with xlsx.open("rb") as f:
-                st.download_button(
-                    f"Download {xlsx.parent.name}/positions.xlsx",
-                    f.read(),
-                    file_name=f"positions_{xlsx.parent.name}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
+    st.subheader("Reconciliation")
+    if recon is None:
+        st.info("No reconciliation events yet.")
+    else:
+        status_emoji = {"ok": "✅", "mismatch": "⚠️", "acked": "🛠"}.get(
+            recon["status"], "❓"
+        )
+        st.write(
+            f"{status_emoji} **{recon['kind'].upper()}** @ {recon['ran_at']} — "
+            f"`{recon['status']}`"
+        )
+        if recon["diff"]:
+            st.json(recon["diff"], expanded=False)
 
     conn.close()
 
-    # Auto-refresh — Streamlit reruns the script every REFRESH_SECONDS.
+
+# ---------------------------------------------------------------------------
+# Tab 3 — Trace
+# ---------------------------------------------------------------------------
+
+
+# Span fields we surface in the trace table (in display order).
+_TRACE_COLUMNS = (
+    "operation",
+    "agent",
+    "duration_ms",
+    "model",
+    "input_tokens",
+    "output_tokens",
+    "cost_usd",
+    "citations",
+    "status",
+)
+
+
+def _load_trace_spans(trace_path: Path, decision_id: str) -> list[dict[str, Any]]:
+    """Parse JSONL file, returning spans matching ``decision_id`` in file order."""
+    matched: list[dict[str, Any]] = []
+    with trace_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                span = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if span.get("decision_id") == decision_id:
+                matched.append({col: span.get(col, "") for col in _TRACE_COLUMNS})
+    return matched
+
+
+def _render_trace_tab(date_str: str, source_root: Path) -> None:
+    """Per-decision span explorer."""
+    st.subheader(f"Trace — {date_str}")
+
+    trace_path = _resolve_trace_path(date_str, source_root)
+    if trace_path is None:
+        st.warning(
+            f"No trace file found under `{TRACES_ROOT / date_str}` or "
+            f"`{source_root / date_str / 'trace.jsonl'}`."
+        )
+        return
+
+    st.caption(f"Reading {trace_path}")
+
+    decision_id = st.text_input("decision_id", placeholder="dec-buy-1")
+    if not decision_id:
+        st.info("Enter a decision_id above to inspect its span chain.")
+        return
+
+    spans = _load_trace_spans(trace_path, decision_id)
+    if not spans:
+        st.info(
+            f"No spans found for decision_id={decision_id!r} in {trace_path.name}"
+        )
+        return
+
+    df = pd.DataFrame(spans, columns=list(_TRACE_COLUMNS))
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.markdown("**Copy the grep command:**")
+    cmd = f"grep '\"decision_id\":\"{decision_id}\"' {trace_path} | jq ."
+    st.code(cmd, language="bash")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def render() -> None:
+    st.set_page_config(
+        page_title="AI Investment Firm",
+        layout="wide",
+        page_icon="📈",
+    )
+    st.title("AI Investment Firm — Daily Report")
+
+    dates = _list_available_dates()
+    if not dates:
+        st.warning(
+            f"No date directories found under `{REPORTS_ROOT}` or "
+            f"`{SAMPLE_RUNS_ROOT}`. Generate a report with "
+            "`python -m firm.cli report --date YYYY-MM-DD` or commit sample runs."
+        )
+        return
+
+    labels = [d for d, _ in dates]
+    selected_label = st.selectbox("Date", labels, index=0)
+    selected_date, selected_source = next(
+        (d, r) for d, r in dates if d == selected_label
+    )
+    st.caption(f"Source: {selected_source / selected_date}")
+
+    tab1, tab2, tab3 = st.tabs(["Today's Report", "Live Desk", "Trace"])
+
+    with tab1:
+        _render_today_tab(selected_date, selected_source)
+    with tab2:
+        _render_live_desk_tab()
+    with tab3:
+        _render_trace_tab(selected_date, selected_source)
+
+    # Auto-refresh — Streamlit reruns the script every REFRESH_SECONDS so the
+    # Live Desk tab stays current. ``st.tabs`` preserves the active tab across
+    # reruns, so users on Tabs 1/3 see no flicker.
     import time as _time
+
     _time.sleep(REFRESH_SECONDS)
     st.rerun()
 

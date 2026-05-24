@@ -6,23 +6,47 @@ Multi-agent paper-trading firm. Take-home for Cato Networks — Agentic AI Engin
 [![Main CI](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/main.yml/badge.svg?branch=main)](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/main.yml)
 [![Release](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/release.yml/badge.svg)](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/release.yml)
 
-## Overview
+A small AI-run trading desk: seven agents take turns each minute — research, three portfolio-manager voters, risk, a human approver, execution, reporter — and every claim that reaches the broker is backed by a verbatim quote from a real SEC filing. All state lives in one place that survives a crash, so a restart picks up exactly where it left off. Yesterday's outcomes constrain today's sizing automatically, and the firm flags its own mistakes the next morning.
 
-A small AI-run trading desk. Seven agents take turns each minute: read the market, pick a trade, debate it, check the rules, ask a human if the trade is large, place the order with a paper broker, and write the day's report. All state lives in one SQLite file, so the desk picks up exactly where it left off after a restart.
+## Contents
 
-The interesting part is the back-and-forth. A trade only reaches the broker after research has quoted a real SEC filing, a separate reader has agreed the quotes actually support the claims, three independent voters have agreed it's worth doing, a plain-Python rule book has cleared every limit, and (for big trades) a human has approved it in Slack.
+- [Quickstart](#quickstart)
+- [Architecture](#architecture)
+- [Agents](#agents)
+- [What was built](#what-was-built)
+- [Sample runs](#sample-runs)
+- [Documentation index](#documentation-index)
+
+## Quickstart
+
+### Prerequisites
+- Python 3.11.x (3.13 ships without `torch.SymInt`; 3.10 lacks newer typing)
+- Docker Desktop
+- Anthropic API key (`ANTHROPIC_API_KEY`)
+- *Optional:* CUDA GPU for faster corpus ingest
+
+### Three commands
+
+```powershell
+copy .env.example .env                   # then set ANTHROPIC_API_KEY
+docker compose up -d qdrant              # vector store
+python -m firm.cli ingest                # one-time corpus embed (~2 min)
+docker compose up firm                   # one heartbeat → BUY/HOLD → daily report
+```
+
+Full step-by-step (host venv, GPU notes, continuous loop + dashboard, human-approval exercise, live broker): [`docs/quickstart.md`](docs/quickstart.md).
 
 ## Architecture
 
-One heartbeat through the seven agents:
+One heartbeat through the seven agents — the risk gate is the only branch point; everything to its left is a chance to stop a bad trade:
 
 ```mermaid
 flowchart LR
     M[monitor] --> R[research]
-    R --> P["PM<br/>3 voters in parallel"]
+    R --> P["portfolio manager<br/>3 voters in parallel"]
     P --> RK[risk]
     RK -- approve --> X[execution]
-    RK -- escalate --> H["human<br/>via Slack"]
+    RK -- escalate --> H["human approver<br/>(dashboard / CLI)"]
     RK -- refuse --> HALT((HALT))
     H -- approve --> X
     H -- timeout --> HALT
@@ -30,144 +54,78 @@ flowchart LR
     RP --> DONE((daily report))
 ```
 
-Risk is the only branch point. Everything left of `execution` is a chance to stop a bad trade.
+Deployment topology, per-node failure modes, data sources, and the AWS Bedrock AgentCore mapping: [`docs/architecture.md`](docs/architecture.md).
 
-Deeper view (deployment topology, where each safety net sits): [`docs/architecture.md`](docs/architecture.md).
+## Agents
 
-## Prerequisites
-
-- Python 3.11.x (3.13 ships without `torch.SymInt`; 3.10 lacks newer typing)
-- Docker Desktop
-- Anthropic API key (`ANTHROPIC_API_KEY`)
-- *Optional:* CUDA GPU for faster corpus ingest
-
-## Quickstart
-
-```powershell
-copy .env.example .env                   # then set ANTHROPIC_API_KEY
-docker compose up -d qdrant              # vector store
-python -m firm.cli ingest                # one-time corpus embed (~2 min)
-docker compose up firm                   # one heartbeat → REFUSE or BUY → daily report
-```
-
-Continuous demo (two terminals):
-
-```powershell
-# Terminal 1 — the firm loop
-python -m firm.cli run --loop --interval-seconds 60     # Ctrl-C to stop
-
-# Terminal 2 — the live dashboard
-pip install -e ".[dashboard]"
-streamlit run firm/dashboard.py                          # http://localhost:8501
-```
-
-Full step-by-step (host venv, GPU notes, HITL exercise, Alpaca, native run): [`docs/quickstart.md`](docs/quickstart.md).
-
-## What was built
-
-This is the reviewer's map of the brief. Each item below maps to one line in the assignment's *The Goal* or *Production Requirements* lists, with a pointer to the depth doc.
-
-### The portfolio is real-shaped
-
-Fills go through a paper broker that charges **5 bps slippage** and a **per-share commission**, so a buy at $100 settles at $100.05 plus fees (`firm/broker/fake_broker.py`). Quotes carry a market-clock timestamp; an order priced from a stale quote (older than 60 s) is refused. Real broker (Alpaca) is a one-flag swap via `FIRM_BROKER=ALPACA`.
-
-### State survives a crash
-
-Cash, positions, cost basis, every decision, the cost ledger, the human-approval queue, and the LangGraph snapshot all live in one file: `data/firm.db`. A crash mid-trade resumes mid-trade from the same source the broker reconciles against at boot. Litestream replicates the file to a backup target for restore. Operator detail: [`docs/runbook.md`](docs/runbook.md).
-
-### Runs continuously during market hours
-
-`python -m firm.cli run --loop` ticks once a minute and ignores ticks outside US market hours (`firm/agents/monitor.py`). Each tick is one self-contained heartbeat — if any single tick fails, the next one still fires.
-
-### Seven agents, real collaboration
-
-Each agent does one job and hands off to the next:
-
-1. **monitor** — reads the clock and the list of allowed tickers.
-2. **research** — picks one candidate trade and writes its thesis as a list of *claims*. Every claim must quote a passage from a real filing.
-3. **PM** — *not* a single model. Three voters run in parallel:
-   - **quality** ("is this a good business?")
-   - **valuation** ("is the price reasonable?")
-   - **catalyst** ("is there a near-term reason to act?")
-
-   Each one votes BUY / HOLD / VETO independently. A majority is required to move the trade forward. One bad day from one model can't carry a trade to the floor.
-4. **risk** — runs the rule book in plain Python: max **10%** in one name, **30%** per sector, gross book ≤ **100%** of capital, daily loss ≤ **3%**. An LLM cannot argue past it.
-5. **HITL (human-in-the-loop)** — pauses the workflow and posts a signed Slack message ("approve / edit / reject?"). The pause is real — you can stop the process, walk away, come back tomorrow, and the trade is still waiting. Nobody answers in 30 minutes → the trade is auto-refused.
-6. **execution** — places the order with the broker. The same order can't fill twice — every fill carries a unique nonce, so a network retry is safe.
-7. **reporter** — writes the day's Markdown report and refreshes the dashboard.
+| Agent | What it does |
+|---|---|
+| **monitor** | Reads the clock and the list of allowed stocks each tick. Decides whether the market is open and which names are in scope. |
+| **research** | Picks one candidate stock to investigate and writes its thesis as a list of claims, each one backed by a verbatim quote from a real SEC filing. |
+| **portfolio manager** | Three independent voters — quality, valuation, and catalyst — debate the proposal in parallel. A majority is required to move the trade forward, so one bad day from one model cannot carry a trade to the floor. |
+| **risk** | Runs the rule book — position size limits, sector caps, daily loss limit, gross exposure. The rules are deterministic code, so the model cannot argue past them. |
+| **human approver** | Pauses the workflow when a trade is large enough to need a human signature, and writes the request to an approval queue. The pause is real — the trade waits indefinitely; if nobody answers in 30 minutes it is auto-refused. |
+| **execution** | Places the order with the broker. Every order carries a unique signature, so a network retry can never accidentally double-fill. |
+| **reporter** | Writes the day's report and refreshes the dashboard at end of run. |
 
 Typed contracts, state lifecycle, and partial-failure model: [`docs/technical-overview.md`](docs/technical-overview.md).
 
-### Every claim is grounded in a real filing
+## What was built
 
-Research never paraphrases. Qdrant pulls candidate passages from an index of SEC 10-Ks (keyword + dense embedding + a re-ranker for ordering); the Anthropic Citations API returns the exact verbatim quote, which is stored on the claim. A separate, cheaper reader (Haiku) re-reads the same passages and labels each claim *ok*, *partial*, or *insufficient*. Too many *insufficient* labels and the whole proposal is killed before the PM ever sees it. Corpus: 84 10-Ks from the FinanceBench dataset. Config: `config/rag.yaml`.
+One subsection per Production Requirement in the brief, plus the two output channels §6 calls out. Each describes *what* the firm does; *how* it does it is in the linked depth doc.
 
-### Human-in-the-loop for big trades
+### Persistent portfolio state
+All of the firm's important state — cash, holdings, every decision made, who owes an approval, and the half-finished workflow itself — is saved continuously, with a streaming backup to a separate location. If the process dies in the middle of a trade, restart resumes from the exact step it was on; no model calls are re-issued and no work is re-done. On boot, the firm asks the broker what positions and cash it actually holds and corrects any drift before the next tick.
 
-The risk gate has three exits: *approve* (→ execution), *refuse* (heartbeat ends), or *escalate* (→ human). On escalate, the graph saves a checkpoint and posts to Slack. When the human approves, the graph resumes from the same checkpoint. If the human *edits* the size, the new size goes back through the same risk check on the next tick — the human can't shortcut the rules, only the threshold for escalation.
+### RAG with citation discipline
+Research never paraphrases. Before any claim reaches the portfolio managers, candidate passages are pulled from a corpus of real SEC 10-K filings, the model is forced to attach the verbatim quote, and a separate cheaper reader re-reads those passages and labels each claim trustworthy, partial, or unsupported. Too many unsupported labels and the proposal is killed before it ever reaches the floor.
 
-### Replay any trade from the trace
+### Human-in-the-loop
+The risk gate has three exits: approve, refuse, or escalate. On escalate, the workflow pauses and a signed request lands in the approval queue; the approver clicks approve or reject from the dashboard or the CLI, and the workflow resumes from exactly the same point. If the human edits the trade size, the new size still has to clear the rule book on the next tick — the human can shortcut the threshold for escalation, not the rules themselves.
 
-Every agent call, every LLM call, every tool call, and every retrieval writes one line to `data/traces/<date>/run-<id>.jsonl`. Each line carries the decision ID, the parent decision, the failure mode (if any), the model used, tokens, and cost. `grep` one decision ID and you have the whole heartbeat — research → vote → risk check → fill — without standing up any monitoring stack. The same tracer ships to a real OTLP backend in production.
+### Observability
+Every step the firm takes — every agent run, every model call, every retrieval, every order — emits one structured trace line to a per-day log file. To walk one trade end-to-end, filter that file by the trade's ID; the file *is* the audit log. The dashboard does the same walk in the browser, and in production the same stream ships to any standard observability backend.
 
-### Two report channels, one source of truth
+### Guardrails
+Four layers protect the firm from itself and from bad inputs: filtered text rejects prompt-injection attempts hidden in retrieved web or filing content; every agent's output is shape-checked before being trusted downstream; the citation re-reader catches hallucinations before they reach the portfolio managers; and the rule book enforces trading limits the model cannot argue past. A red-team suite of 51 adversarial cases proves each layer fires when it should and stays quiet when it shouldn't.
 
-Both read `data/firm.db`, so they cannot disagree.
+### Eval harness
+Three historical 5-day market windows replay end-to-end with frozen clock and recorded model responses — no API key required, runs in CI. Reports cover both **portfolio performance** (per-trade returns, hit rate, vs. S&P 500, vs. an equal-weight basket of the universe) and **process quality** (groundedness, decision discipline, guardrail effectiveness, mistake rate). Determinism is enforced by running the eval twice and diffing the output; any leaking randomness fails the build. Run with `make eval`; the per-regime numbers land at `reports/eval/<regime>/summary.md` — see [`docs/eval.md`](docs/eval.md) for the report shape and metric definitions.
 
-- **Streamlit dashboard** — live positions, recent decisions, the human-approval queue, today's spend, reconciliation status. Auto-refreshes.
-- **Daily `positions.xlsx`** — written by the reporter at end-of-day.
+### Two output channels
 
-Why both: operators who pivot in Excel get a spreadsheet; reviewers who want a live view get the dashboard. Two mediums for two audiences, one database underneath.
+![Dashboard — Today's Report tab for sample run 2024-03-13](sample_runs/2024-03-13/dashboard.png)
 
-### Reproducible eval — return + process metrics
+*The live dashboard on the 2024-03-13 sample. Sibling captures: [2024-08-07 (sell-off)](sample_runs/2024-08-07/dashboard.png) · [2023-11-08 (quiet)](sample_runs/2023-11-08/dashboard.png).*
 
-`make eval` replays three historical regimes (a bull month, a chop month, a stress month) from recorded prices and recorded LLM responses; no API key needed in cached mode. It reports both **portfolio performance vs. SPY** *and* **process-quality metrics**: groundedness rate, citation coverage, refusal rate, guardrail-fire rate, cost per decision. Byte-identical run-to-run — `scripts/check_reports_clean.sh` runs the eval twice and diffs the output; any leaking randomness breaks CI. Methodology and what's deliberately *not* measured: [`docs/eval.md`](docs/eval.md).
+Two complementary delivery channels — both running on `docker compose up` with no external infrastructure (no Slack workspace, no SMTP server, no cloud bucket) required:
 
-### Guardrails — every input, output, and trade limit
+- **Channel A — Live web dashboard.** Open in a browser at the local URL. Three tabs: *Today's Report* shows the rendered daily report for any selected date; *Live Desk* refreshes every few seconds and shows current cash, positions, recent decisions, the human-approval queue, today's spend, and reconciliation; *Trace* takes a decision ID and shows every step that trade went through.
+- **Channel B — Self-contained report bundle.** Written to disk at end of day. One HTML file (no JavaScript, no external assets — opens cleanly off a USB stick), one Excel workbook (positions with mark-to-market unrealized P&L; one row per decision with action, ticker, citation count, rationale), and the raw decision and trace logs as plain JSONL. Per-trade *realized* P&L plus benchmarks vs. S&P and the universe basket live in the eval report (`reports/eval/<regime>/summary.md`), not in the daily bundle.
 
-- **Input validation** — retrieved web/filing text is scanned for `<system>`-style markers; a hit becomes `PROMPT_INJECTION_DETECTED` and is refused.
-- **Output schema** — every agent's output is validated by Pydantic on the way out; malformed JSON or a missing field becomes `SCHEMA_VALIDATION_FAILED`.
-- **Hallucination** — the sufficiency judge described above.
-- **Trading limits** — the deterministic risk gate; an LLM cannot bypass it.
+Why both: real-time vs. durable, different audiences (operators vs. forwardable stakeholders). Both read the same underlying state, so they cannot disagree.
 
-Every failure has a name. There are **15 in a `FailureMode` enum** with a catch-all `UNKNOWN`, and each one has a coverage test in `tests/integration/`. On top of that, a **51-case red-team suite** (citation forgery, role hijack, confused-deputy, unicode homoglyphs, spoofed approvals, multi-step chains) proves each guardrail fires when it should — and stays quiet when it shouldn't. Full threat model: [`docs/threat_model.md`](docs/threat_model.md).
+## Sample runs
 
-### Production-shaped thinking
+Three committed trading days, one per market regime. Each was chosen *before* any prompt was tuned, so they are not a fit. With the default configuration the firm investigates **AMD** as its first candidate each tick — AMD is the one entry in the universe whose ticker matches its filing-corpus company name verbatim, so retrieval returns real chunks out of the box.
 
-- **Token cost** — every LLM call goes through a cost router that picks the cheapest model that can do the job (Haiku first, fall through to Sonnet on overload). A content-addressed prompt cache means the same prompt is never billed twice. A `cost_ledger` row records the spend per decision.
-- **Scalability** — heartbeats are stateless between ticks; horizontal scale is N firm processes against shared Postgres (RDS in the Terraform), each owning a thread id.
-- **High availability** — Litestream replication of `firm.db`, an idle reaper that auto-refuses stale human approvals, crash-resumes from the LangGraph checkpoint.
-- **Standardization** — Terraform under `infra/terraform/` (network, compute, storage, secrets, observability, bedrock modules); CI on every PR (lint + types + tests + docker build + eval-clean diff). Take-home → prod delta: [`docs/path-to-production.md`](docs/path-to-production.md).
+| Date | Regime | Tickers in the bundle | What happened |
+|---|---|---|---|
+| [`2024-03-13`](sample_runs/2024-03-13/README.md) | Earnings week (NVDA, ORCL, ADBE report) | AAPL | High-confidence BUY on AAPL backed by four citations, then an afternoon HOLD when the model couldn't find a fresh edge |
+| [`2024-08-07`](sample_runs/2024-08-07/README.md) | Post-Aug-5 sell-off | NVDA | De-risking SELL on NVDA, then a portfolio-level hedge proposal that exceeded the per-trade limit and was escalated to the human approver |
+| [`2023-11-08`](sample_runs/2023-11-08/README.md) | Quiet pre-CPI tape | — | Two HOLD decisions — quiet day, no fresh catalysts, the firm correctly does nothing |
 
-### Sample run committed
-
-Three full historical days are checked into `sample_runs/` (2023-11-08, 2024-03-13, 2024-08-07), each with `daily_report.md`, `decisions.jsonl`, `trace.jsonl`, and `positions.xlsx`. Open one to see exactly what a reviewer would see at end-of-day.
-
-### Bonuses
-
-- **AWS Bedrock AgentCore mapping** — every box in the deployment view has a one-to-one mapping to an AgentCore primitive: [`docs/agentcore_mapping.md`](docs/agentcore_mapping.md).
-- **IaC** — Terraform with six modules; the deployment diagram in `docs/architecture.md` is what these modules build.
-- **CI/CD** — three GitHub workflows (`pr.yml`, `main.yml`, `release.yml`); badges above.
-- **Advanced RAG** — hybrid retrieval (BM25 + dense + re-ranker) with a contextual-augment pass at index time.
-- **Cost-aware model routing** — the router described above.
-- **Prompt-injection defenses** — input sanitizer + sufficiency judge + the red-team corpus.
-
-## Status
-
-- [x] Plan 1: Foundation + Walking Skeleton
-- [x] Plan 2: RAG + Citations + Grounding
-- [x] Plan 3: HITL + Daily Reports + Observability
-- [x] Plan 4: Eval Harness + Red Team + CI/CD + Bonuses
+Each per-date folder has a narrated `README.md` (start there), a dashboard screenshot, the HTML report bundle, the Excel workbook, and the raw decision and trace logs. A small script (`scripts/hydrate_sample_db.py`) rebuilds the firm's state file so a reviewer can re-render any bundle locally.
 
 ## Documentation index
 
 | File | Purpose |
 |------|---------|
-| [`docs/quickstart.md`](docs/quickstart.md) | Full host + Docker setup, GPU notes, Alpaca, Slack exercise |
-| [`docs/architecture.md`](docs/architecture.md) | Logical + deployment diagrams, where each safety net sits |
-| [`docs/technical-overview.md`](docs/technical-overview.md) | Agent contracts, state lifecycle, partial-failure model |
+| [`docs/quickstart.md`](docs/quickstart.md) | Full host + Docker setup, GPU notes, live broker, human-approval exercise |
+| [`docs/architecture.md`](docs/architecture.md) | Logical + deployment diagrams, data sources, where each safety net sits |
+| [`docs/technical-overview.md`](docs/technical-overview.md) | Agent contracts, state lifecycle, partial-failure model, learning loops |
 | [`docs/runbook.md`](docs/runbook.md) | Operator playbooks — approvals, restore, incidents |
-| [`docs/eval.md`](docs/eval.md) | Eval methodology, regimes, process metrics |
+| [`docs/eval.md`](docs/eval.md) | Eval methodology, regimes, process metrics, determinism gate |
 | [`docs/threat_model.md`](docs/threat_model.md) | STRIDE + red-team corpus |
 | [`docs/path-to-production.md`](docs/path-to-production.md) | Take-home → production delta map |
 | [`docs/agentcore_mapping.md`](docs/agentcore_mapping.md) | Bedrock AgentCore mapping |

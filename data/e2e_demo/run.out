@@ -1,0 +1,76 @@
+
+════════════════════════════════════════════════════════════════════
+ STEP 1/6  pre-flight
+════════════════════════════════════════════════════════════════════
+[04:47:43] Anthropic key set (length: 108)
+[04:47:43] Qdrant probe: http://localhost:6333
+[04:47:43] Qdrant healthy
+
+════════════════════════════════════════════════════════════════════
+ STEP 2/6  ingest FinanceBench  (N=30 docs)
+════════════════════════════════════════════════════════════════════
+[04:47:43] SKIP_INGEST=1 — assuming Qdrant collection already populated
+
+════════════════════════════════════════════════════════════════════
+ STEP 3/6  configure universe  (AMD-focused — in N=30 ingest head)
+════════════════════════════════════════════════════════════════════
+[04:47:44] universe.yaml -> [AMD, Adobe, Boeing]
+
+════════════════════════════════════════════════════════════════════
+ STEP 4/6  smoke heartbeat  (--once)
+════════════════════════════════════════════════════════════════════
+    raise KeyError(
+KeyError: "Ticker 'AMD' not found in risk metrics index. Run firm/ops/precompute_risk_metrics.py to refresh the parquet."
+Tool 'risk_get_metric' raised during extract; skipping block 'toolu_01Ct1DyaLpvE67vwV6mtr1wC'
+Traceback (most recent call last):
+  File "E:\AI-Investment-Firm\.claude\worktrees\plan4-eval-redteam-cicd-deploy\firm\llm\citations.py", line 221, in extract
+    result_value: Decimal = tool.run(**tool_input)
+                            ^^^^^^^^^^^^^^^^^^^^^^
+  File "E:\AI-Investment-Firm\.claude\worktrees\plan4-eval-redteam-cicd-deploy\firm\tools\risk_metrics.py", line 202, in run
+    return self.get_metric(**kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "E:\AI-Investment-Firm\.claude\worktrees\plan4-eval-redteam-cicd-deploy\firm\tools\risk_metrics.py", line 167, in get_metric
+    raise KeyError(
+KeyError: "Ticker 'AMD' not found in risk metrics index. Run firm/ops/precompute_risk_metrics.py to refresh the parquet."
+Cost so far today: $0.045
+Heartbeat #1 complete. Report: data\e2e_demo\reports\2024-03-13\decisions.jsonl
+
+════════════════════════════════════════════════════════════════════
+ STEP 5/6  continuous loop  (N=10 heartbeats × 5s)
+════════════════════════════════════════════════════════════════════
+[04:50:12] Wall-cap: 170s
+[04:50:12] tick 1/10
+[04:51:51] tick 2/10
+[04:52:57] tick 3/10
+[04:53:55] tick 4/10
+[04:54:52] tick 5/10
+[04:55:51] tick 6/10
+[04:56:51] tick 7/10
+[04:58:18]   ! tick 7 exited non-zero — continuing (loop is crash-resilient by design)
+[04:58:23] tick 8/10
+[04:59:58] tick 9/10
+[05:01:09] tick 10/10
+
+════════════════════════════════════════════════════════════════════
+ STEP 6/6  validate + render daily report
+════════════════════════════════════════════════════════════════════
+E:\Teeth_Segmentation\venv\Lib\site-packages\requests\__init__.py:113: RequestsDependencyWarning: urllib3 (2.6.3) or chardet (7.4.3)/charset_normalizer (3.4.4) doesn't match a supported version!
+  warnings.warn(
+Report bundle written: data\e2e_demo\reports\2026-05-24
+[05:02:05] trace file: data/e2e_demo/traces/2026-05-24/run-00000000000000000000000000.jsonl
+Traceback (most recent call last):
+  File "E:\AI-Investment-Firm\.claude\worktrees\plan4-eval-redteam-cicd-deploy\scripts\e2e_demo_validate.py", line 223, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "E:\AI-Investment-Firm\.claude\worktrees\plan4-eval-redteam-cicd-deploy\scripts\e2e_demo_validate.py", line 201, in main
+    for line in check_db(args.db):
+                ^^^^^^^^^^^^^^^^^
+  File "E:\AI-Investment-Firm\.claude\worktrees\plan4-eval-redteam-cicd-deploy\scripts\e2e_demo_validate.py", line 89, in check_db
+    cur = conn.execute("SELECT count(DISTINCT decision_id) FROM decisions")
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+sqlite3.OperationalError: no such column: decision_id
+====================================================================
+E2E DEMO VALIDATION
+====================================================================
+
+[1/4] firm.db state

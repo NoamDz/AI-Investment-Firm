@@ -19,19 +19,22 @@ If Qdrant is unreachable, ``pytest.skip`` is called so the test does not block
 CI.  The marker also lets ``pytest -m 'not requires_models'`` exclude the test
 explicitly.
 """
+import json
 import os
 import socket
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
+import yaml
 
 
-def _qdrant_reachable() -> bool:
-    """Return True if the configured Qdrant endpoint accepts a TCP connection."""
-    url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+def _qdrant_reachable(url: str) -> bool:
+    """Return True if the given Qdrant endpoint accepts a TCP connection."""
     try:
         parsed = urlparse(url)
         host = parsed.hostname or "localhost"
@@ -42,6 +45,26 @@ def _qdrant_reachable() -> bool:
         return False
 
 
+def _corpus_has_ticker(qdrant_url: str, ticker: str) -> bool:
+    """Return True if firm_chunks holds at least one point for the ticker."""
+    body = json.dumps({
+        "limit": 1,
+        "filter": {"must": [{"key": "ticker", "match": {"value": ticker}}]},
+    }).encode()
+    req = urllib.request.Request(
+        f"{qdrant_url.rstrip('/')}/collections/firm_chunks/points/scroll",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read())
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+    return bool(data.get("result", {}).get("points"))
+
+
 @pytest.mark.requires_models
 def test_walking_skeleton_end_to_end(tmp_path: Path):
     """Full heartbeat smoke test (Plan 1 stub path).
@@ -50,13 +73,25 @@ def test_walking_skeleton_end_to_end(tmp_path: Path):
     block lightweight CI environments.  Run 'docker compose up qdrant' to
     enable.
     """
-    if not _qdrant_reachable():
+    qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+    if not _qdrant_reachable(qdrant_url):
         pytest.skip(
             "Qdrant not reachable — run 'docker compose up qdrant' or"
             " set QDRANT_URL. T30 covers the grounded path with fixtures."
         )
 
+    universe = yaml.safe_load(
+        Path(__file__).resolve().parents[2].joinpath("config/universe.yaml").read_text()
+    )
+    first_ticker = universe["tickers"][0]
+    if not _corpus_has_ticker(qdrant_url, first_ticker):
+        pytest.skip(
+            f"Qdrant collection firm_chunks has no chunks for {first_ticker} —"
+            " run 'make ingest' to seed the corpus."
+        )
+
     env = os.environ.copy()
+    env["QDRANT_URL"] = qdrant_url
     env["FIRM_BROKER"] = "FAKE"
     env["FIRM_DB_PATH"] = str(tmp_path / "firm.db")
     env["FIRM_HMAC_SECRET"] = "a" * 64

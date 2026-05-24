@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AI Investment Firm — Daily Report — 2023-11-08</title>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+       color: #222; margin: 0; padding: 0; background: #fff; }
+header.bar { background: #1f2933; color: #fff; padding: 14px 28px; }
+header.bar h1 { margin: 0; font-size: 20px; font-weight: 600; }
+main { padding: 20px 28px; max-width: 1100px; }
+section { margin-bottom: 28px; }
+section h2 { font-size: 16px; border-bottom: 1px solid #ddd; padding-bottom: 4px;
+             margin-top: 0; color: #1f2933; }
+p.summary { font-size: 14px; line-height: 1.5; margin: 8px 0; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #eee;
+         vertical-align: top; }
+th { background: #1f2933; color: #fff; font-weight: 600; }
+tr:nth-child(even) { background: #f7f7f9; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.action { font-weight: 600; }
+pre { background: #f4f4f6; border: 1px solid #e0e0e4; border-radius: 4px;
+      padding: 10px 14px; font-size: 12px; line-height: 1.4; overflow-x: auto;
+      font-family: "SF Mono", Menlo, Consolas, monospace; }
+footer { margin-top: 32px; padding: 14px 28px; border-top: 1px solid #ddd;
+         color: #555; font-size: 12px; }
+footer code { background: #f4f4f6; padding: 1px 4px; border-radius: 3px;
+              font-family: "SF Mono", Menlo, Consolas, monospace; }
+footer p { margin: 4px 0; }
+.empty { color: #777; font-style: italic; }
+</style>
+</head>
+<body>
+<header class="bar">
+  <h1>AI Investment Firm — Daily Report — 2023-11-08</h1>
+</header>
+<main>
+
+<section>
+  <h2>Executive summary</h2>
+  <p class="summary">On 2023-11-08 the firm took 2 decisions: 2 HOLD. Total LLM spend $0.028 across 3 calls (67% cache hit).</p>
+</section>
+
+<section>
+  <h2>Decisions</h2>
+  
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th><th>Action</th><th>Ticker</th><th>Shares</th>
+        <th>Confidence</th><th>Citations</th><th>Failure mode</th><th>Rationale</th>
+      </tr>
+    </thead>
+    <tbody>
+    
+      <tr>
+        <td>2023-11-08T14:15:00+00:00</td>
+        <td class="action"><span style="color:#7f8c8d">HOLD</span></td>
+        <td></td>
+        <td class="num"></td>
+        <td class="num">0.72</td>
+        <td class="num">2</td>
+        <td></td>
+        <td>Quiet tape; maintain core exposure</td>
+      </tr>
+    
+      <tr>
+        <td>2023-11-08T16:30:00+00:00</td>
+        <td class="action"><span style="color:#7f8c8d">HOLD</span></td>
+        <td></td>
+        <td class="num"></td>
+        <td class="num">0.68</td>
+        <td class="num">2</td>
+        <td></td>
+        <td>Macro calendar empty until 2023-11-21</td>
+      </tr>
+    
+    </tbody>
+  </table>
+  
+</section>
+
+<section>
+  <h2>Cost summary</h2>
+  
+  <table>
+    <thead>
+      <tr><th>Model</th><th>Calls</th><th>Avg $</th><th>Total $</th></tr>
+    </thead>
+    <tbody>
+    
+      <tr>
+        <td>Haiku</td>
+        <td class="num">1</td>
+        <td class="num">$0.0008</td>
+        <td class="num">$0.001</td>
+      </tr>
+    
+      <tr>
+        <td>Sonnet</td>
+        <td class="num">2</td>
+        <td class="num">$0.0134</td>
+        <td class="num">$0.027</td>
+      </tr>
+    
+    </tbody>
+    <tfoot>
+      <tr><td colspan="3">Cached:</td><td class="num">67%</td></tr>
+      <tr><td colspan="3"><b>Total:</b></td><td class="num"><b>$0.028</b></td></tr>
+    </tfoot>
+  </table>
+  
+</section>
+
+<section>
+  <h2>Reconciliation</h2>
+  <pre>  Broker positions:   { AAPL: 100, MSFT: 20 }
+  Local positions:    { AAPL: 100, MSFT: 20 }
+  Position diff:      none
+  Broker cash:        $100,000.00
+  Local cash:         $100,000.00
+  Cash diff:          $0.00
+  Status:             ✓ books tie to broker</pre>
+</section>
+
+</main>
+<footer>
+  <p>Trace file: <code>data/traces/2023-11-08/run-*.jsonl</code></p>
+  
+  <p>Generated 2023-11-08 by firm.reports.html. View live: http://localhost:8501. To save as PDF: Ctrl-P → Save as PDF.</p>
+</footer>
+</body>
+</html>

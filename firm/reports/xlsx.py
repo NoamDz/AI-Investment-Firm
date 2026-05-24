@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import openpyxl
+from openpyxl.styles import Font
 
 from firm.broker.protocol import Broker
 from firm.db.connection import get_conn
@@ -31,6 +32,21 @@ _PNL_HEADERS = [
     "confidence",
     "failure_mode",
 ]
+
+_DECISIONS_HEADERS = [
+    "ts",
+    "action",
+    "ticker",
+    "shares",
+    "confidence",
+    "citations",
+    "failure_mode",
+    "rationale",
+]
+
+# Max rendered length for the rationale cell on the Decisions sheet (T3 §6).
+# Longer values are truncated and suffixed with U+2026 (…).
+_RATIONALE_MAX_CHARS = 120
 
 # Actions that carry a ticker+shares in their payload.
 _TRADE_ACTIONS = {"BUY", "SELL"}
@@ -106,7 +122,8 @@ def write_positions_xlsx(
     as_of_iso = as_of.isoformat()
     with closing(get_conn(db_path)) as conn:
         rows = conn.execute(
-            "SELECT id, created_at, action, payload, confidence, failure_mode "
+            "SELECT id, created_at, action, payload, confidence, failure_mode, "
+            "citations, rationale "
             "FROM decisions WHERE created_at < ? ORDER BY created_at ASC",
             (as_of_iso,),
         ).fetchall()
@@ -130,6 +147,49 @@ def write_positions_xlsx(
                 shares,
                 confidence,
                 failure_mode,  # None stays None; non-None failure_mode written as-is
+            ]
+        )
+
+    # --- Decisions sheet (Plan 4 / report-overhaul §T3) ---
+    # Same rows as P&L, widened with citations count + truncated rationale so the
+    # spreadsheet is self-contained if forwarded without the HTML report.
+    ws_dec = wb.create_sheet("Decisions")
+    ws_dec.append(_DECISIONS_HEADERS)
+    for col_idx in range(1, len(_DECISIONS_HEADERS) + 1):
+        ws_dec.cell(row=1, column=col_idx).font = Font(bold=True)
+    ws_dec.freeze_panes = "A2"
+
+    for row in rows:
+        ts = row["created_at"]
+        action = row["action"]
+        payload_json = row["payload"]
+        confidence = row["confidence"]
+        failure_mode = row["failure_mode"]
+        citations_json: str | None = row["citations"]
+        rationale: str = row["rationale"] or ""
+
+        ticker, shares = _extract_trade_fields(action, payload_json)
+
+        try:
+            citations_count = len(json.loads(citations_json)) if citations_json else 0
+        except (json.JSONDecodeError, TypeError):
+            citations_count = 0
+
+        if len(rationale) > _RATIONALE_MAX_CHARS:
+            rationale_cell = rationale[:_RATIONALE_MAX_CHARS] + "…"
+        else:
+            rationale_cell = rationale
+
+        ws_dec.append(
+            [
+                ts,
+                action,
+                ticker,
+                shares,
+                confidence,
+                citations_count,
+                failure_mode,
+                rationale_cell,
             ]
         )
 
