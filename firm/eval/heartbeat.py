@@ -75,6 +75,9 @@ _SKIPPABLE_REFS: tuple[tuple[str, str], ...] = (
     ("firm.eval.benchmarks", "PriceCassetteMissError"),
     ("firm.llm.cassettes", "CassetteMissError"),
     ("qdrant_client.http.exceptions", "UnexpectedResponse"),
+    # Wrapped form of Qdrant's 404 — keep co-listed with UnexpectedResponse so
+    # missing-collection skips survive the qdrant_store wrapping.
+    ("firm.rag.qdrant_store", "MissingCollectionError"),
 )
 
 # Misconfig (missing QDRANT_URL / API key / model config) surfaces from

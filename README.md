@@ -25,26 +25,26 @@ A small AI-run trading desk: seven agents take turns each minute — research, t
 - Anthropic API key (`ANTHROPIC_API_KEY`)
 - *Optional:* CUDA GPU for faster corpus ingest
 
-### Three commands
+### Four commands (continuous mode)
 
 ```powershell
-copy .env.example .env                   # then set ANTHROPIC_API_KEY
-docker compose up -d qdrant              # vector store
-python -m firm.cli ingest                # one-time corpus embed (~2 min)
-docker compose up firm                   # one heartbeat → BUY/HOLD → daily report
+copy .env.example .env                                                  # then set ANTHROPIC_API_KEY
+docker compose up -d qdrant                                             # vector store
+python -m firm.cli ingest                                               # one-time corpus embed (~2 min)
+docker compose run --rm --build firm python -m firm.cli run --loop --interval-seconds 60
 ```
 
-### Run continuously
+The fourth command rebuilds the firm image (so the CLI matches the checked-out source) and runs the firm in continuous mode — one heartbeat per minute (research → 3 PM voters → risk → execution → reporter) until `Ctrl-C`. First signal finishes the current heartbeat cleanly; a second exits immediately. Per-heartbeat exceptions are logged and the loop continues.
 
-`docker compose up firm` runs **one** heartbeat and exits. To keep it ticking, run the firm with the `--loop` flag instead:
+### Single heartbeat instead
+
+If you just want to see one heartbeat → BUY/HOLD → daily report → exit:
 
 ```powershell
-docker compose run --rm firm python -m firm.cli run --loop --interval-seconds 60
+docker compose up --build firm
 ```
 
-One heartbeat per minute (research → 3 PM voters → risk → execution → reporter) until `Ctrl-C` — the first signal finishes the current heartbeat cleanly, a second exits immediately. A single bad heartbeat is logged and the loop continues.
-
-Watch it live in a separate shell:
+Watch either run live in a separate shell:
 
 ```powershell
 streamlit run firm/dashboard.py        # http://localhost:8501 → Live Desk tab

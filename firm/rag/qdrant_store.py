@@ -27,10 +27,60 @@ from typing import Any
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 from firm.rag.chunk import Chunk
 
 _RRF_K = 60
+
+
+class MissingCollectionError(RuntimeError):
+    """Raised when a query targets a Qdrant collection that does not exist.
+
+    Wraps Qdrant's bare 404 ``UnexpectedResponse`` with an actionable message
+    so operators (and CI logs) see how to recover instead of a 30-line
+    traceback rooted at ``httpx``. The original exception is chained via
+    ``raise ... from exc`` so the underlying detail is still available for
+    debugging.
+    """
+
+    def __init__(self, collection: str) -> None:
+        super().__init__(
+            f"Qdrant collection `{collection}` does not exist. "
+            f"Run `python -m firm.cli ingest` to embed the corpus, "
+            f"then re-launch the firm."
+        )
+        self.collection = collection
+
+
+def _is_missing_collection(exc: UnexpectedResponse) -> bool:
+    """Return True iff *exc* is Qdrant's 404 'collection not found' response.
+
+    Qdrant returns 404 for both missing-collection and missing-point lookups;
+    we additionally inspect the body for the "doesn't exist" phrase so that
+    only the collection-level case is rewritten.
+    """
+    if exc.status_code != 404:
+        return False
+    content = exc.content or b""
+    if isinstance(content, bytes):
+        try:
+            text = content.decode("utf-8", errors="replace")
+        except Exception:
+            text = ""
+    else:
+        text = str(content)
+    return "doesn't exist" in text or "does not exist" in text
+
+
+def _is_local_missing_collection(exc: ValueError) -> bool:
+    """Return True iff *exc* is QdrantLocal's 'Collection X not found' ValueError.
+
+    The in-process ``QdrantLocal`` backend used by tests / `path=...` clients
+    bypasses the HTTP layer entirely and raises a bare ``ValueError`` for the
+    same condition that surfaces over HTTP as a 404 ``UnexpectedResponse``.
+    """
+    return "not found" in str(exc) and "ollection" in str(exc)
 
 
 class VectorStore:
@@ -119,20 +169,29 @@ class VectorStore:
         Used by the ingest pipeline (T11) to skip docs that are already indexed,
         enabling a second ``make ingest`` to resume without re-embedding.
         """
-        points, _ = self._client.scroll(
-            collection_name=name,
-            scroll_filter=models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="doc_id",
-                        match=models.MatchValue(value=doc_id),
-                    )
-                ]
-            ),
-            limit=1,
-            with_payload=False,
-            with_vectors=False,
-        )
+        try:
+            points, _ = self._client.scroll(
+                collection_name=name,
+                scroll_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="doc_id",
+                            match=models.MatchValue(value=doc_id),
+                        )
+                    ]
+                ),
+                limit=1,
+                with_payload=False,
+                with_vectors=False,
+            )
+        except UnexpectedResponse as exc:
+            if _is_missing_collection(exc):
+                raise MissingCollectionError(name) from exc
+            raise
+        except ValueError as exc:
+            if _is_local_missing_collection(exc):
+                raise MissingCollectionError(name) from exc
+            raise
         return len(points) > 0
 
     def _pit_filter(self, published_before: datetime) -> models.Filter:
@@ -153,13 +212,22 @@ class VectorStore:
         *,
         published_before: datetime,
     ) -> list[dict[str, Any]]:
-        response = self._client.query_points(
-            collection_name=name,
-            query=list(dense_vec),
-            using=self.DENSE_NAME,
-            limit=k,
-            query_filter=self._pit_filter(published_before),
-        )
+        try:
+            response = self._client.query_points(
+                collection_name=name,
+                query=list(dense_vec),
+                using=self.DENSE_NAME,
+                limit=k,
+                query_filter=self._pit_filter(published_before),
+            )
+        except UnexpectedResponse as exc:
+            if _is_missing_collection(exc):
+                raise MissingCollectionError(name) from exc
+            raise
+        except ValueError as exc:
+            if _is_local_missing_collection(exc):
+                raise MissingCollectionError(name) from exc
+            raise
         return [
             {
                 "chunk_id": p.payload["chunk_id"] if p.payload else "",
@@ -179,13 +247,22 @@ class VectorStore:
     ) -> list[dict[str, Any]]:
         indices = list(sparse_vec.keys())
         values = list(sparse_vec.values())
-        response = self._client.query_points(
-            collection_name=name,
-            query=models.SparseVector(indices=indices, values=values),
-            using=self.SPARSE_NAME,
-            limit=k,
-            query_filter=self._pit_filter(published_before),
-        )
+        try:
+            response = self._client.query_points(
+                collection_name=name,
+                query=models.SparseVector(indices=indices, values=values),
+                using=self.SPARSE_NAME,
+                limit=k,
+                query_filter=self._pit_filter(published_before),
+            )
+        except UnexpectedResponse as exc:
+            if _is_missing_collection(exc):
+                raise MissingCollectionError(name) from exc
+            raise
+        except ValueError as exc:
+            if _is_local_missing_collection(exc):
+                raise MissingCollectionError(name) from exc
+            raise
         return [
             {
                 "chunk_id": p.payload["chunk_id"] if p.payload else "",

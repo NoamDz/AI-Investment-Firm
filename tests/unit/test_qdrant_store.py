@@ -274,6 +274,52 @@ def test_create_collection_is_idempotent_and_preserves_data() -> None:
     assert store.doc_exists("preserve_col", "test-doc") is True
 
 
+def test_search_missing_collection_raises_actionable_error() -> None:
+    """Searching a collection that was never created surfaces MissingCollectionError.
+
+    Regression for an opaque Qdrant 404 traceback that surfaced when an
+    operator launched ``docker compose up firm`` before running ``firm ingest``.
+    The wrapped error tells the operator exactly which command to run.
+    """
+    from firm.rag.qdrant_store import MissingCollectionError, VectorStore
+
+    client = _make_client()
+    store = VectorStore(client)
+    utc = timezone.utc
+
+    with pytest.raises(MissingCollectionError) as excinfo:
+        store.search_dense(
+            "never_created",
+            [1.0, 0.0, 0.0, 0.0],
+            k=1,
+            published_before=datetime(2024, 1, 1, tzinfo=utc),
+        )
+    msg = str(excinfo.value)
+    assert "never_created" in msg
+    assert "firm.cli ingest" in msg
+
+    with pytest.raises(MissingCollectionError):
+        store.search_sparse(
+            "never_created",
+            {0: 1.0},
+            k=1,
+            published_before=datetime(2024, 1, 1, tzinfo=utc),
+        )
+
+    with pytest.raises(MissingCollectionError):
+        store.doc_exists("never_created", "any-doc")
+
+
+def test_missing_collection_error_is_runtime_error_subclass() -> None:
+    """``MissingCollectionError`` must subclass RuntimeError per Fix A spec."""
+    from firm.rag.qdrant_store import MissingCollectionError
+
+    assert issubclass(MissingCollectionError, RuntimeError)
+    err = MissingCollectionError("firm_chunks")
+    assert err.collection == "firm_chunks"
+    assert "firm_chunks" in str(err)
+
+
 def test_create_collection_force_recreates() -> None:
     """``force=True`` drops the collection and rebuilds it empty."""
     from firm.rag.qdrant_store import VectorStore

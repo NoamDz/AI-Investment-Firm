@@ -25,6 +25,9 @@ services:
       FIRM_LLM_MODE: "${FIRM_LLM_MODE:-live}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
       HF_HOME: /root/.cache/huggingface
+      # Align with dashboard.py default + tracer default so spans land in the
+      # bind-mounted /data dir and the dashboard's Trace tab can read them.
+      FIRM_TRACES_ROOT: /data/traces
     volumes:
       - ./data:/data
       - ${USERPROFILE:-${HOME}}/.cache/huggingface:/root/.cache/huggingface

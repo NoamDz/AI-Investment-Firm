@@ -33,6 +33,7 @@ dependencies = [
     "requests>=2.31",  # production HTTP client for news adapter
     "yfinance>=0.2.40",
     "pyarrow>=15.0",   # explicit (already transitively required by fundamentals.py)
+    "python-dotenv>=1.0",  # firm/cli.py auto-loads .env on host-side invocations
 ]
 
 [project.optional-dependencies]
