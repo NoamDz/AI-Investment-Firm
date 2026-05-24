@@ -106,7 +106,7 @@ def check_trace(trace_path: Path) -> list[str]:
     # Span name histogram — confirms agent.{monitor,research,pm,risk,...}
     # all fired during the run.
     name_counts = Counter(s.get("name", "?") for s in spans)
-    findings.append(f"top span names:")
+    findings.append("top span names:")
     for name, n in name_counts.most_common(15):
         findings.append(f"  {n:5d}  {name}")
 
