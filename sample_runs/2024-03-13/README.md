@@ -1,10 +1,13 @@
-# Sample run - 2024-03-13
+# Sample run — 2024-03-13
 
-## What this day demonstrates
+## What this day shows
 
-- **Regime:** earnings_heavy
-- **Setup:** Opens with BUY AAPL x 100; earnings_heavy regime.
-- **What to look for:** Highest-confidence BUY is `dec-buy-1` (0.85).
+**Market context.** Earnings-heavy week — NVDA, ORCL, and ADBE all report on the preceding days, so research has fresh filings to ground claims in.
+
+**What the firm did.** Mid-morning, research builds a thesis on **AAPL**, the portfolio managers vote BUY with high confidence (0.85, backed by four verbatim quotes from real 10-K passages), the risk gate clears it (well under the 10%-per-name limit), and the firm buys 100 shares. Late afternoon, research re-runs and finds no fresh edge — the firm correctly holds rather than churning.
+
+- **Regime tag:** `earnings_heavy`
+- **Pointer:** Highest-confidence BUY is `dec-buy-1` (0.85).
 
 ## Decisions
 
@@ -12,6 +15,8 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2024-03-13T14:30:00+00:00 | BUY | AAPL | 100 | 0.85 | 4 |  | Strong earnings momentum |
 | 2024-03-13T16:00:00+00:00 | HOLD |  |  | 0.60 | 3 |  | No clear edge |
+
+> **Reading the table.** `BUY` and `SELL` rows carry a ticker and a share count. `HOLD` is a deliberate "do nothing this tick" and does not target a specific stock, so its ticker and shares columns are blank by design — the same is true of portfolio-level `ESCALATE` rows (e.g., a hedge proposal that exceeded the per-trade limit). This is the decision schema, not missing data.
 
 ## Walking one trade
 

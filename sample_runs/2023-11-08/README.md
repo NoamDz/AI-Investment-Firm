@@ -1,10 +1,13 @@
-# Sample run - 2023-11-08
+# Sample run — 2023-11-08
 
-## What this day demonstrates
+## What this day shows
 
-- **Regime:** pre_news
-- **Setup:** Opens flat; pre_news regime - no immediate trade.
-- **What to look for:** Watch the decision table for action variety.
+**Market context.** Pre-CPI quiet tape, VIX under 15, macro calendar empty until the next FOMC minutes. The firm should *not* trade aggressively — this is the negative-control regime.
+
+**What the firm did.** Two HOLD decisions, both with no specific target ticker. The first cites a quiet tape and the intent to maintain core exposure; the second cites the empty macro calendar. No order leaves the firm; this is what discipline looks like on a non-event day.
+
+- **Regime tag:** `pre_news`
+- **Pointer:** Watch the decision table for action variety.
 
 ## Decisions
 
@@ -12,6 +15,8 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2023-11-08T14:15:00+00:00 | HOLD |  |  | 0.72 | 2 |  | Quiet tape; maintain core exposure |
 | 2023-11-08T16:30:00+00:00 | HOLD |  |  | 0.68 | 2 |  | Macro calendar empty until 2023-11-21 |
+
+> **Reading the table.** `BUY` and `SELL` rows carry a ticker and a share count. `HOLD` is a deliberate "do nothing this tick" and does not target a specific stock, so its ticker and shares columns are blank by design — the same is true of portfolio-level `ESCALATE` rows (e.g., a hedge proposal that exceeded the per-trade limit). This is the decision schema, not missing data.
 
 ## Walking one trade
 

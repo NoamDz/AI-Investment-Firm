@@ -1,10 +1,13 @@
-# Sample run - 2024-08-07
+# Sample run — 2024-08-07
 
-## What this day demonstrates
+## What this day shows
 
-- **Regime:** vol_spike
-- **Setup:** Opens flat; vol_spike regime - no immediate trade.
-- **What to look for:** ESCALATE row triggered by `risk_limit_breached` - see decision `dec-escalate-1`.
+**Market context.** Two days after the Aug 5 sell-off. The tape is still jumpy; the risk gate is the agent under the most pressure today.
+
+**What the firm did.** Early afternoon, research builds a de-risking thesis on **NVDA** — momentum break confirmed — and the firm sells 40 shares with five citations. Later in the day, research proposes a portfolio-level SPY hedge, but the size exceeds the per-trade limit, so the risk gate escalates the request to the human approver instead of refusing outright.
+
+- **Regime tag:** `vol_spike`
+- **Pointer:** ESCALATE row triggered by `risk_limit_breached` - see decision `dec-escalate-1`.
 
 ## Decisions
 
@@ -12,6 +15,8 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2024-08-07T13:45:00+00:00 | SELL | NVDA | 40 | 0.78 | 5 |  | De-risking semis into sell-off; momentum break confirmed |
 | 2024-08-07T15:20:00+00:00 | ESCALATE |  |  | 0.55 | 4 | risk_limit_breached | Risk gate flagged size; routing to HITL |
+
+> **Reading the table.** `BUY` and `SELL` rows carry a ticker and a share count. `HOLD` is a deliberate "do nothing this tick" and does not target a specific stock, so its ticker and shares columns are blank by design — the same is true of portfolio-level `ESCALATE` rows (e.g., a hedge proposal that exceeded the per-trade limit). This is the decision schema, not missing data.
 
 ## Walking one trade
 

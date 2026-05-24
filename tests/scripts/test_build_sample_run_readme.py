@@ -78,8 +78,8 @@ def test_runs_for_2024_03_13(tmp_path: Path, main) -> None:
     assert out.exists()
     text = out.read_text(encoding="utf-8")
     # Sanity-check key sections.
-    assert text.startswith("# Sample run - 2024-03-13\n")
-    assert "## What this day demonstrates" in text
+    assert text.startswith("# Sample run — 2024-03-13\n")
+    assert "## What this day shows" in text
     assert "earnings_heavy" in text
     assert "## Decisions" in text
     assert "| ts | action | ticker | shares | conf |" in text
@@ -155,7 +155,7 @@ def test_regime_unknown_for_new_date(tmp_path: Path, main) -> None:
     assert rc == 0
 
     text = (tmp_path / "2099-01-01" / "README.md").read_text(encoding="utf-8")
-    assert "**Regime:** unknown" in text
+    assert "**Regime tag:** `unknown`" in text
 
 
 def test_pipe_in_rationale_escaped(tmp_path: Path, main) -> None:

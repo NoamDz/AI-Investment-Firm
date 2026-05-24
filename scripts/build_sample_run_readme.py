@@ -28,6 +28,54 @@ _REGIME_BY_DATE: dict[str, str] = {
     "2023-11-08": "pre_news",  # pre-CPI day
 }
 
+# Per-date plain-English narrative — added so a reviewer who has never seen
+# this project can understand what the day shows without reading the rest of
+# the docs. Add a new row when committing a new sample-run date.
+_NARRATIVE_BY_DATE: dict[str, dict[str, str]] = {
+    "2024-03-13": {
+        "market_context": (
+            "Earnings-heavy week — NVDA, ORCL, and ADBE all report on the "
+            "preceding days, so research has fresh filings to ground claims in."
+        ),
+        "what_happened": (
+            "Mid-morning, research builds a thesis on **AAPL**, the portfolio "
+            "managers vote BUY with high confidence (0.85, backed by four "
+            "verbatim quotes from real 10-K passages), the risk gate clears "
+            "it (well under the 10%-per-name limit), and the firm buys 100 "
+            "shares. Late afternoon, research re-runs and finds no fresh "
+            "edge — the firm correctly holds rather than churning."
+        ),
+    },
+    "2024-08-07": {
+        "market_context": (
+            "Two days after the Aug 5 sell-off. The tape is still jumpy; "
+            "the risk gate is the agent under the most pressure today."
+        ),
+        "what_happened": (
+            "Early afternoon, research builds a de-risking thesis on "
+            "**NVDA** — momentum break confirmed — and the firm sells 40 "
+            "shares with five citations. Later in the day, research "
+            "proposes a portfolio-level SPY hedge, but the size exceeds "
+            "the per-trade limit, so the risk gate escalates the request "
+            "to the human approver instead of refusing outright."
+        ),
+    },
+    "2023-11-08": {
+        "market_context": (
+            "Pre-CPI quiet tape, VIX under 15, macro calendar empty until "
+            "the next FOMC minutes. The firm should *not* trade aggressively "
+            "— this is the negative-control regime."
+        ),
+        "what_happened": (
+            "Two HOLD decisions, both with no specific target ticker. The "
+            "first cites a quiet tape and the intent to maintain core "
+            "exposure; the second cites the empty macro calendar. No order "
+            "leaves the firm; this is what discipline looks like on a "
+            "non-event day."
+        ),
+    },
+}
+
 _RATIONALE_MAX = 80
 
 
@@ -276,14 +324,21 @@ def _render_readme(date: str, sample_runs_root: Path) -> str:
     walk_decision_id = _pick_walk_decision(decisions, citation_totals)
     table_rows = _decision_table_rows(decisions, citation_totals)
 
+    narrative = _NARRATIVE_BY_DATE.get(date, {})
+
     lines: list[str] = []
-    lines.append(f"# Sample run - {date}")
+    lines.append(f"# Sample run — {date}")
     lines.append("")
-    lines.append("## What this day demonstrates")
+    lines.append("## What this day shows")
     lines.append("")
-    lines.append(f"- **Regime:** {regime}")
-    lines.append(f"- **Setup:** {setup}")
-    lines.append(f"- **What to look for:** {look_for}")
+    if narrative.get("market_context"):
+        lines.append(f"**Market context.** {narrative['market_context']}")
+        lines.append("")
+    if narrative.get("what_happened"):
+        lines.append(f"**What the firm did.** {narrative['what_happened']}")
+        lines.append("")
+    lines.append(f"- **Regime tag:** `{regime}`")
+    lines.append(f"- **Pointer:** {look_for}")
     lines.append("")
     lines.append("## Decisions")
     lines.append("")
@@ -295,6 +350,15 @@ def _render_readme(date: str, sample_runs_root: Path) -> str:
     )
     if table_rows:
         lines.extend(table_rows)
+    lines.append("")
+    lines.append(
+        "> **Reading the table.** `BUY` and `SELL` rows carry a ticker and a "
+        "share count. `HOLD` is a deliberate \"do nothing this tick\" and "
+        "does not target a specific stock, so its ticker and shares columns "
+        "are blank by design — the same is true of portfolio-level "
+        "`ESCALATE` rows (e.g., a hedge proposal that exceeded the per-trade "
+        "limit). This is the decision schema, not missing data."
+    )
     lines.append("")
     lines.extend(_walk_trade_block(walk_decision_id, date, spans, raw_trace_lines))
     lines.append("")
