@@ -93,6 +93,13 @@ def _read_cash(conn: sqlite3.Connection) -> Decimal | None:
 
 
 def _read_positions(conn: sqlite3.Connection) -> pd.DataFrame:
+    """Read positions and mark them to the current deterministic quote.
+
+    Re-uses ``_deterministic_price`` from the FakeBroker so the dashboard
+    agrees with what the firm actually quotes — no drift between the broker's
+    fill price and the dashboard's mark. ``gross_value`` is current mark, not
+    cost basis; ``unrealized_pnl`` = (mark − avg_cost) × shares.
+    """
     if not _table_exists(conn, "positions"):
         return pd.DataFrame()
     rows = conn.execute(
@@ -100,10 +107,16 @@ def _read_positions(conn: sqlite3.Connection) -> pd.DataFrame:
     ).fetchall()
     if not rows:
         return pd.DataFrame()
+    # Lazy import — keeps dashboard importable without the broker package on
+    # the path during static checks.
+    from firm.broker.fake_broker import _deterministic_price
+
     df = pd.DataFrame([dict(r) for r in rows])
     df["shares"] = df["shares"].astype(float)
     df["avg_cost"] = df["avg_cost"].astype(float)
-    df["gross_value"] = df["shares"] * df["avg_cost"]
+    df["mark"] = df["ticker"].map(lambda t: float(_deterministic_price(t)))
+    df["gross_value"] = df["shares"].abs() * df["mark"]
+    df["unrealized_pnl"] = (df["mark"] - df["avg_cost"]) * df["shares"]
     return df
 
 
@@ -145,30 +158,6 @@ def _read_hitl(conn: sqlite3.Connection) -> pd.DataFrame:
         "FROM hitl_queue ORDER BY queued_at DESC LIMIT 20"
     ).fetchall()
     return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
-
-
-def _read_cost_today(conn: sqlite3.Connection) -> dict[str, Any]:
-    if not _table_exists(conn, "cost_ledger"):
-        return {}
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-    total = conn.execute(
-        "SELECT COALESCE(SUM(cost_usd), 0.0) FROM cost_ledger WHERE date(created_at)=?",
-        (today,),
-    ).fetchone()[0]
-    cached = conn.execute(
-        "SELECT COUNT(*) FROM cost_ledger WHERE date(created_at)=? AND cached_tokens IS NOT NULL",
-        (today,),
-    ).fetchone()[0]
-    live = conn.execute(
-        "SELECT COUNT(*) FROM cost_ledger WHERE date(created_at)=? AND input_tokens IS NOT NULL",
-        (today,),
-    ).fetchone()[0]
-    return {
-        "total_usd": float(total),
-        "cached_calls": cached,
-        "live_calls": live,
-        "cache_pct": (cached / (cached + live) * 100.0) if (cached + live) else 0.0,
-    }
 
 
 def _read_recon(conn: sqlite3.Connection) -> dict[str, Any] | None:
@@ -322,18 +311,36 @@ def _render_live_desk_tab() -> None:
 
     cash = _read_cash(conn)
     positions = _read_positions(conn)
-    cost = _read_cost_today(conn)
     recon = _read_recon(conn)
 
+    # Top-row tiles: portfolio P&L instead of LLM ops debug metrics. Operators
+    # care about "how is the firm doing", not cache hit %. LLM cost remains
+    # available in the per-date daily_report.html bundle for cost audits.
+    cash_f = float(cash) if cash is not None else 0.0
+    gross = float(positions["gross_value"].sum()) if not positions.empty else 0.0
+    unrealized = (
+        float(positions["unrealized_pnl"].sum()) if not positions.empty else 0.0
+    )
+    cost_basis = (
+        float((positions["avg_cost"] * positions["shares"].abs()).sum())
+        if not positions.empty
+        else 0.0
+    )
+    total_equity = cash_f + gross
+    unrealized_pct = (unrealized / cost_basis * 100.0) if cost_basis else 0.0
+
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Cash", f"${cash:,.0f}" if cash is not None else "—")
-    gross = positions["gross_value"].sum() if not positions.empty else 0.0
-    col2.metric("Gross exposure", f"${gross:,.0f}", f"{len(positions)} positions")
-    col3.metric("LLM spend (today)", f"${cost.get('total_usd', 0):.3f}")
+    col1.metric("Total equity", f"${total_equity:,.0f}")
+    col2.metric("Cash", f"${cash_f:,.0f}" if cash is not None else "—")
+    col3.metric(
+        "Positions value",
+        f"${gross:,.0f}",
+        f"{len(positions)} position{'s' if len(positions) != 1 else ''}",
+    )
     col4.metric(
-        "Cache hit %",
-        f"{cost.get('cache_pct', 0):.0f}%",
-        f"{cost.get('cached_calls', 0)}c / {cost.get('live_calls', 0)}l",
+        "Unrealized P&L",
+        f"${unrealized:+,.0f}",
+        f"{unrealized_pct:+.1f}% of cost basis" if cost_basis else "—",
     )
 
     st.divider()
@@ -347,7 +354,15 @@ def _render_live_desk_tab() -> None:
         else:
             st.dataframe(
                 positions[
-                    ["ticker", "shares", "avg_cost", "gross_value", "updated_at"]
+                    [
+                        "ticker",
+                        "shares",
+                        "avg_cost",
+                        "mark",
+                        "gross_value",
+                        "unrealized_pnl",
+                        "updated_at",
+                    ]
                 ],
                 use_container_width=True,
                 hide_index=True,
