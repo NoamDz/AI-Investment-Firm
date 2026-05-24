@@ -7,7 +7,9 @@ import json
 import os
 import shutil
 import sys
-from collections.abc import Iterator
+import time as _time_module
+import warnings
+from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from datetime import datetime, time, timezone
 from decimal import Decimal
@@ -54,6 +56,12 @@ from firm.reports.daily import render_daily_report
 from firm.reports.html import render_daily_html
 from firm.reports.reconcile_block import render_reconcile_block
 from firm.reports.xlsx import write_positions_xlsx
+
+# Consecutive-identical-failure circuit breaker for ``firm run --loop``: a
+# heartbeat that fails the same way this many times in a row is almost
+# certainly a config/infra problem (qdrant DNS, missing API key, schema drift)
+# rather than a transient hiccup, so re-raise instead of swallowing forever.
+_LOOP_FAILURE_THRESHOLD = 3
 
 try:
     from langchain_core.runnables import RunnableConfig
@@ -205,6 +213,79 @@ def _fit_bm25_sparse(rag_config: Any, sparse: Any) -> None:
         sparse.fit(["placeholder"])
 
 
+def _warn_if_missing_ticker_coverage(
+    tickers: list[str],
+    *,
+    collection: str,
+    corpus_aliases: dict[str, str] | None = None,
+    echo: Callable[[str], None] = click.echo,
+) -> tuple[list[str], list[str]]:
+    """Print a single boot-time line summarising ticker → corpus coverage.
+
+    Hot trap when editing ``config/universe.yaml``: the FinanceBench corpus
+    stores company names as the ``ticker`` payload field (e.g. "AMD",
+    "Microsoft", "Adobe"), so symbols that don't match a company name verbatim
+    have no corpus coverage and every heartbeat REFUSEs with
+    ``insufficient_evidence``. This check surfaces the mismatch loudly at
+    boot rather than letting it manifest as a silent REFUSE storm.
+
+    ``corpus_aliases`` maps a stock symbol to the corpus name to look up
+    (e.g. ``{"MSFT": "Microsoft"}``); tickers absent from the map are looked
+    up by symbol.
+
+    Returns ``(covered, missing)`` so the caller can feed ``covered`` into the
+    research-agent ticker rotation. On connection / collection failure both
+    lists are empty (the firm has already started; this is a hint, not a gate).
+    """
+    aliases = corpus_aliases or {}
+    covered: list[str] = []
+    missing: list[str] = []
+    try:
+        from qdrant_client import models as _qmodels
+
+        client = _make_qdrant_client()
+        for ticker in tickers:
+            lookup = aliases.get(ticker, ticker)
+            points, _next = client.scroll(
+                collection_name=collection,
+                scroll_filter=_qmodels.Filter(
+                    must=[
+                        _qmodels.FieldCondition(
+                            key="ticker",
+                            match=_qmodels.MatchValue(value=lookup),
+                        )
+                    ]
+                ),
+                limit=1,
+                with_payload=False,
+                with_vectors=False,
+            )
+            if points:
+                covered.append(ticker)
+            else:
+                missing.append(ticker)
+    except Exception as exc:  # noqa: BLE001 — UX hint only.
+        echo(
+            f"[firm run] Corpus coverage check skipped ({type(exc).__name__}): {exc}"
+        )
+        return ([], [])
+
+    echo(
+        f"[firm run] Corpus coverage: {len(covered)}/{len(tickers)} universe "
+        f"tickers have chunks in '{collection}' "
+        f"(covered: {', '.join(covered) if covered else '—'})."
+    )
+    if missing:
+        echo(
+            f"[firm run] Warning: {len(missing)} ticker(s) without corpus "
+            f"coverage — heartbeats targeting these will REFUSE with "
+            f"insufficient_evidence: {', '.join(missing)}. Add a "
+            "corpus_aliases entry in config/universe.yaml (symbol -> "
+            "FinanceBench company name) or extend the corpus."
+        )
+    return (covered, missing)
+
+
 def _build_llm_stack(
     db: Path, clock: Clock, rag_config: Any, llm_config: Any
 ) -> tuple[Any, Any, Any, CostRouter]:
@@ -342,6 +423,12 @@ def run(once: bool, interval_seconds: int) -> None:
     and the loop continues. SIGINT/SIGTERM stops cleanly after the current
     heartbeat (a second signal exits immediately).
     """
+    warnings.filterwarnings("ignore", category=UserWarning, module="requests")
+    warnings.filterwarnings("ignore", message=".*get_extended_attention_mask.*")
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+
+    click.echo("[firm run] booting: db init → broker reconcile → LLM stack (Qdrant + embedder + Anthropic)...")
     db = _db_path()
     init_db(db)
     clock = _resolve_clock()
@@ -372,6 +459,22 @@ def run(once: bool, interval_seconds: int) -> None:
         db, clock, rag_config, llm_config
     )
 
+    # Boot-time corpus-coverage hint: warn (don't block) when any configured
+    # ticker has zero chunks in Qdrant, so the operator sees the mismatch up
+    # front instead of after watching N heartbeats all REFUSE. The covered
+    # list is also reused below as the research-agent rotation set, so the
+    # firm researches a different stock per heartbeat instead of pinning to
+    # universe.tickers[0] (which made every heartbeat look identical).
+    covered_tickers, _missing_tickers = _warn_if_missing_ticker_coverage(
+        universe.tickers,
+        collection=rag_config.qdrant.collection,
+        corpus_aliases=universe.corpus_aliases,
+    )
+    # Fallback: if Qdrant probe failed or every ticker missed coverage, fall
+    # back to the full universe so the agent has *something* to research —
+    # the per-heartbeat REFUSE is still the right behaviour at that point.
+    researchable_tickers: list[str] = covered_tickers or list(universe.tickers)
+
     # nonce_secret is required for the grounded path; sourced from env.
     raw_secret = os.environ.get("FIRM_HMAC_SECRET")
     if not raw_secret:
@@ -395,6 +498,7 @@ def run(once: bool, interval_seconds: int) -> None:
         nonce_secret=nonce_secret,
         router=router,
         db_path=db,
+        researchable_tickers=researchable_tickers,
     )
 
     # PM voter: cheap to construct (no external deps), and shares the
@@ -490,11 +594,33 @@ def run(once: bool, interval_seconds: int) -> None:
         existing = graph.get_state(config)
         invoke_input: dict[str, Any] | None = None if existing.next else {}
 
+        # Mirror the research-agent's rotation so the banner names the ticker
+        # the agent will actually research. The agent uses a closure counter
+        # starting at 0 and incrementing per heartbeat; seq starts at 1, so
+        # (seq - 1) % len(...) gives the matching index.
+        target_ticker = researchable_tickers[
+            (seq - 1) % len(researchable_tickers)
+        ]
+        click.echo(
+            f"[firm run] heartbeat #{seq} starting — researching {target_ticker} "
+            f"(research → 3 PM voters → risk → execute → report)..."
+        )
+        t0 = _time_module.monotonic()
+
         # T03: one outer ``agent.heartbeat`` span so every child node span
         # shares a single trace_id (otherwise each node becomes its own root).
         with agent_span("heartbeat"):
             final = graph.invoke(invoke_input, config=config)
-        click.echo(f"Heartbeat #{seq} complete. Report: {final.get('report_path')}")
+
+        elapsed = _time_module.monotonic() - t0
+        decision = final.get("risk_decision") or final.get("pm_decision")
+        action = getattr(decision, "action", "?")
+        decision_id = getattr(decision, "id", "?")
+        click.echo(
+            f"[firm run] heartbeat #{seq} done in {elapsed:.1f}s — "
+            f"action={action} decision_id={decision_id} "
+            f"report={final.get('report_path')}"
+        )
 
     if once:
         _do_heartbeat(1)
@@ -503,10 +629,7 @@ def run(once: bool, interval_seconds: int) -> None:
     # ---- Loop mode -------------------------------------------------------
     # Continuous operation per home-assignment §2.2. SIGINT/SIGTERM stops
     # cleanly after the current heartbeat; second signal exits immediately.
-    # Per-heartbeat exceptions are logged and the loop continues so a single
-    # transient failure (e.g. broker hiccup) doesn't kill a multi-day run.
     import signal
-    import time as _time
 
     stop = {"requested": False}
 
@@ -522,27 +645,77 @@ def run(once: bool, interval_seconds: int) -> None:
         signal.signal(signal.SIGTERM, _on_signal)
 
     click.echo(
-        f"[firm run] loop mode: heartbeat every {interval_seconds}s. Ctrl-C to stop."
+        f"[firm run] loop mode: heartbeat every {interval_seconds}s. Ctrl-C to stop. "
+        f"Dashboard: http://localhost:8501"
     )
+    click.echo(
+        "[firm run] first heartbeat may take ~30-60s (model warmup); steady-state ~10-15s."
+    )
+    _run_heartbeat_loop(
+        _do_heartbeat,
+        interval_seconds=interval_seconds,
+        should_stop=lambda: stop["requested"],
+    )
+
+
+def _run_heartbeat_loop(
+    do_heartbeat: Callable[[int], None],
+    *,
+    interval_seconds: int,
+    should_stop: Callable[[], bool],
+    sleep: Callable[[float], None] = _time_module.sleep,
+    echo: Callable[..., None] = click.echo,
+    failure_threshold: int = _LOOP_FAILURE_THRESHOLD,
+) -> int:
+    """Drive heartbeats until ``should_stop()`` returns True or breaker trips.
+
+    Per-heartbeat exceptions are logged and the loop continues so a single
+    transient failure (broker hiccup, DNS blip) doesn't kill a multi-day run.
+    But ``failure_threshold`` consecutive *identical* failures (same exception
+    class + same message) re-raise — that signature pattern means the issue is
+    structural, not transient, and silent retries just delay the diagnosis.
+
+    Returns the number of heartbeats attempted.
+    """
     seq = 0
-    while not stop["requested"]:
+    last_signature: tuple[str, str] | None = None
+    consecutive_failures = 0
+    while not should_stop():
         seq += 1
         try:
-            _do_heartbeat(seq)
+            do_heartbeat(seq)
+            last_signature = None
+            consecutive_failures = 0
         except Exception as exc:  # noqa: BLE001
-            click.echo(
-                f"[firm run] heartbeat #{seq} failed: {type(exc).__name__}: {exc}",
+            signature = (type(exc).__name__, str(exc))
+            if signature == last_signature:
+                consecutive_failures += 1
+            else:
+                last_signature = signature
+                consecutive_failures = 1
+            echo(
+                f"[firm run] heartbeat #{seq} failed "
+                f"({consecutive_failures}/{failure_threshold}): "
+                f"{signature[0]}: {signature[1]}",
                 err=True,
             )
-        if stop["requested"]:
+            if consecutive_failures >= failure_threshold:
+                echo(
+                    f"[firm run] {failure_threshold} consecutive identical "
+                    f"failures — aborting loop.",
+                    err=True,
+                )
+                raise
+        if should_stop():
             break
-        # Sleep in 1s ticks so Ctrl-C is responsive across long intervals.
+        # Sleep in 1s ticks so a stop signal is responsive across long intervals.
         slept = 0
-        while slept < interval_seconds and not stop["requested"]:
-            _time.sleep(1)
+        while slept < interval_seconds and not should_stop():
+            sleep(1)
             slept += 1
 
-    click.echo(f"[firm run] stopped after {seq} heartbeats.")
+    echo(f"[firm run] stopped after {seq} heartbeats.")
+    return seq
 
 
 def _is_test_environment() -> bool:
@@ -661,13 +834,19 @@ def report(date_str: str) -> None:
 
 
 def _make_qdrant_client() -> "Any":
-    """QdrantClient backed by QDRANT_LOCAL_PATH (test override) or QDRANT_URL."""
+    """QdrantClient backed by QDRANT_LOCAL_PATH (test override) or QDRANT_URL.
+
+    ``QDRANT_URL`` defaults to ``http://localhost:6333`` — the same port the
+    bundled ``docker-compose.yml`` publishes for the qdrant service. Lets a
+    host-side ``python -m firm.cli ingest`` work out of the box after
+    ``docker compose up -d qdrant`` without an explicit env export.
+    """
     from qdrant_client import QdrantClient  # lazy import
 
     local_path = os.environ.get("QDRANT_LOCAL_PATH")
     if local_path:
         return QdrantClient(path=local_path)
-    return QdrantClient(url=os.environ["QDRANT_URL"])
+    return QdrantClient(url=os.environ.get("QDRANT_URL", "http://localhost:6333"))
 
 
 def _make_fixture_loader(fixture_path: str) -> Any:
@@ -707,6 +886,16 @@ def _make_fixture_loader(fixture_path: str) -> Any:
 )
 def ingest(config: str, max_docs: int | None, source_name: str) -> None:
     """Ingest one or more corpora into Qdrant. Idempotent — already-indexed docs are skipped."""
+    warnings.filterwarnings("ignore", category=UserWarning, module="requests")
+    warnings.filterwarnings("ignore", message=".*get_extended_attention_mask.*")
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+
+    click.echo(
+        "Ingesting corpus into Qdrant "
+        "(~2 min typical, ~5 min on first run while the embedder model downloads)."
+    )
+
     from firm.llm.anthropic_client import CachedAnthropicClient
     from firm.llm.cache import LlmCache
     from firm.rag.chunk import chunk_document
@@ -799,6 +988,7 @@ def ingest(config: str, max_docs: int | None, source_name: str) -> None:
     # -----------------------------------------------------------------------
     # Embedders.
     # -----------------------------------------------------------------------
+    click.echo("Stage 1/3: loading embedder model (download cached after first run)...")
     embedder = NomicEmbedder()
     sparse = BM25Sparse()
 
@@ -807,7 +997,7 @@ def ingest(config: str, max_docs: int | None, source_name: str) -> None:
     # NB: news source is iterated twice (pre-pass + run_ingest). With tickers=[]
     # this is free; if T21+ wires real tickers, exclude news from the pre-pass
     # so its TokenBucket budget isn't double-burned.
-    click.echo("Building BM25 vocabulary (pre-pass)...")
+    click.echo("Stage 2/3: building BM25 vocabulary (pre-pass over all selected sources)...")
     all_texts: list[str] = _collect_chunk_texts(sources, rag_config, chunk_document, tables_to_prose)
     if all_texts:
         sparse.fit(all_texts)
@@ -826,6 +1016,10 @@ def ingest(config: str, max_docs: int | None, source_name: str) -> None:
     # -----------------------------------------------------------------------
     # Per-source ingest — one run_ingest call per source.
     # -----------------------------------------------------------------------
+    click.echo(
+        f"Stage 3/3: embedding + indexing {len(all_texts)} chunks across "
+        f"{len(sources)} source(s)..."
+    )
     total_docs = 0
     total_chunks = 0
     any_failed = False
@@ -855,6 +1049,22 @@ def ingest(config: str, max_docs: int | None, source_name: str) -> None:
     click.echo(
         f"total: {len(sources)} corpora, {total_docs} docs, {total_chunks} chunks"
     )
+
+    # ------------------------------------------------------------------
+    # Tool parquets (fundamentals + risk metrics).
+    #
+    # Tools at ``firm/tools/{fundamentals,risk_metrics}.py`` read from
+    # ``data/precomputed/*.parquet`` during live heartbeats. Without these
+    # files the citations extractor raises KeyError per tool call. Bake the
+    # write into ``ingest`` so reviewers get a single bootstrap command.
+    # ------------------------------------------------------------------
+    click.echo("Writing tool parquets (fundamentals + risk metrics)...")
+    from firm.ops.precompute_fundamentals import write_demo_parquet as _write_fundamentals
+    from firm.ops.precompute_risk_metrics import write_demo_parquet as _write_risk
+
+    _write_fundamentals()
+    _write_risk()
+
     if any_failed:
         sys.exit(1)
 
@@ -1228,7 +1438,28 @@ def _collect_chunk_texts(
     return all_texts
 
 
+def _load_dotenv_if_available() -> None:
+    """Auto-load ``.env`` from cwd so host-side CLI invocations pick up
+    ``ANTHROPIC_API_KEY`` / ``FIRM_LLM_MODE`` / ``FIRM_HMAC_SECRET`` without
+    the operator having to source the file manually (cmd.exe and bare
+    PowerShell do not). ``override=False`` so an explicit env export still
+    wins over .env.
+
+    Invoked only from ``main()``, not at module import, so importing
+    ``firm.cli`` from a test does not pollute ``os.environ`` with whatever
+    secrets live in the developer's .env. ``python-dotenv`` is in
+    ``pyproject.toml`` but the import is guarded so a minimal install still
+    runs.
+    """
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv(override=False)
+
+
 def main() -> None:
+    _load_dotenv_if_available()
     cli()
 
 

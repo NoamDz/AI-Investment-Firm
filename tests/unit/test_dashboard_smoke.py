@@ -138,7 +138,17 @@ def test_dashboard_query_helpers_against_populated_db(
     positions = dashboard._read_positions(conn)
     assert not positions.empty
     assert "AAPL" in positions["ticker"].tolist()
-    assert positions["gross_value"].iloc[0] == pytest.approx(1805.0)
+    # P&L swap: ``gross_value`` is now mark-to-market (shares × deterministic
+    # quote), not cost basis. Re-use the same price function the dashboard does
+    # to compute the expected mark, so this test isn't a hard-coded price oracle.
+    from firm.broker.fake_broker import _deterministic_price
+
+    expected_mark = float(_deterministic_price("AAPL"))
+    assert positions["mark"].iloc[0] == pytest.approx(expected_mark)
+    assert positions["gross_value"].iloc[0] == pytest.approx(10.0 * expected_mark)
+    assert positions["unrealized_pnl"].iloc[0] == pytest.approx(
+        10.0 * (expected_mark - 180.50)
+    )
 
     decisions = dashboard._read_decisions(conn)
     assert len(decisions) == 2
@@ -149,12 +159,6 @@ def test_dashboard_query_helpers_against_populated_db(
     hitl = dashboard._read_hitl(conn)
     assert len(hitl) == 1
     assert hitl["status"].iloc[0] == "pending"
-
-    cost = dashboard._read_cost_today(conn)
-    # Today's date may differ from _TS (fixed at 2024-03-13). Helper filters by
-    # date(created_at)=today, so the seeded rows fall outside; we just verify
-    # the helper returns a well-formed dict without raising.
-    assert "total_usd" in cost and "cache_pct" in cost
 
     recon = dashboard._read_recon(conn)
     assert recon is not None

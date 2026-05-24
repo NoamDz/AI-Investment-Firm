@@ -6,6 +6,7 @@ is heavy). We cover only the path-resolution helpers that decide which
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -21,10 +22,18 @@ import firm.dashboard as dashboard  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
+def _today_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
 def test_list_available_dates_prefers_live_over_samples(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Live ``data/reports/<date>`` shadows ``sample_runs/<date>``; sort DESC."""
+    """Live ``data/reports/<date>`` shadows ``sample_runs/<date>``; sort DESC.
+
+    Today's wall-clock date is also always included (seeded under REPORTS_ROOT)
+    so the dropdown's default matches the date the firm is writing to.
+    """
     reports_root = tmp_path / "reports"
     samples_root = tmp_path / "samples"
     (reports_root / "2024-03-13").mkdir(parents=True)
@@ -35,27 +44,41 @@ def test_list_available_dates_prefers_live_over_samples(
     monkeypatch.setattr(dashboard, "SAMPLE_RUNS_ROOT", samples_root)
 
     result = dashboard._list_available_dates()
+    today = _today_iso()
 
-    assert result == [
-        ("2024-03-13", reports_root),
-        ("2023-11-08", samples_root),
-    ]
+    # Today is always first (sorted DESC, and it's >= every committed date).
+    assert result[0] == (today, reports_root)
+    # Older dates follow, with live preferred over samples for the same date.
+    assert ("2024-03-13", reports_root) in result
+    assert ("2024-03-13", samples_root) not in result
+    assert ("2023-11-08", samples_root) in result
+    # No duplicate today entry if it also exists on disk.
+    assert sum(1 for d, _ in result if d == today) == 1
 
 
 def test_list_available_dates_ignores_non_date_dirs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Directories whose name is not YYYY-MM-DD are excluded."""
+    """Directories whose name is not YYYY-MM-DD are excluded.
+
+    Today is still always seeded even when REPORTS_ROOT doesn't exist on disk.
+    """
     samples_root = tmp_path / "samples"
     (samples_root / "2024-03-13").mkdir(parents=True)
     (samples_root / "notes").mkdir(parents=True)
     (samples_root / "2024-13-99").mkdir(parents=True)  # invalid date
 
-    monkeypatch.setattr(dashboard, "REPORTS_ROOT", tmp_path / "absent")
+    absent_reports = tmp_path / "absent"
+    monkeypatch.setattr(dashboard, "REPORTS_ROOT", absent_reports)
     monkeypatch.setattr(dashboard, "SAMPLE_RUNS_ROOT", samples_root)
 
     result = dashboard._list_available_dates()
-    assert result == [("2024-03-13", samples_root)]
+    today = _today_iso()
+
+    assert (today, absent_reports) in result
+    assert ("2024-03-13", samples_root) in result
+    assert ("notes", samples_root) not in result
+    assert all(d in {today, "2024-03-13"} for d, _ in result)
 
 
 # ---------------------------------------------------------------------------

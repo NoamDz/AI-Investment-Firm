@@ -15,14 +15,26 @@ services:
     environment:
       FIRM_BROKER: FAKE
       FIRM_HMAC_SECRET: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
-      FIRM_INITIAL_POSITIONS: '{"AMD":"10"}'
-      FIRM_REPLAY_AT: "2024-03-13T14:30:00+00:00"
+      # Object form: seed 10 AMD shares with avg_cost=600 so the Positions sheet
+      # shows a real mark-to-market P&L (current deterministic quote ≈ $737.50,
+      # so unrealized ≈ +$1,375). Shares-only form (e.g. '{"AMD":"10"}') seeds
+      # avg_cost=current_quote → unrealized P&L = 0, which hides the column.
+      FIRM_INITIAL_POSITIONS: '{"AMD":{"shares":"10","avg_cost":"600"}}'
+      # No FIRM_REPLAY_AT: fall back to WallClock so each heartbeat advances
+      # real time. Set FIRM_REPLAY_AT in your shell to pin a historical date.
       QDRANT_URL: "http://qdrant:6333"
       FIRM_LLM_MODE: "${FIRM_LLM_MODE:-live}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
       HF_HOME: /root/.cache/huggingface
+      # Align with dashboard.py default + tracer default so spans land in the
+      # bind-mounted /data dir and the dashboard's Trace tab can read them.
+      FIRM_TRACES_ROOT: /data/traces
     volumes:
       - ./data:/data
+      # Override the image-baked parquets at /app/data/precomputed/ with the
+      # host's, so `python -m firm.cli ingest` on host updates what the
+      # container's tool layer reads — no rebuild required.
+      - ./data/precomputed:/app/data/precomputed
       - ${USERPROFILE:-${HOME}}/.cache/huggingface:/root/.cache/huggingface
     depends_on:
       qdrant:

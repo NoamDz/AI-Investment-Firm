@@ -75,7 +75,7 @@ def test_loop_runs_multiple_heartbeats_and_exits(tmp_path: Path) -> None:
     # Cold start (BM25 + Nomic load + Qdrant init) regularly takes 60-120s on
     # a fresh machine; pad generously, then watch for completed heartbeats.
     deadline = time.monotonic() + 240
-    completed_pattern = re.compile(r"Heartbeat #(\d+) complete")
+    completed_pattern = re.compile(r"\[firm run\] heartbeat #(\d+) done")
     collected: list[str] = []
     seen_seqs: set[int] = set()
 

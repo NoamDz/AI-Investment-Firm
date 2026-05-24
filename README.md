@@ -25,16 +25,32 @@ A small AI-run trading desk: seven agents take turns each minute — research, t
 - Anthropic API key (`ANTHROPIC_API_KEY`)
 - *Optional:* CUDA GPU for faster corpus ingest
 
-### Three commands
+### Four commands (continuous mode)
 
 ```powershell
-copy .env.example .env                   # then set ANTHROPIC_API_KEY
-docker compose up -d qdrant              # vector store
-python -m firm.cli ingest                # one-time corpus embed (~2 min)
-docker compose up firm                   # one heartbeat → BUY/HOLD → daily report
+copy .env.example .env                                                  # then set ANTHROPIC_API_KEY
+docker compose up -d qdrant                                             # vector store
+python -m firm.cli ingest                                               # corpus embed + tool parquets (~2 min)
+docker compose run --rm --build firm python -m firm.cli run --loop --interval-seconds 60
 ```
 
-Full step-by-step (host venv, GPU notes, continuous loop + dashboard, human-approval exercise, live broker): [`docs/quickstart.md`](docs/quickstart.md).
+The fourth command rebuilds the firm image (so the CLI matches the checked-out source) and runs the firm in continuous mode — one heartbeat per minute (research → 3 PM voters → risk → execution → reporter) until `Ctrl-C`. First signal finishes the current heartbeat cleanly; a second exits immediately. Per-heartbeat exceptions are logged and the loop continues.
+
+### Single heartbeat instead
+
+If you just want to see one heartbeat → BUY/HOLD → daily report → exit:
+
+```powershell
+docker compose up --build firm
+```
+
+Watch either run live in a separate shell:
+
+```powershell
+streamlit run firm/dashboard.py        # http://localhost:8501 → Live Desk tab
+```
+
+Full step-by-step (host venv, GPU notes, human-approval exercise, live broker): [`docs/quickstart.md`](docs/quickstart.md).
 
 ## Architecture
 

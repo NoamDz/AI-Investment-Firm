@@ -104,20 +104,6 @@ def _truncate_rationale(text: str) -> str:
     return text.replace("|", r"\|")
 
 
-def _setup_sentence(decisions: list[dict[str, Any]], regime: str) -> str:
-    """Build the one-line 'Setup' description from the first decision."""
-    if not decisions:
-        return "No decisions recorded."
-    first = decisions[0].get("research_decision", {}) or {}
-    action = first.get("action", "")
-    payload = first.get("payload", {}) or {}
-    if action == "BUY":
-        ticker = payload.get("ticker", "")
-        shares = payload.get("shares", "")
-        return f"Opens with BUY {ticker} x {shares}; {regime} regime."
-    return f"Opens flat; {regime} regime - no immediate trade."
-
-
 def _what_to_look_for(decisions: list[dict[str, Any]]) -> str:
     """Pick the single most interesting decision to point the reader at."""
     if not decisions:
@@ -317,7 +303,6 @@ def _render_readme(date: str, sample_runs_root: Path) -> str:
         raw_trace_lines = []
 
     regime = _REGIME_BY_DATE.get(date, "unknown")
-    setup = _setup_sentence(decisions, regime)
     look_for = _what_to_look_for(decisions)
 
     citation_totals = _citation_counts_by_decision(spans)

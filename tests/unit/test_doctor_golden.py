@@ -13,8 +13,12 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
+
 from firm.core.clock import ReplayClock
 from firm.db.migrations import init_db
+from firm.ops import doctor as doctor_module
 from firm.ops.doctor import (
     CheckResult,
     format_results,
@@ -43,11 +47,6 @@ class _FakeQdrant:
 # ---------------------------------------------------------------------------
 # Fixture helpers
 # ---------------------------------------------------------------------------
-
-
-def _make_wal(db_path: Path, size_bytes: int) -> None:
-    wal = Path(str(db_path) + "-wal")
-    wal.write_bytes(b"\x00" * size_bytes)
 
 
 def _make_replica_file(replica_dir: Path, age_seconds: float) -> None:
@@ -132,25 +131,25 @@ def test_golden_mixed_statuses() -> None:
     )
 
 
-def test_golden_integration_via_run_doctor(tmp_path: Path) -> None:
+def test_golden_integration_via_run_doctor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """End-to-end: build a controlled fixture state and run_doctor returns
     deterministic results that format to the expected golden string.
 
-    Relies only on injected paths, sizes, and replica file mtimes (not wall-clock
-    for age comparisons) — the wal_size check is size-driven, cost_ledger is
-    query-driven, and qdrant is stubbed.
+    The cost_ledger and qdrant checks run for real (DB query + stub). The
+    WAL-size and last-checkpoint-age checks are monkey-patched to fixed
+    returns: a real fixture is fragile because writing a garbage -wal file
+    next to a WAL-mode DB makes SQLite invalidate / clean up the file on
+    some platforms (the previous fixture passed locally on Windows but
+    flaked on Linux CI when SQLite reclaimed the corrupt sidecar).
 
-    The checkpoint_age and replication checks depend on os.path.getmtime vs
-    time.time(), but we pick ages (WAL ≈ fresh, replica ≈ 10s) that land
-    firmly in the OK zone so a few-second test-execution jitter cannot flip
-    them to WARN/FAIL.
+    The replication check still runs for real via os.path.getmtime against
+    the on-disk replica file.
     """
     # ---- DB fixture ----
     db = tmp_path / "firm.db"
     init_db(db)
-
-    # 2.5 MB WAL → OK (< 12 MB threshold).
-    _make_wal(db, int(2.5 * 1024 * 1024))
 
     # ---- Replica fixture (10 seconds ago → OK, << 60s WARN) ----
     replica = tmp_path / "litestream" / "firm"
@@ -159,6 +158,18 @@ def test_golden_integration_via_run_doctor(tmp_path: Path) -> None:
     # ---- Cost ledger: 7 rows today ----
     clock = ReplayClock(datetime(2026, 5, 21, 14, 0, tzinfo=timezone.utc))
     _seed_cost_ledger(db, ["2026-05-21T14:00:00+00:00"] * 7)
+
+    # ---- Fixed returns for the filesystem-dependent WAL checks ----
+    monkeypatch.setattr(
+        doctor_module,
+        "check_wal_size",
+        lambda _p: CheckResult(name="wal_size", status="OK", detail="2.5 MB"),
+    )
+    monkeypatch.setattr(
+        doctor_module,
+        "check_last_checkpoint_age",
+        lambda _p: CheckResult(name="last_checkpoint_age", status="OK", detail="12s"),
+    )
 
     # ---- Qdrant stub: 1500 points ----
     qdrant = _FakeQdrant(count=1500)

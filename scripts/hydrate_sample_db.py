@@ -46,9 +46,9 @@ from firm.db.migrations import init_db  # noqa: E402
 # "0.0" when not derivable from the committed BUY rationale — the Positions
 # sheet still renders, just with $0 unrealized PnL.
 _POSITIONS_BY_DATE: dict[str, list[tuple[str, str, str]]] = {
-    "2024-03-13": [("AAPL", "100", "0.0")],
-    "2024-08-07": [("AAPL", "60", "0.0")],
-    "2023-11-08": [("AAPL", "100", "0.0"), ("MSFT", "20", "0.0")],
+    "2024-03-13": [("AAPL", "100", "201.20")],
+    "2024-08-07": [("AAPL", "60", "201.20")],
+    "2023-11-08": [("AAPL", "100", "201.20"), ("MSFT", "20", "191.60")],
 }
 
 # Starting cash for the hydrated broker view. Matches FakeBroker default so
@@ -296,7 +296,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     positions = _POSITIONS_BY_DATE.get(args.date, [])
     if positions:
-        env_json = json.dumps({t: s for t, s, _ in positions}, separators=(",", ":"))
+        env_json = json.dumps(
+            {t: {"shares": s, "avg_cost": c} for t, s, c in positions},
+            separators=(",", ":"),
+        )
         print(f"FIRM_INITIAL_POSITIONS={env_json}")
     return 0
 

@@ -174,7 +174,7 @@ def _span_to_dict(span: ReadableSpan) -> dict[str, Any]:
 _PROVIDER_LOCK = threading.Lock()
 _provider: Optional[TracerProvider] = None
 _exporter: Optional[JsonlFileExporter] = None
-_DEFAULT_TRACES_ROOT = Path("traces")
+_DEFAULT_TRACES_ROOT = Path("data/traces")
 _DEFAULT_RUN_ID = "00000000000000000000000000"
 
 
@@ -271,7 +271,7 @@ def init_tracer(
     in ``SimpleSpanProcessor`` for deterministic flushing.
     """
     effective_root = traces_root if traces_root is not None else Path(
-        os.environ.get("FIRM_TRACES_ROOT", "traces")
+        os.environ.get("FIRM_TRACES_ROOT", "data/traces")
     )
     effective_run_id = run_id if run_id is not None else _DEFAULT_RUN_ID
 
