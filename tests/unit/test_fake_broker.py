@@ -131,3 +131,23 @@ def test_initial_positions_invalid_decimal_raises_with_ticker_hint(monkeypatch):
     monkeypatch.setenv("FIRM_INITIAL_POSITIONS", '{"AAPL": "not-a-number"}')
     with pytest.raises(ValueError, match=r"FIRM_INITIAL_POSITIONS\['AAPL'\].*not a valid Decimal"):
         FakeBroker(initial_cash=Decimal("100000"))
+
+
+def test_initial_positions_object_form_sets_explicit_avg_cost(monkeypatch):
+    """Object-form value `{shares, avg_cost}` overrides the deterministic quote so
+    the Positions sheet can surface a non-zero mark-to-market P&L in samples."""
+    monkeypatch.setenv(
+        "FIRM_INITIAL_POSITIONS",
+        '{"AMD": {"shares": "10", "avg_cost": "600.0"}}',
+    )
+    b = FakeBroker(initial_cash=Decimal("100000"))
+    pos = [p for p in b.list_positions() if p.ticker == "AMD"][0]
+    assert pos.shares == Decimal("10")
+    assert pos.avg_cost == Decimal("600.0")
+
+
+def test_initial_positions_object_form_missing_key_raises(monkeypatch):
+    """Object form requires both `shares` and `avg_cost` — partial input fails fast."""
+    monkeypatch.setenv("FIRM_INITIAL_POSITIONS", '{"AMD": {"shares": "10"}}')
+    with pytest.raises(ValueError, match=r"FIRM_INITIAL_POSITIONS\['AMD'\].*requires.*avg_cost"):
+        FakeBroker(initial_cash=Decimal("100000"))

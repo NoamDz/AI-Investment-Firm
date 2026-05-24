@@ -15,7 +15,11 @@ services:
     environment:
       FIRM_BROKER: FAKE
       FIRM_HMAC_SECRET: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
-      FIRM_INITIAL_POSITIONS: '{"AMD":"10"}'
+      # Object form: seed 10 AMD shares with avg_cost=600 so the Positions sheet
+      # shows a real mark-to-market P&L (current deterministic quote ≈ $737.50,
+      # so unrealized ≈ +$1,375). Shares-only form (e.g. '{"AMD":"10"}') seeds
+      # avg_cost=current_quote → unrealized P&L = 0, which hides the column.
+      FIRM_INITIAL_POSITIONS: '{"AMD":{"shares":"10","avg_cost":"600"}}'
       FIRM_REPLAY_AT: "2024-03-13T14:30:00+00:00"
       QDRANT_URL: "http://qdrant:6333"
       FIRM_LLM_MODE: "${FIRM_LLM_MODE:-live}"

@@ -18,38 +18,64 @@ def _deterministic_price(ticker: str) -> Decimal:
 
 
 def _load_initial_positions() -> dict[str, Position]:
-    """Load initial positions from FIRM_INITIAL_POSITIONS env var (JSON dict of ticker→shares).
+    """Load initial positions from FIRM_INITIAL_POSITIONS env var.
+
+    Two value shapes accepted:
+
+    * **Shares-only (legacy)** — ``"AMD": "10"``. ``avg_cost`` defaults to the
+      deterministic quote price, so unrealized P&L starts at 0.
+    * **Object form** — ``"AMD": {"shares": "10", "avg_cost": "600"}``. Use
+      this when seeding sample bundles so the Positions sheet shows a non-zero
+      mark-to-market P&L; both keys are required if either is present.
 
     Used by integration tests to seed a non-zero position so the
     ``escalate_new_ticker`` risk check does not trigger on tickers the
-    test has already decided to hold.
+    test has already decided to hold, and by the sample-runs regeneration
+    workflow to surface realized cost-basis ≠ current-quote scenarios.
 
-    Example::
+    Examples::
 
         FIRM_INITIAL_POSITIONS='{"AAPL": "10"}'
+        FIRM_INITIAL_POSITIONS='{"AMD": {"shares": "10", "avg_cost": "600"}}'
     """
     raw = os.environ.get("FIRM_INITIAL_POSITIONS")
     if not raw:
         return {}
     try:
-        mapping: dict[str, str] = json.loads(raw)
+        mapping: dict[str, Any] = json.loads(raw)
     except json.JSONDecodeError as e:
         raise ValueError(
             f"FIRM_INITIAL_POSITIONS is not valid JSON: {e}"
         ) from e
     positions: dict[str, Position] = {}
-    for ticker, shares_str in mapping.items():
-        try:
-            shares = Decimal(str(shares_str))
-        except InvalidOperation as e:
-            raise ValueError(
-                f"FIRM_INITIAL_POSITIONS[{ticker!r}] is not a valid Decimal: "
-                f"{shares_str!r}"
-            ) from e
+    for ticker, value in mapping.items():
+        if isinstance(value, dict):
+            try:
+                shares = Decimal(str(value["shares"]))
+                avg_cost = Decimal(str(value["avg_cost"]))
+            except KeyError as e:
+                raise ValueError(
+                    f"FIRM_INITIAL_POSITIONS[{ticker!r}] object form requires "
+                    f"both 'shares' and 'avg_cost'; missing {e.args[0]!r}"
+                ) from e
+            except InvalidOperation as e:
+                raise ValueError(
+                    f"FIRM_INITIAL_POSITIONS[{ticker!r}] has a non-Decimal "
+                    f"shares/avg_cost value: {value!r}"
+                ) from e
+        else:
+            try:
+                shares = Decimal(str(value))
+            except InvalidOperation as e:
+                raise ValueError(
+                    f"FIRM_INITIAL_POSITIONS[{ticker!r}] is not a valid Decimal: "
+                    f"{value!r}"
+                ) from e
+            avg_cost = _deterministic_price(ticker)
         positions[ticker] = Position(
             ticker=ticker,
             shares=shares,
-            avg_cost=_deterministic_price(ticker),
+            avg_cost=avg_cost,
         )
     return positions
 
