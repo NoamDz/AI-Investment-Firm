@@ -6,4 +6,4 @@
   Cash diff:          $0.00
   Status:             ❌ MISMATCH [^audit-1]
 
-[^audit-1]: audit_log row 1 (event=reconcile.boot, ts=2024-03-13T16:00:00+00:00)
+[^audit-1]: audit_log row 1 (event=reconcile.boot)

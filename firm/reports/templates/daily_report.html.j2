@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AI Investment Firm — Daily Report — {{ date_str }}</title>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+       color: #222; margin: 0; padding: 0; background: #fff; }
+header.bar { background: #1f2933; color: #fff; padding: 14px 28px; }
+header.bar h1 { margin: 0; font-size: 20px; font-weight: 600; }
+main { padding: 20px 28px; max-width: 1100px; }
+section { margin-bottom: 28px; }
+section h2 { font-size: 16px; border-bottom: 1px solid #ddd; padding-bottom: 4px;
+             margin-top: 0; color: #1f2933; }
+p.summary { font-size: 14px; line-height: 1.5; margin: 8px 0; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #eee;
+         vertical-align: top; }
+th { background: #1f2933; color: #fff; font-weight: 600; }
+tr:nth-child(even) { background: #f7f7f9; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.action { font-weight: 600; }
+pre { background: #f4f4f6; border: 1px solid #e0e0e4; border-radius: 4px;
+      padding: 10px 14px; font-size: 12px; line-height: 1.4; overflow-x: auto;
+      font-family: "SF Mono", Menlo, Consolas, monospace; }
+footer { margin-top: 32px; padding: 14px 28px; border-top: 1px solid #ddd;
+         color: #555; font-size: 12px; }
+footer code { background: #f4f4f6; padding: 1px 4px; border-radius: 3px;
+              font-family: "SF Mono", Menlo, Consolas, monospace; }
+footer p { margin: 4px 0; }
+.empty { color: #777; font-style: italic; }
+</style>
+</head>
+<body>
+<header class="bar">
+  <h1>AI Investment Firm — Daily Report — {{ date_str }}</h1>
+</header>
+<main>
+
+<section>
+  <h2>Executive summary</h2>
+  <p class="summary">{{ summary_text }}</p>
+</section>
+
+<section>
+  <h2>Decisions</h2>
+  {% if decision_rows %}
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th><th>Action</th><th>Ticker</th><th>Shares</th>
+        <th>Confidence</th><th>Citations</th><th>Failure mode</th><th>Rationale</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for d in decision_rows %}
+      <tr>
+        <td>{{ d.ts }}</td>
+        <td class="action"><span style="color:{{ d.color }}">{{ d.action }}</span></td>
+        <td>{{ d.ticker }}</td>
+        <td class="num">{{ d.shares }}</td>
+        <td class="num">{{ d.confidence }}</td>
+        <td class="num">{{ d.citations }}</td>
+        <td>{{ d.failure_mode }}</td>
+        <td>{{ d.rationale }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">No decisions recorded for {{ date_str }}.</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Cost summary</h2>
+  {% if cost_groups %}
+  <table>
+    <thead>
+      <tr><th>Model</th><th>Calls</th><th>Avg $</th><th>Total $</th></tr>
+    </thead>
+    <tbody>
+    {% for g in cost_groups %}
+      <tr>
+        <td>{{ g.label }}</td>
+        <td class="num">{{ g.calls }}</td>
+        <td class="num">${{ g.avg }}</td>
+        <td class="num">${{ g.total }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+    <tfoot>
+      <tr><td colspan="3">Cached:</td><td class="num">{{ cached_pct }}%</td></tr>
+      <tr><td colspan="3"><b>Total:</b></td><td class="num"><b>${{ total_cost }}</b></td></tr>
+    </tfoot>
+  </table>
+  {% else %}
+  <p class="empty">(no LLM calls recorded)</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Reconciliation</h2>
+  <pre>{{ reconcile_block }}</pre>
+</section>
+
+</main>
+<footer>
+  <p>Trace file: <code>data/traces/{{ date_str }}/run-*.jsonl</code></p>
+  {% for cmd in trace_grep_cmds %}
+  <p><code>{{ cmd }}</code></p>
+  {% endfor %}
+  <p>Generated {{ date_str }} by firm.reports.html. View live: http://localhost:8501. To save as PDF: Ctrl-P → Save as PDF.</p>
+</footer>
+</body>
+</html>

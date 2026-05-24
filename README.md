@@ -61,6 +61,8 @@ pip install -e ".[dashboard]"
 streamlit run firm/dashboard.py                          # http://localhost:8501
 ```
 
+The dashboard opens on the *Today's Report* tab; switch to *Live Desk* for the streaming view, or *Trace* to walk a decision span-by-span.
+
 Full step-by-step (host venv, GPU notes, HITL exercise, Alpaca, native run): [`docs/quickstart.md`](docs/quickstart.md).
 
 ## What was built
@@ -69,11 +71,22 @@ This is the reviewer's map of the brief. Each item below maps to one line in the
 
 ### The portfolio is real-shaped
 
-Fills go through a paper broker that charges **5 bps slippage** and a **per-share commission**, so a buy at $100 settles at $100.05 plus fees (`firm/broker/fake_broker.py`). Quotes carry a market-clock timestamp; an order priced from a stale quote (older than 60 s) is refused. Real broker (Alpaca) is a one-flag swap via `FIRM_BROKER=ALPACA`.
+The firm only ever talks to its broker through one Python interface (`firm/broker/protocol.py` — `list_positions`, `get_cash`, `get_quote`, `submit`). Two implementations satisfy that interface:
+
+- **FakeBroker** (`firm/broker/fake_broker.py`) — used for the demo and every test. Quotes are deterministic per `SHA256(ticker, timestamp)`; fills carry **0.5% commission** and **5 bps slippage**; an order priced from a stale quote (>60 s old) is rejected; market-hours gating refuses orders outside the session.
+- **AlpacaBroker** (`firm/broker/alpaca_paper.py`) — Alpaca's paper-trading API, real prices, real (paper) fills.
+
+Switching is one env var: `FIRM_BROKER=ALPACA`. No agent code changes. The "real-shaped" part is the contract — money is `Decimal`, share counts are `Decimal` (no float drift), every `submit` carries an idempotency key (`SHA256(decision_id, nonce)`) so a network retry can't double-fill, and the `OrderResult` returned to the firm has the same fields whether it came from the fake or from Alpaca.
 
 ### State survives a crash
 
-Cash, positions, cost basis, every decision, the cost ledger, the human-approval queue, and the LangGraph snapshot all live in one file: `data/firm.db`. A crash mid-trade resumes mid-trade from the same source the broker reconciles against at boot. Litestream replicates the file to a backup target for restore. Operator detail: [`docs/runbook.md`](docs/runbook.md).
+Everything important is in one SQLite file: `data/firm.db`. That includes the business state (cash, positions, cost basis, every decision, the cost ledger, the human-approval queue) **and** the agent workflow state (the LangGraph checkpoint that records "for tick N, the workflow was paused at the risk gate after research finished").
+
+The checkpoint matters. If the process is killed mid-heartbeat — say research and PM have run, but the risk gate hasn't — restarting the firm reads the checkpoint and continues that same heartbeat from the risk node, not from scratch. The LLM calls already made are not re-issued.
+
+On boot, the firm asks the broker "what positions and cash do you actually have?" and compares to the local DB row. The broker is the canonical truth; if they disagree, the local row gets corrected and the discrepancy is written to the `reconciliations` table.
+
+[Litestream](https://litestream.io/) streams `firm.db` to a backup target (S3 in production, local volume in the demo) continuously. If the disk dies, you restore from a copy that is seconds-stale, not days-stale. Operator detail: [`docs/runbook.md`](docs/runbook.md).
 
 ### Runs continuously during market hours
 
@@ -92,7 +105,7 @@ Each agent does one job and hands off to the next:
 
    Each one votes BUY / HOLD / VETO independently. A majority is required to move the trade forward. One bad day from one model can't carry a trade to the floor.
 4. **risk** — runs the rule book in plain Python: max **10%** in one name, **30%** per sector, gross book ≤ **100%** of capital, daily loss ≤ **3%**. An LLM cannot argue past it.
-5. **HITL (human-in-the-loop)** — pauses the workflow and writes a signed entry to the approval queue. The approver sees it in the **dashboard** (or runs `firm hitl ack <id>` from the CLI) and clicks approve / reject. The pause is real — you can stop the process, walk away, come back tomorrow, and the trade is still waiting. Nobody answers in 30 minutes → the trade is auto-refused. Slack is supported as an optional notifier but not required.
+5. **HITL (human-in-the-loop)** — pauses the workflow and writes a signed entry to the approval queue. The approver sees it in the **dashboard** (or runs `firm hitl ack <id>` from the CLI) and clicks approve / reject. The pause is real — you can stop the process, walk away, come back tomorrow, and the trade is still waiting. Nobody answers in 30 minutes → the trade is auto-refused.
 6. **execution** — places the order with the broker. The same order can't fill twice — every fill carries a unique nonce, so a network retry is safe.
 7. **reporter** — writes the day's Markdown report and refreshes the dashboard.
 
@@ -108,33 +121,32 @@ The risk gate has three exits: *approve* (→ execution), *refuse* (heartbeat en
 
 ### Observability — replay any trade from the trace
 
-Every agent call, every LLM call, every tool call, and every retrieval emits one OpenTelemetry span, written one-per-line to `data/traces/<date>/run-<id>.jsonl`. Each span carries:
+Every agent call, every LLM call, every tool call, and every retrieval emits one OpenTelemetry span, written one line per span to `data/traces/<date>/run-<id>.jsonl`. To walk one trade end-to-end, grep the file by `decision_id`. Here is a real replay of `dec-buy-1` from `sample_runs/2024-03-13/trace.jsonl`:
 
-- `name` — which agent or tool ran (`agent.research`, `llm.anthropic`, `retrieve.qdrant`, …)
-- `decision_id` — the trade being decided
-- `parent_id` — which span called this one (research → vote → risk → fill chain)
-- `attributes.model`, `attributes.tokens_in`, `attributes.tokens_out`, `attributes.cost_usd`
-- `attributes.failure_mode` if the call failed (one of the 15 named failures)
-- `start_time_unix_nano`, `duration_ms`
-
-To replay one trade end-to-end with no tooling:
-
-```bash
-grep '"decision_id":"<id>"' data/traces/2024-03-13/run-*.jsonl | jq .name
+```text
+OPERATION                              DUR(ms)  MODEL              TOKENS      COST
+-------------------------------------------------------------------------------------
+agent.research                          1842.3  -                       -         -
+retrieval.hybrid                          38.7  -                       -         -
+retrieval.rerank                          22.4  bge-reranker-v2         -         -
+llm.call                                1672.5  claude-sonnet-4   3120+482   $0.0166
+agent.pm                                1289.6  -                       -         -
+llm.call                                1240.1  claude-sonnet-4   1860+312   $0.0103
+llm.call                                1198.4  claude-sonnet-4   1862+298   $0.0100
+llm.call                                1265.0  claude-sonnet-4   1861+305   $0.0101
+agent.risk                               412.8  -                       -         -
+llm.call                                 386.2  claude-haiku-4-    980+124   $0.0009
+agent.reporter                            28.7  -                       -         -
 ```
 
-That prints the whole heartbeat in order: monitor → research → sufficiency → 3 PM voters → risk → execution → reporter. The file *is* the audit log. The same tracer ships to a real OTLP backend in production by setting `OTEL_EXPORTER_OTLP_ENDPOINT`.
+That's the whole heartbeat: research retrieved chunks → re-ranked → called Sonnet → PM fan-out called Sonnet three times (one per voter) → risk called Haiku → reporter wrote the report. The file *is* the audit log; no separate tooling required. The dashboard's **Tab 3 ("Trace")** takes a `decision_id` text input, renders matching spans in a sortable table, and shows the copyable `grep '"decision_id":"<id>"' trace.jsonl | jq .` command — the same walk-one-trade workflow, one click away in the browser. The same tracer ships to any OTLP backend (Honeycomb, Jaeger) in production by setting `OTEL_EXPORTER_OTLP_ENDPOINT`.
 
-### Two report channels, one source of truth
+### Two report channels — dashboard and bundle
 
-Both read `data/firm.db`, so they cannot disagree.
+- **Channel A — Streamlit dashboard.** The live, in-browser delivery of the daily report itself. Opens on **Tab 1 ("Today's Report")** showing the rendered HTML report for the selected date. **Tab 2 ("Live Desk")** is the live observability view that refreshes every 5 s while the firm is running (cash, positions, recent decisions, the human-approval queue, today's spend, reconciliation). **Tab 3 ("Trace")** takes a `decision_id` and returns the matching spans. A date selectbox at the top of the page switches between live runs under `data/reports/*` and committed sample runs under `sample_runs/*`.
+- **Channel B — HTML report bundle.** A single self-contained `daily_report.html` (inline CSS, no JS, no external assets — opens cleanly off a USB stick) plus `positions.xlsx` (Positions / P&L / Decisions sheets), `decisions.jsonl` (audit log), and `trace.jsonl` (OpenTelemetry stream). Frame this as the durable handoff — the email body and attachment we *would* send if SMTP were wired. Print to PDF from the browser via Ctrl-P. A legacy plain-text `daily_report.md` is still generated for back-compat but no longer counted as a channel.
 
-- **Streamlit dashboard** — live positions, recent decisions, the human-approval queue, today's spend, reconciliation status. Auto-refreshes every 5 s.
-- **Daily report bundle** — written by the reporter at end-of-day: `daily_report.md` (decision counts, cost summary, reconciliation), `positions.xlsx` (operator spreadsheet), `decisions.jsonl` (audit log), `trace.jsonl` (OpenTelemetry stream).
-
-Why both: operators who pivot in Excel get the spreadsheet; reviewers who want a live view get the dashboard. Two mediums for two audiences, one database underneath.
-
-![Dashboard](docs/images/dashboard.png)
+Why these two: real-time vs. durable, different audiences (operators vs. forwardable stakeholders). Both run on `docker compose up` with no external infra — no SMTP, no Slack workspace, no S3 bucket. Both read the same source (`firm.db` plus the reporter's per-date directory), so they cannot disagree.
 
 ### Reproducible eval — return + process metrics
 
@@ -197,14 +209,16 @@ The three windows the eval replays are checked into `sample_runs/` as snapshots,
 | `sample_runs/2024-08-07/` | `r2_drawdown` (risk gate stressed) | Mid sell-off — expect more REFUSE / ESCALATE outcomes |
 | `sample_runs/2023-11-08/` | `r3_quiet` (negative control) | Low-vol day — the firm should *not* trade aggressively |
 
-Each directory contains:
+The top-level index is [`sample_runs/README.md`](sample_runs/README.md). Each per-date directory contains:
 
-- `daily_report.md` — what the reporter wrote at end-of-day (decision counts, cost summary, EOD reconciliation)
-- `decisions.jsonl` — full audit log, one decision per line
-- `trace.jsonl` — the OpenTelemetry stream described in the Observability section
-- `positions.xlsx` — the operator spreadsheet
+- `README.md` — narrated walkthrough for the date (regime, what to look for, decision table, one annotated trace excerpt). **Start here.**
+- `dashboard.png` — Tab 1 ("Today's Report") screenshot, generated by `scripts/capture_dashboard_png.py`. Committed when Playwright is available locally; otherwise a placeholder `dashboard.png.MISSING` documents how to regenerate (see `sample_runs/2024-03-13/dashboard.png`).
+- `daily_report.html` — open in browser; Ctrl-P → Save as PDF.
+- `daily_report.md` — legacy plain-text summary (still generated for back-compat).
+- `positions.xlsx` — Positions / P&L / Decisions sheets.
+- `decisions.jsonl`, `trace.jsonl` — raw artifacts; `grep` `trace.jsonl` by `decision_id` to walk one trade end-to-end.
 
-Open `daily_report.md` for the human-readable summary; `grep` `trace.jsonl` by `decision_id` to walk one trade end-to-end. The methodology behind which dates and why is in [`docs/eval.md`](docs/eval.md).
+Start with `README.md` for the narrated walkthrough; everything else is supporting raw data. `scripts/hydrate_sample_db.py` reconstructs the `firm.db` state from any committed sample run so a reviewer can re-render the bundle locally. The methodology behind which dates and why is in [`docs/eval.md`](docs/eval.md).
 
 ### Bonuses
 

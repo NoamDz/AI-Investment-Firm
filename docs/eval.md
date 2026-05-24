@@ -12,7 +12,7 @@ python -m firm.cli eval --regime r1_earnings --mode cached      # one regime
 What appears on disk:
 
 - `reports/eval/<regime_id>/summary.md` — per-regime numbers + the mandatory "Not Measured" block
-- `reports/eval/<regime_id>/<date>/daily_report.md` + `positions.xlsx` + `decisions.jsonl` + `trace.jsonl` — one bundle per replayed trading day
+- `reports/eval/<regime_id>/<date>/daily_report.md` + `daily_report.html` + `positions.xlsx` + `decisions.jsonl` + `trace.jsonl` — one bundle per replayed trading day
 
 One day from each regime is checked in under `sample_runs/` so a reviewer can read a real bundle without running anything.
 

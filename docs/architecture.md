@@ -48,7 +48,7 @@ flowchart TB
       INGEST([python -m firm.cli ingest<br/>GPU embed, one-time])
       LOOP([python -m firm.cli run --loop<br/>or `docker compose up firm`])
       DASH([streamlit run firm/dashboard.py])
-      MAKE([make report DATE=YYYY-MM-DD<br/>writes positions.xlsx])
+      MAKE([make report DATE=YYYY-MM-DD<br/>writes daily_report.html + positions.xlsx])
     end
 
     subgraph DOCKER [docker compose]
@@ -58,7 +58,7 @@ flowchart TB
 
     subgraph STATE [Shared state — host bind-mounted]
       DB[(firm.db<br/>SQLite — decisions, outbox,<br/>positions, hitl_queue,<br/>cost_ledger, audit_log)]
-      REP[(data/reports/<DATE>/<br/>daily_report.md<br/>positions.xlsx)]
+      REP[(data/reports/<DATE>/<br/>daily_report.md<br/>daily_report.html<br/>positions.xlsx)]
     end
 
     subgraph EXT [External APIs]

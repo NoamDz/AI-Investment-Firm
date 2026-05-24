@@ -84,14 +84,12 @@ def render_reconcile_block(*, db_path: Path, broker: Broker, clock: Clock) -> st
     # Retrieve the audit_log row id just written — append-only table so the
     # highest id is the one we just wrote.
     audit_id: int | None = None
-    audit_ts: str | None = None
     with closing(get_conn(db_path)) as conn:
         row = conn.execute(
-            "SELECT id, ts FROM audit_log WHERE event='reconcile.boot' ORDER BY id DESC LIMIT 1"
+            "SELECT id FROM audit_log WHERE event='reconcile.boot' ORDER BY id DESC LIMIT 1"
         ).fetchone()
         if row is not None:
             audit_id = int(row["id"])
-            audit_ts = str(row["ts"])
 
     # Build body lines per spec §5.7 (two-space indent, aligned columns).
     pos_diff_raw: dict[str, Any] = result.diff.get("positions", {})
@@ -120,8 +118,8 @@ def render_reconcile_block(*, db_path: Path, broker: Broker, clock: Clock) -> st
     body = "\n".join(lines)
 
     # Append footnote definition on mismatch so the reference is resolvable.
-    if result.status == "mismatch" and audit_id is not None and audit_ts is not None:
-        footnote = f"[^audit-{audit_id}]: audit_log row {audit_id} (event=reconcile.boot, ts={audit_ts})"
+    if result.status == "mismatch" and audit_id is not None:
+        footnote = f"[^audit-{audit_id}]: audit_log row {audit_id} (event=reconcile.boot)"
         body = f"{body}\n\n{footnote}"
 
     return body

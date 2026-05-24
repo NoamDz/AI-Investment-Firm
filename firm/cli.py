@@ -51,6 +51,7 @@ from firm.orchestrator.graph import build_graph
 from firm.orchestrator.state import WorkingState
 from firm.reconcile.boot import reconcile_on_boot, resolve_from_broker
 from firm.reports.daily import render_daily_report
+from firm.reports.html import render_daily_html
 from firm.reports.reconcile_block import render_reconcile_block
 from firm.reports.xlsx import write_positions_xlsx
 
@@ -636,6 +637,15 @@ def report(date_str: str) -> None:
         reconcile_block=reconcile_block,
     )
 
+    render_daily_html(
+        date=parsed_date,
+        db_path=db,
+        broker=broker,
+        traces_path=out_dir / "traces.jsonl",
+        reports_root=reports_root,
+        reconcile_block=reconcile_block,
+    )
+
     as_of = datetime.combine(parsed_date, time.max, tzinfo=timezone.utc)
     write_positions_xlsx(
         path=out_dir / "positions.xlsx",
@@ -645,6 +655,9 @@ def report(date_str: str) -> None:
     )
 
     click.echo(f"Report bundle written: {out_dir}")
+    click.echo("  - daily_report.md")
+    click.echo("  - daily_report.html")
+    click.echo("  - positions.xlsx")
 
 
 def _make_qdrant_client() -> "Any":

@@ -138,8 +138,11 @@ make report DATE=2024-03-13
 # Equivalent: python -m firm.cli report --date 2024-03-13
 ```
 
-Writes `data/reports/2024-03-13/daily_report.md` (decision histogram + cost
-summary + EOD reconcile) and `positions.xlsx`.
+Writes three artifacts to `data/reports/2024-03-13/`:
+
+- `daily_report.html` — self-contained file, no JS, no external CSS. Open in your browser; print to PDF with Ctrl-P.
+- `daily_report.md` — same decision histogram + cost summary + EOD reconcile as before (legacy plain-text).
+- `positions.xlsx` — Positions / P&L / Decisions sheets.
 
 ## Running `firm run` natively (no Docker)
 
