@@ -69,15 +69,19 @@ python -c "import sqlite3; c=sqlite3.connect('data/firm.db'); print('positions:'
 
 ### What to expect from the demo
 
-Research always investigates `universe.tickers[0]` (currently `AAPL` — see
-`config/universe.yaml`). With the default 20-doc corpus the alphabetically-first
-FinanceBench docs are 3M, AES, AMD, Activision, Adobe, Amazon, Amcor, AMEX,
-American Water Works — **no Apple** — so retrieval returns no chunks and the
-heartbeat **REFUSES** with `failure_mode: insufficient_evidence`. The full
-research → PM → risk → execution pipeline still runs end-to-end, terminating
-in a signed REFUSE Decision and writing the report.
+Research always investigates `universe.tickers[0]` — currently `AMD` (see
+`config/universe.yaml`). AMD is the one entry whose stock symbol matches its
+FinanceBench `company` payload string verbatim, so retrieval returns chunks
+out of the box even with the 20-doc subset (AMD sits in the alphabetic head:
+3M, AES, AMD, Activision, Adobe, …).
 
-To see a non-refuse path, ingest the full 84-doc corpus (includes Apple):
+The full research → PM voters → risk → execution pipeline runs end-to-end and
+terminates in a signed BUY or HOLD `Decision` grounded in real cited evidence,
+then writes the report. `FIRM_INITIAL_POSITIONS` (set by `docker-compose.yml`
+to `{"AMD":"10"}`) seeds an existing AMD position so the trade clears the
+risk `escalate_new_ticker` check and does not block on HITL approval.
+
+To exercise the full 84-doc corpus instead:
 
 ```powershell
 Remove-Item Env:FIRM_INGEST_MAX_DOCS
@@ -94,9 +98,7 @@ docker compose up firm
 
 ## HITL flow
 
-> Requires the **full 84-doc corpus** so research produces a BUY rather than REFUSE on AAPL.
-
-The default demo pre-seeds `FIRM_INITIAL_POSITIONS={"AAPL":"10"}` (in
+The default demo pre-seeds `FIRM_INITIAL_POSITIONS={"AMD":"10"}` (in
 `docker-compose.yml`) so the trade clears risk without human approval. To
 exercise the HITL path, wipe initial positions:
 

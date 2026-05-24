@@ -15,7 +15,7 @@ services:
     environment:
       FIRM_BROKER: FAKE
       FIRM_HMAC_SECRET: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
-      FIRM_INITIAL_POSITIONS: '{"AAPL":"10"}'
+      FIRM_INITIAL_POSITIONS: '{"AMD":"10"}'
       FIRM_REPLAY_AT: "2024-03-13T14:30:00+00:00"
       QDRANT_URL: "http://qdrant:6333"
       FIRM_LLM_MODE: "${FIRM_LLM_MODE:-live}"
