@@ -90,7 +90,7 @@ Every step the firm takes — every agent run, every model call, every retrieval
 Four layers protect the firm from itself and from bad inputs: filtered text rejects prompt-injection attempts hidden in retrieved web or filing content; every agent's output is shape-checked before being trusted downstream; the citation re-reader catches hallucinations before they reach the portfolio managers; and the rule book enforces trading limits the model cannot argue past. A red-team suite of 51 adversarial cases proves each layer fires when it should and stays quiet when it shouldn't.
 
 ### Eval harness
-Three historical 5-day market windows replay end-to-end with frozen clock and recorded model responses — no API key required, runs in CI. Reports cover both **portfolio performance** (per-trade returns, hit rate, vs. S&P 500, vs. an equal-weight basket of the universe) and **process quality** (groundedness, decision discipline, guardrail effectiveness, mistake rate). Determinism is enforced by running the eval twice and diffing the output; any leaking randomness fails the build.
+Three historical 5-day market windows replay end-to-end with frozen clock and recorded model responses — no API key required, runs in CI. Reports cover both **portfolio performance** (per-trade returns, hit rate, vs. S&P 500, vs. an equal-weight basket of the universe) and **process quality** (groundedness, decision discipline, guardrail effectiveness, mistake rate). Determinism is enforced by running the eval twice and diffing the output; any leaking randomness fails the build. Run with `make eval`; the per-regime numbers land at `reports/eval/<regime>/summary.md` — see [`docs/eval.md`](docs/eval.md) for the report shape and metric definitions.
 
 ### Two output channels
 
@@ -101,7 +101,7 @@ Three historical 5-day market windows replay end-to-end with frozen clock and re
 Two complementary delivery channels — both running on `docker compose up` with no external infrastructure (no Slack workspace, no SMTP server, no cloud bucket) required:
 
 - **Channel A — Live web dashboard.** Open in a browser at the local URL. Three tabs: *Today's Report* shows the rendered daily report for any selected date; *Live Desk* refreshes every few seconds and shows current cash, positions, recent decisions, the human-approval queue, today's spend, and reconciliation; *Trace* takes a decision ID and shows every step that trade went through.
-- **Channel B — Self-contained report bundle.** Written to disk at end of day. One HTML file (no JavaScript, no external assets — opens cleanly off a USB stick), one Excel workbook with Positions / P&L / Decisions on separate sheets, and the raw decision and trace logs as plain JSONL. This is what would be emailed at end of day in a production setup.
+- **Channel B — Self-contained report bundle.** Written to disk at end of day. One HTML file (no JavaScript, no external assets — opens cleanly off a USB stick), one Excel workbook (positions with mark-to-market unrealized P&L; one row per decision with action, ticker, citation count, rationale), and the raw decision and trace logs as plain JSONL. Per-trade *realized* P&L plus benchmarks vs. S&P and the universe basket live in the eval report (`reports/eval/<regime>/summary.md`), not in the daily bundle.
 
 Why both: real-time vs. durable, different audiences (operators vs. forwardable stakeholders). Both read the same underlying state, so they cannot disagree.
 
@@ -116,10 +116,6 @@ Three committed trading days, one per market regime. Each was chosen *before* an
 | [`2023-11-08`](sample_runs/2023-11-08/README.md) | Quiet pre-CPI tape | — | Two HOLD decisions — quiet day, no fresh catalysts, the firm correctly does nothing |
 
 Each per-date folder has a narrated `README.md` (start there), a dashboard screenshot, the HTML report bundle, the Excel workbook, and the raw decision and trace logs. A small script (`scripts/hydrate_sample_db.py`) rebuilds the firm's state file so a reviewer can re-render any bundle locally.
-
-> **Why some decision rows have no ticker.** A BUY or SELL decision targets a specific stock and carries shares; a HOLD is a deliberate *do nothing this tick* and does not target one; an ESCALATE may be portfolio-level rather than name-specific. That is why the ticker column shows blank for HOLD and some ESCALATE rows — it is the decision schema, not missing data.
-
-> **Why some bundles do not show AMD.** The committed samples were generated against fixture data from earlier development before the default universe was reordered; the regenerate recipe in [`sample_runs/README.md`](sample_runs/README.md) reproduces them against the current universe.
 
 ## Documentation index
 

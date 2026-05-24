@@ -161,10 +161,24 @@ research path.` A non-hex value also fails fast.
 
 ## Real paper trading (Alpaca)
 
-```
-FIRM_BROKER=ALPACA
-ALPACA_API_KEY=...
-ALPACA_SECRET_KEY=...
-```
+The default broker is a deterministic in-memory fake. To route orders to Alpaca's free paper-trading endpoint:
 
-Then `docker compose up firm`.
+1. **Create a free Alpaca account.** Sign up at <https://alpaca.markets/> and open the **Paper Trading** dashboard (top-right account switcher). Paper trading is free, requires no funding, and runs against the same API as live trading.
+2. **Generate an API key pair.** In the paper dashboard sidebar choose *Your API Keys → Generate New Key*. You get a **Key ID** and a **Secret Key**; the secret is shown exactly once — copy both immediately.
+3. **Add them to `.env`.** Append to the `.env` you created in §1:
+
+   ```ini
+   FIRM_BROKER=ALPACA
+   ALPACA_API_KEY=PK...           # Key ID from step 2
+   ALPACA_SECRET_KEY=...          # Secret Key from step 2
+   ```
+
+4. **Install the SDK** (only if running natively — the firm container already has it):
+
+   ```powershell
+   pip install alpaca-py
+   ```
+
+5. **Run the firm.** `docker compose up firm` — orders now route to your paper account. Verify by opening the Alpaca dashboard's *Positions* tab after the first BUY heartbeat.
+
+The adapter (`firm/broker/alpaca_paper.py`) hard-codes `paper=True` on `TradingClient`, so this path can only hit the paper endpoint regardless of which keys you paste in. To switch back to the deterministic fake (e.g. for replay or eval), unset `FIRM_BROKER` or set `FIRM_BROKER=FAKE`.
