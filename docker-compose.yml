@@ -20,7 +20,8 @@ services:
       # so unrealized ≈ +$1,375). Shares-only form (e.g. '{"AMD":"10"}') seeds
       # avg_cost=current_quote → unrealized P&L = 0, which hides the column.
       FIRM_INITIAL_POSITIONS: '{"AMD":{"shares":"10","avg_cost":"600"}}'
-      FIRM_REPLAY_AT: "2024-03-13T14:30:00+00:00"
+      # No FIRM_REPLAY_AT: fall back to WallClock so each heartbeat advances
+      # real time. Set FIRM_REPLAY_AT in your shell to pin a historical date.
       QDRANT_URL: "http://qdrant:6333"
       FIRM_LLM_MODE: "${FIRM_LLM_MODE:-live}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
@@ -30,6 +31,10 @@ services:
       FIRM_TRACES_ROOT: /data/traces
     volumes:
       - ./data:/data
+      # Override the image-baked parquets at /app/data/precomputed/ with the
+      # host's, so `python -m firm.cli ingest` on host updates what the
+      # container's tool layer reads — no rebuild required.
+      - ./data/precomputed:/app/data/precomputed
       - ${USERPROFILE:-${HOME}}/.cache/huggingface:/root/.cache/huggingface
     depends_on:
       qdrant:

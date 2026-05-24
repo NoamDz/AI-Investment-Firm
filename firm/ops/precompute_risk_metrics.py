@@ -39,7 +39,7 @@ import pyarrow.parquet as pq
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-_REPO_ROOT = Path(__file__).parent.parent
+_REPO_ROOT = Path(__file__).parent.parent.parent
 _FIXTURE_JSON = _REPO_ROOT / "tests" / "fixtures" / "financebench_two_docs.json"
 _FIXTURE_PARQUET = _REPO_ROOT / "tests" / "fixtures" / "risk_metrics_fixture.parquet"
 _REAL_PARQUET = _REPO_ROOT / "data" / "precomputed" / "risk_metrics.parquet"
@@ -72,6 +72,12 @@ _FIXTURE_ROWS: list[tuple[str, str, date, Decimal]] = [
 # universe.tickers[0] = "AMD" demo heartbeat satisfy tool calls (PIT lookup
 # against the FIRM_REPLAY_AT=2024-03-13 clock).
 _DEMO_ROWS: list[tuple[str, str, date, Decimal]] = [
+    # FY2022 snapshot — covers LLM queries that cite the FinanceBench AMD
+    # filing's fiscal year (often 2022-12-31).
+    ("AMD", "volatility_30d", date(2022, 12, 31), Decimal("0.55")),
+    ("AMD", "beta_180d", date(2022, 12, 31), Decimal("1.85")),
+    ("AMD", "max_drawdown_90d", date(2022, 12, 31), Decimal("0.32")),
+    # Recent snapshot for PIT lookups against the replay clock.
     ("AMD", "volatility_30d", date(2024, 2, 1), Decimal("0.40")),
     ("AMD", "beta_180d", date(2024, 2, 1), Decimal("1.70")),
     ("AMD", "max_drawdown_90d", date(2024, 2, 1), Decimal("0.10")),

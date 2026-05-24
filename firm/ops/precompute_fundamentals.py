@@ -39,7 +39,7 @@ import pyarrow.parquet as pq
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-_REPO_ROOT = Path(__file__).parent.parent
+_REPO_ROOT = Path(__file__).parent.parent.parent
 _FIXTURE_JSON = _REPO_ROOT / "tests" / "fixtures" / "financebench_two_docs.json"
 _FIXTURE_PARQUET = _REPO_ROOT / "tests" / "fixtures" / "fundamentals_fixture.parquet"
 _REAL_PARQUET = _REPO_ROOT / "data" / "precomputed" / "fundamentals.parquet"
@@ -76,6 +76,15 @@ _FIXTURE_ROWS: list[tuple[str, str, date, Decimal]] = [
 # universe.tickers[0] = "AMD" demo heartbeat satisfy tool calls (PIT lookup
 # against the FIRM_REPLAY_AT=2024-03-13 clock).
 _DEMO_ROWS: list[tuple[str, str, date, Decimal]] = [
+    # FY2022 10-K (filed late 2022) — covers LLM queries that cite the
+    # FinanceBench AMD filing's fiscal year.
+    ("AMD", "pe_ratio", date(2022, 12, 31), Decimal("28.0")),
+    ("AMD", "gross_margin", date(2022, 12, 31), Decimal("0.45")),
+    ("AMD", "revenue_yoy_growth", date(2022, 12, 31), Decimal("0.44")),
+    ("AMD", "debt_to_equity", date(2022, 12, 31), Decimal("0.06")),
+    ("AMD", "current_ratio", date(2022, 12, 31), Decimal("2.36")),
+    # Recent snapshot to exercise PIT "latest on or before" when replay clock
+    # advances past 2024-02-01.
     ("AMD", "pe_ratio", date(2024, 2, 1), Decimal("145.0")),
     ("AMD", "gross_margin", date(2024, 2, 1), Decimal("0.46")),
     ("AMD", "revenue_yoy_growth", date(2024, 2, 1), Decimal("-0.01")),

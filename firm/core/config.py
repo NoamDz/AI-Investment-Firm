@@ -38,6 +38,12 @@ class UniverseConfig(BaseModel):
     as_of: date
     tickers: list[str] = Field(min_length=1)
     sector_map: dict[str, str]
+    # Symbol → corpus name override used by the research agent when forming
+    # retrieval questions, so universe symbols whose FinanceBench payload
+    # ``ticker`` is the company name (Microsoft, Adobe, …) still retrieve.
+    # Optional; tickers absent here use the symbol unchanged. Keys must be
+    # real universe tickers (validated below) to catch typos at boot.
+    corpus_aliases: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _check_tickers_consistency(self) -> "UniverseConfig":
@@ -53,6 +59,13 @@ class UniverseConfig(BaseModel):
         orphans = sorted(k for k in self.sector_map if k not in set(self.tickers))
         if orphans:
             raise ValueError(f"sector_map keys not in tickers: {orphans}")
+        alias_orphans = sorted(
+            k for k in self.corpus_aliases if k not in set(self.tickers)
+        )
+        if alias_orphans:
+            raise ValueError(
+                f"corpus_aliases keys not in tickers: {alias_orphans}"
+            )
         return self
 
 

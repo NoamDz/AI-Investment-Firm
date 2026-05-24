@@ -66,3 +66,21 @@ sector_map:
   COST: staples
   HD: discretionary
   XOM: energy
+
+# Symbol → FinanceBench corpus name. The HF dataset stores company names (not
+# stock symbols) in the chunk `ticker` payload, so retrieval queries that
+# reference "MSFT" miss the Microsoft chunks. The research agent substitutes
+# the alias when forming its retrieval question; everything else (broker
+# pricing, fundamentals parquet keys, decision payload) keeps the stock
+# symbol. Tickers absent here fall through unchanged.
+corpus_aliases:
+  MSFT: Microsoft
+  AMZN: Amazon
+  NFLX: Netflix
+  JPM: JPMorgan
+  JNJ: Johnson & Johnson
+  WMT: Walmart
+  COST: Costco
+  ADBE: Adobe
+  KO: Coca-Cola
+  PEP: PepsiCo

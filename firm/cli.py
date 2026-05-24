@@ -213,6 +213,79 @@ def _fit_bm25_sparse(rag_config: Any, sparse: Any) -> None:
         sparse.fit(["placeholder"])
 
 
+def _warn_if_missing_ticker_coverage(
+    tickers: list[str],
+    *,
+    collection: str,
+    corpus_aliases: dict[str, str] | None = None,
+    echo: Callable[[str], None] = click.echo,
+) -> tuple[list[str], list[str]]:
+    """Print a single boot-time line summarising ticker → corpus coverage.
+
+    Hot trap when editing ``config/universe.yaml``: the FinanceBench corpus
+    stores company names as the ``ticker`` payload field (e.g. "AMD",
+    "Microsoft", "Adobe"), so symbols that don't match a company name verbatim
+    have no corpus coverage and every heartbeat REFUSEs with
+    ``insufficient_evidence``. This check surfaces the mismatch loudly at
+    boot rather than letting it manifest as a silent REFUSE storm.
+
+    ``corpus_aliases`` maps a stock symbol to the corpus name to look up
+    (e.g. ``{"MSFT": "Microsoft"}``); tickers absent from the map are looked
+    up by symbol.
+
+    Returns ``(covered, missing)`` so the caller can feed ``covered`` into the
+    research-agent ticker rotation. On connection / collection failure both
+    lists are empty (the firm has already started; this is a hint, not a gate).
+    """
+    aliases = corpus_aliases or {}
+    covered: list[str] = []
+    missing: list[str] = []
+    try:
+        from qdrant_client import models as _qmodels
+
+        client = _make_qdrant_client()
+        for ticker in tickers:
+            lookup = aliases.get(ticker, ticker)
+            points, _next = client.scroll(
+                collection_name=collection,
+                scroll_filter=_qmodels.Filter(
+                    must=[
+                        _qmodels.FieldCondition(
+                            key="ticker",
+                            match=_qmodels.MatchValue(value=lookup),
+                        )
+                    ]
+                ),
+                limit=1,
+                with_payload=False,
+                with_vectors=False,
+            )
+            if points:
+                covered.append(ticker)
+            else:
+                missing.append(ticker)
+    except Exception as exc:  # noqa: BLE001 — UX hint only.
+        echo(
+            f"[firm run] Corpus coverage check skipped ({type(exc).__name__}): {exc}"
+        )
+        return ([], [])
+
+    echo(
+        f"[firm run] Corpus coverage: {len(covered)}/{len(tickers)} universe "
+        f"tickers have chunks in '{collection}' "
+        f"(covered: {', '.join(covered) if covered else '—'})."
+    )
+    if missing:
+        echo(
+            f"[firm run] Warning: {len(missing)} ticker(s) without corpus "
+            f"coverage — heartbeats targeting these will REFUSE with "
+            f"insufficient_evidence: {', '.join(missing)}. Add a "
+            "corpus_aliases entry in config/universe.yaml (symbol -> "
+            "FinanceBench company name) or extend the corpus."
+        )
+    return (covered, missing)
+
+
 def _build_llm_stack(
     db: Path, clock: Clock, rag_config: Any, llm_config: Any
 ) -> tuple[Any, Any, Any, CostRouter]:
@@ -350,6 +423,12 @@ def run(once: bool, interval_seconds: int) -> None:
     and the loop continues. SIGINT/SIGTERM stops cleanly after the current
     heartbeat (a second signal exits immediately).
     """
+    warnings.filterwarnings("ignore", category=UserWarning, module="requests")
+    warnings.filterwarnings("ignore", message=".*get_extended_attention_mask.*")
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+
+    click.echo("[firm run] booting: db init → broker reconcile → LLM stack (Qdrant + embedder + Anthropic)...")
     db = _db_path()
     init_db(db)
     clock = _resolve_clock()
@@ -380,6 +459,22 @@ def run(once: bool, interval_seconds: int) -> None:
         db, clock, rag_config, llm_config
     )
 
+    # Boot-time corpus-coverage hint: warn (don't block) when any configured
+    # ticker has zero chunks in Qdrant, so the operator sees the mismatch up
+    # front instead of after watching N heartbeats all REFUSE. The covered
+    # list is also reused below as the research-agent rotation set, so the
+    # firm researches a different stock per heartbeat instead of pinning to
+    # universe.tickers[0] (which made every heartbeat look identical).
+    covered_tickers, _missing_tickers = _warn_if_missing_ticker_coverage(
+        universe.tickers,
+        collection=rag_config.qdrant.collection,
+        corpus_aliases=universe.corpus_aliases,
+    )
+    # Fallback: if Qdrant probe failed or every ticker missed coverage, fall
+    # back to the full universe so the agent has *something* to research —
+    # the per-heartbeat REFUSE is still the right behaviour at that point.
+    researchable_tickers: list[str] = covered_tickers or list(universe.tickers)
+
     # nonce_secret is required for the grounded path; sourced from env.
     raw_secret = os.environ.get("FIRM_HMAC_SECRET")
     if not raw_secret:
@@ -403,6 +498,7 @@ def run(once: bool, interval_seconds: int) -> None:
         nonce_secret=nonce_secret,
         router=router,
         db_path=db,
+        researchable_tickers=researchable_tickers,
     )
 
     # PM voter: cheap to construct (no external deps), and shares the
@@ -498,11 +594,33 @@ def run(once: bool, interval_seconds: int) -> None:
         existing = graph.get_state(config)
         invoke_input: dict[str, Any] | None = None if existing.next else {}
 
+        # Mirror the research-agent's rotation so the banner names the ticker
+        # the agent will actually research. The agent uses a closure counter
+        # starting at 0 and incrementing per heartbeat; seq starts at 1, so
+        # (seq - 1) % len(...) gives the matching index.
+        target_ticker = researchable_tickers[
+            (seq - 1) % len(researchable_tickers)
+        ]
+        click.echo(
+            f"[firm run] heartbeat #{seq} starting — researching {target_ticker} "
+            f"(research → 3 PM voters → risk → execute → report)..."
+        )
+        t0 = _time_module.monotonic()
+
         # T03: one outer ``agent.heartbeat`` span so every child node span
         # shares a single trace_id (otherwise each node becomes its own root).
         with agent_span("heartbeat"):
             final = graph.invoke(invoke_input, config=config)
-        click.echo(f"Heartbeat #{seq} complete. Report: {final.get('report_path')}")
+
+        elapsed = _time_module.monotonic() - t0
+        decision = final.get("risk_decision") or final.get("pm_decision")
+        action = getattr(decision, "action", "?")
+        decision_id = getattr(decision, "id", "?")
+        click.echo(
+            f"[firm run] heartbeat #{seq} done in {elapsed:.1f}s — "
+            f"action={action} decision_id={decision_id} "
+            f"report={final.get('report_path')}"
+        )
 
     if once:
         _do_heartbeat(1)
@@ -527,7 +645,11 @@ def run(once: bool, interval_seconds: int) -> None:
         signal.signal(signal.SIGTERM, _on_signal)
 
     click.echo(
-        f"[firm run] loop mode: heartbeat every {interval_seconds}s. Ctrl-C to stop."
+        f"[firm run] loop mode: heartbeat every {interval_seconds}s. Ctrl-C to stop. "
+        f"Dashboard: http://localhost:8501"
+    )
+    click.echo(
+        "[firm run] first heartbeat may take ~30-60s (model warmup); steady-state ~10-15s."
     )
     _run_heartbeat_loop(
         _do_heartbeat,

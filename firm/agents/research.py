@@ -154,6 +154,22 @@ def _format_question(ticker: str) -> str:
     )
 
 
+# Question rotation for the demo loop: each heartbeat picks a different angle
+# so successive runs surface different chunks and the LLM produces varied
+# theses, without needing additional corpus coverage. Index 0 matches the
+# default question above so the first-heartbeat behaviour is unchanged.
+_QUESTION_TEMPLATES: tuple[str, ...] = (
+    "Summarize {ticker}'s latest reported financial trajectory and any "
+    "near-term catalysts.",
+    "Assess {ticker}'s profitability and margin trends from its most recent "
+    "filing.",
+    "What does {ticker}'s most recent 10-K say about competitive position and "
+    "key risks?",
+    "Review {ticker}'s balance sheet strength and capital allocation in its "
+    "latest filing.",
+)
+
+
 def _build_citations(claims: list[Claim], chunks: list[Chunk]) -> list[Citation]:
     """Map each grounded ``Claim`` to a ``Citation`` per the spec.
 
@@ -243,6 +259,7 @@ def _make_grounded_research(
     nonce_secret: bytes | None,
     router: CostRouter | None = None,
     db_path: Path | None = None,
+    researchable_tickers: list[str] | None = None,
 ) -> Callable[[WorkingState], dict[str, Any]]:
     """Build the grounded heartbeat node.
 
@@ -284,14 +301,45 @@ def _make_grounded_research(
     extractor_model: str = getattr(extractor, "_model", "unknown")
     judge_model: str = getattr(judge, "_model", "unknown")
 
+    # Heartbeat counter (closure-scoped) used to rotate BOTH the research
+    # ticker and the question template across runs. Lockstep rotation is
+    # intentional: each heartbeat is a distinct (ticker, angle) pair so the
+    # demo loop surfaces materially different evidence chunks rather than
+    # re-asking the same question of the same filing.
+    _rotation = {"i": 0}
+
+    # Pre-resolve the rotation set. When the caller (CLI) probed Qdrant and
+    # passed a covered-tickers list, rotate only through those — otherwise
+    # fall back to the full universe (tests, legacy callers, Qdrant probe
+    # failure). An empty list is treated as "no constraint" for the same
+    # reason.
+    _rotation_tickers: list[str] = (
+        list(researchable_tickers) if researchable_tickers else list(universe.tickers)
+    )
+
     def research(state: WorkingState) -> dict[str, Any]:  # noqa: ARG001 -- reads clock, not heartbeat
         # T03: CM form (not decorator) so REFUSE branches can stamp
         # ``failure_mode`` and ``decision_id`` onto the agent span before
         # returning.  Mirrors the pattern used by ``firm/cli.py`` risk_node.
         with agent_span("research") as span:
-            # Step 1: deterministic ticker selection. Simplest stable rule.
-            ticker = universe.tickers[0]
-            question = _format_question(ticker)
+            # Step 1: deterministic ticker rotation. Pulls from the
+            # covered-tickers list passed by the CLI (post-alias plumbing,
+            # this is ~11 stocks whose FinanceBench coverage actually
+            # resolves) so each heartbeat researches a distinct symbol
+            # instead of pinning to universe.tickers[0].
+            ticker = _rotation_tickers[
+                _rotation["i"] % len(_rotation_tickers)
+            ]
+            # Substitute the corpus alias (e.g. MSFT -> "Microsoft") only in
+            # the retrieval question so it matches the FinanceBench ``ticker``
+            # payload. Downstream (broker, fundamentals, decision payload) the
+            # ticker remains the stock symbol.
+            corpus_name = universe.corpus_aliases.get(ticker, ticker)
+            template = _QUESTION_TEMPLATES[
+                _rotation["i"] % len(_QUESTION_TEMPLATES)
+            ]
+            _rotation["i"] += 1
+            question = template.format(ticker=corpus_name)
             now = clock.now()
 
             # Step 2: retrieve. Empty → REFUSE / INSUFFICIENT_EVIDENCE.
@@ -739,6 +787,7 @@ def make_research(
     nonce_secret: bytes | None = None,
     router: CostRouter | None = None,
     db_path: Path | None = None,
+    researchable_tickers: list[str] | None = None,
 ) -> Callable[[WorkingState], dict[str, Any]]:
     """Build a research node callable.
 
@@ -765,5 +814,6 @@ def make_research(
             nonce_secret=nonce_secret,
             router=router,
             db_path=db_path,
+            researchable_tickers=researchable_tickers,
         )
     return _make_legacy_stub_research(clock=clock, broker=broker, universe=universe)

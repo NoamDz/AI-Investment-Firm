@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -186,11 +186,21 @@ def _list_available_dates() -> list[tuple[str, Path]]:
 
     Live ``data/reports/<date>/`` directories take precedence; committed
     ``sample_runs/<date>/`` directories are appended only when the same date
-    is not already present in the live set. A directory only counts if its
-    name parses as ``YYYY-MM-DD`` and it actually exists as a directory.
+    is not already present in the live set. Today's wall-clock date is
+    *always* included (under ``REPORTS_ROOT``) so the dropdown's default
+    selection matches the date the firm is currently writing to — even
+    before the first reporter run lands the bundle on disk. A directory
+    only counts if its name parses as ``YYYY-MM-DD``.
     """
     seen: set[str] = set()
     out: list[tuple[str, Path]] = []
+
+    # Seed with today (wall clock, UTC) so the dropdown always offers the
+    # in-progress date. Renderer suffixes "(no report yet)" if the bundle
+    # is missing — see _render_today_tab.
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    out.append((today, REPORTS_ROOT))
+    seen.add(today)
 
     for root in (REPORTS_ROOT, SAMPLE_RUNS_ROOT):
         if not root.exists():
@@ -378,8 +388,26 @@ def _render_live_desk_tab() -> None:
     with right:
         st.subheader("Recent decisions")
         decisions = _read_decisions(conn)
+        show_all = st.checkbox(
+            "Show all (across past runs)",
+            value=False,
+            help=(
+                "Decisions persist in SQLite across runs. Unchecked: only the "
+                "last 60 minutes (current session). Checked: latest 25 of all time."
+            ),
+        )
+        if not decisions.empty and not show_all:
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(minutes=60)
+            ).isoformat()
+            decisions = decisions[decisions["ts"] >= cutoff].reset_index(drop=True)
         if decisions.empty:
-            st.info("No decisions yet — waiting for heartbeat.")
+            st.info(
+                "No decisions in the last 60 min — waiting for heartbeat. "
+                "Tick 'Show all' to see prior runs."
+                if not show_all
+                else "No decisions yet — waiting for heartbeat."
+            )
         else:
             for _, row in decisions.iterrows():
                 color = ACTION_COLORS.get(row["action"], "#444")
@@ -436,7 +464,12 @@ _TRACE_COLUMNS = (
 
 
 def _load_trace_spans(trace_path: Path, decision_id: str) -> list[dict[str, Any]]:
-    """Parse JSONL file, returning spans matching ``decision_id`` in file order."""
+    """Parse JSONL file, returning spans matching ``decision_id`` in file order.
+
+    Returns only the columns listed in :data:`_TRACE_COLUMNS` — the projection
+    used by the summary dataframe. For the full per-span JSON (parent/child
+    chain, trace_id, etc.) use :func:`_load_all_span_records`.
+    """
     matched: list[dict[str, Any]] = []
     with trace_path.open("r", encoding="utf-8") as f:
         for line in f:
@@ -452,39 +485,112 @@ def _load_trace_spans(trace_path: Path, decision_id: str) -> list[dict[str, Any]
     return matched
 
 
+def _load_all_span_records(trace_path: Path) -> list[dict[str, Any]]:
+    """Parse JSONL file, returning every span as the full raw dict (all 15 fields).
+
+    File order is preserved (= span end-time order under BatchSpanProcessor).
+    """
+    spans: list[dict[str, Any]] = []
+    with trace_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                spans.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return spans
+
+
 def _render_trace_tab(date_str: str, source_root: Path) -> None:
-    """Per-decision span explorer."""
+    """Span-level trace viewer for the selected date.
+
+    Default view: every span in the day's trace file as a dataframe + per-span
+    JSON expanders. The optional ``decision_id`` filter narrows the view to a
+    single decision's span chain (research → judge → PM voters → risk → exec
+    → reporter). The grep escape-hatch lives in a collapsed expander at the
+    bottom for power users who want to pipe to jq.
+    """
     st.subheader(f"Trace — {date_str}")
 
     trace_path = _resolve_trace_path(date_str, source_root)
     if trace_path is None:
         st.warning(
             f"No trace file found under `{TRACES_ROOT / date_str}` or "
-            f"`{source_root / date_str / 'trace.jsonl'}`."
+            f"`{source_root / date_str / 'trace.jsonl'}`. Run the firm with "
+            "`python -m firm.cli run --loop` to emit spans."
         )
         return
 
-    st.caption(f"Reading {trace_path}")
-
-    decision_id = st.text_input("decision_id", placeholder="dec-buy-1")
-    if not decision_id:
-        st.info("Enter a decision_id above to inspect its span chain.")
+    all_spans = _load_all_span_records(trace_path)
+    st.caption(
+        f"Reading {trace_path} — {len(all_spans)} span(s) total."
+    )
+    if not all_spans:
+        st.info("Trace file is empty.")
         return
 
-    spans = _load_trace_spans(trace_path, decision_id)
+    # Decision-id filter (optional). Empty = show everything.
+    known_ids = sorted({s.get("decision_id", "") for s in all_spans if s.get("decision_id")})
+    options = ["(all spans)"] + known_ids
+    selected = st.selectbox(
+        "Filter by decision_id",
+        options,
+        index=0,
+        help=(
+            "Pick a decision_id to narrow to a single heartbeat's span chain. "
+            "'(all spans)' shows every span in the file."
+        ),
+    )
+    decision_id = "" if selected == "(all spans)" else selected
+
+    if decision_id:
+        spans = [s for s in all_spans if s.get("decision_id") == decision_id]
+        st.caption(f"Showing {len(spans)} span(s) for decision_id={decision_id!r}.")
+    else:
+        spans = all_spans
+
     if not spans:
-        st.info(
-            f"No spans found for decision_id={decision_id!r} in {trace_path.name}"
-        )
+        st.info(f"No spans found for decision_id={decision_id!r}.")
         return
 
-    df = pd.DataFrame(spans, columns=list(_TRACE_COLUMNS))
+    # Summary table: the operationally-interesting columns at a glance.
+    summary_rows = [{col: s.get(col, "") for col in _TRACE_COLUMNS} for s in spans]
+    df = pd.DataFrame(summary_rows, columns=list(_TRACE_COLUMNS))
     st.dataframe(df, use_container_width=True, hide_index=True)
 
+    # Per-span detail: full JSON (all 15 fields incl. trace_id / span_id /
+    # parent_span_id) so users can trace the parent/child chain without
+    # leaving the dashboard.
     st.divider()
-    st.markdown("**Copy the grep command:**")
-    cmd = f"grep '\"decision_id\":\"{decision_id}\"' {trace_path} | jq ."
-    st.code(cmd, language="bash")
+    st.markdown("**Span details** — click any row to expand the full JSON.")
+    for idx, span in enumerate(spans):
+        op = span.get("operation", "(no operation)")
+        agent = span.get("agent", "")
+        dur = span.get("duration_ms", 0)
+        status = span.get("status", "")
+        fm = span.get("failure_mode", "")
+        suffix_parts = []
+        if agent:
+            suffix_parts.append(f"agent={agent}")
+        try:
+            suffix_parts.append(f"{float(dur):.1f}ms")
+        except (TypeError, ValueError):
+            pass
+        if status:
+            suffix_parts.append(f"status={status}")
+        if fm:
+            suffix_parts.append(f"failure_mode={fm}")
+        header = f"{idx + 1}. {op}" + ("  ·  " + "  ·  ".join(suffix_parts) if suffix_parts else "")
+        with st.expander(header, expanded=False):
+            st.json(span, expanded=True)
+
+    st.divider()
+    with st.expander("Shell escape-hatch (grep + jq)", expanded=False):
+        scope = decision_id or "<any-decision-id>"
+        cmd = f"grep '\"decision_id\":\"{scope}\"' {trace_path} | jq ."
+        st.code(cmd, language="bash")
 
 
 # ---------------------------------------------------------------------------
@@ -509,19 +615,29 @@ def render() -> None:
         )
         return
 
-    labels = [d for d, _ in dates]
+    # Suffix labels for date dirs that don't exist on disk yet (the
+    # always-included today entry, before the reporter has run). Makes it
+    # obvious why the embedded report is empty when selected.
+    labels: list[str] = []
+    label_to_pair: dict[str, tuple[str, Path]] = {}
+    for d, r in dates:
+        suffix = "" if (r / d).is_dir() else "  (no report yet)"
+        label = f"{d}{suffix}"
+        labels.append(label)
+        label_to_pair[label] = (d, r)
     selected_label = st.selectbox("Date", labels, index=0)
-    selected_date, selected_source = next(
-        (d, r) for d, r in dates if d == selected_label
-    )
+    selected_date, selected_source = label_to_pair[selected_label]
     st.caption(f"Source: {selected_source / selected_date}")
 
-    tab1, tab2, tab3 = st.tabs(["Today's Report", "Live Desk", "Trace"])
+    # Live Desk first so a fresh run lands on the tab that reflects the
+    # running firm — "Today's Report" requires a finished report on disk,
+    # which doesn't exist on a fresh checkout until the first reporter run.
+    tab1, tab2, tab3 = st.tabs(["Live Desk", "Today's Report", "Trace"])
 
     with tab1:
-        _render_today_tab(selected_date, selected_source)
-    with tab2:
         _render_live_desk_tab()
+    with tab2:
+        _render_today_tab(selected_date, selected_source)
     with tab3:
         _render_trace_tab(selected_date, selected_source)
 
