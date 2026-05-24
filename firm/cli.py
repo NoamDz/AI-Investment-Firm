@@ -8,6 +8,7 @@ import os
 import shutil
 import sys
 import time as _time_module
+import warnings
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from datetime import datetime, time, timezone
@@ -763,6 +764,16 @@ def _make_fixture_loader(fixture_path: str) -> Any:
 )
 def ingest(config: str, max_docs: int | None, source_name: str) -> None:
     """Ingest one or more corpora into Qdrant. Idempotent — already-indexed docs are skipped."""
+    warnings.filterwarnings("ignore", category=UserWarning, module="requests")
+    warnings.filterwarnings("ignore", message=".*get_extended_attention_mask.*")
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+
+    click.echo(
+        "Ingesting corpus into Qdrant "
+        "(~2 min typical, ~5 min on first run while the embedder model downloads)."
+    )
+
     from firm.llm.anthropic_client import CachedAnthropicClient
     from firm.llm.cache import LlmCache
     from firm.rag.chunk import chunk_document
@@ -855,6 +866,7 @@ def ingest(config: str, max_docs: int | None, source_name: str) -> None:
     # -----------------------------------------------------------------------
     # Embedders.
     # -----------------------------------------------------------------------
+    click.echo("Stage 1/3: loading embedder model (download cached after first run)...")
     embedder = NomicEmbedder()
     sparse = BM25Sparse()
 
@@ -863,7 +875,7 @@ def ingest(config: str, max_docs: int | None, source_name: str) -> None:
     # NB: news source is iterated twice (pre-pass + run_ingest). With tickers=[]
     # this is free; if T21+ wires real tickers, exclude news from the pre-pass
     # so its TokenBucket budget isn't double-burned.
-    click.echo("Building BM25 vocabulary (pre-pass)...")
+    click.echo("Stage 2/3: building BM25 vocabulary (pre-pass over all selected sources)...")
     all_texts: list[str] = _collect_chunk_texts(sources, rag_config, chunk_document, tables_to_prose)
     if all_texts:
         sparse.fit(all_texts)
@@ -882,6 +894,10 @@ def ingest(config: str, max_docs: int | None, source_name: str) -> None:
     # -----------------------------------------------------------------------
     # Per-source ingest — one run_ingest call per source.
     # -----------------------------------------------------------------------
+    click.echo(
+        f"Stage 3/3: embedding + indexing {len(all_texts)} chunks across "
+        f"{len(sources)} source(s)..."
+    )
     total_docs = 0
     total_chunks = 0
     any_failed = False
@@ -911,6 +927,22 @@ def ingest(config: str, max_docs: int | None, source_name: str) -> None:
     click.echo(
         f"total: {len(sources)} corpora, {total_docs} docs, {total_chunks} chunks"
     )
+
+    # ------------------------------------------------------------------
+    # Tool parquets (fundamentals + risk metrics).
+    #
+    # Tools at ``firm/tools/{fundamentals,risk_metrics}.py`` read from
+    # ``data/precomputed/*.parquet`` during live heartbeats. Without these
+    # files the citations extractor raises KeyError per tool call. Bake the
+    # write into ``ingest`` so reviewers get a single bootstrap command.
+    # ------------------------------------------------------------------
+    click.echo("Writing tool parquets (fundamentals + risk metrics)...")
+    from firm.ops.precompute_fundamentals import write_demo_parquet as _write_fundamentals
+    from firm.ops.precompute_risk_metrics import write_demo_parquet as _write_risk
+
+    _write_fundamentals()
+    _write_risk()
+
     if any_failed:
         sys.exit(1)
 

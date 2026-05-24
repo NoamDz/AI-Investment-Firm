@@ -67,15 +67,27 @@ _FIXTURE_ROWS: list[tuple[str, str, date, Decimal]] = [
     ("AAPL", "volatility_30d", date(2024, 5, 1), Decimal("0.19")),
 ]
 
+# Demo-only rows — written to data/precomputed/risk_metrics.parquet by the
+# ``firm.cli ingest`` command, NOT to the test fixture parquet. Lets the
+# universe.tickers[0] = "AMD" demo heartbeat satisfy tool calls (PIT lookup
+# against the FIRM_REPLAY_AT=2024-03-13 clock).
+_DEMO_ROWS: list[tuple[str, str, date, Decimal]] = [
+    ("AMD", "volatility_30d", date(2024, 2, 1), Decimal("0.40")),
+    ("AMD", "beta_180d", date(2024, 2, 1), Decimal("1.70")),
+    ("AMD", "max_drawdown_90d", date(2024, 2, 1), Decimal("0.10")),
+]
 
-def _write_fixture_parquet(out_path: Path) -> None:
-    """Write the deterministic fixture parquet to ``out_path``."""
+
+def _write_parquet(
+    rows: list[tuple[str, str, date, Decimal]], out_path: Path
+) -> None:
+    """Write the given rows to a parquet at ``out_path``."""
     tickers: list[str] = []
     metric_ids: list[str] = []
     as_of_dates: list[date] = []
     values: list[str] = []  # store as string to preserve Decimal precision
 
-    for ticker, metric_id, as_of, value in _FIXTURE_ROWS:
+    for ticker, metric_id, as_of, value in rows:
         tickers.append(ticker)
         metric_ids.append(metric_id)
         as_of_dates.append(as_of)
@@ -102,7 +114,21 @@ def _write_fixture_parquet(out_path: Path) -> None:
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(table, str(out_path))  # type: ignore[no-untyped-call]
-    print(f"Written {len(_FIXTURE_ROWS)} rows to {out_path}")
+    print(f"Written {len(rows)} rows to {out_path}")
+
+
+def _write_fixture_parquet(out_path: Path) -> None:
+    """Write the deterministic fixture parquet (tests path) to ``out_path``."""
+    _write_parquet(_FIXTURE_ROWS, out_path)
+
+
+def write_demo_parquet(out_path: Path = _REAL_PARQUET) -> None:
+    """Write fixture + demo rows to ``data/precomputed/risk_metrics.parquet``.
+
+    Called from ``firm.cli ingest`` so reviewers don't need to invoke this
+    script manually. Idempotent — overwrites the parquet each time.
+    """
+    _write_parquet(_FIXTURE_ROWS + _DEMO_ROWS, out_path)
 
 
 def _write_real_parquet() -> None:

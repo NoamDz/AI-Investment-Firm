@@ -71,15 +71,29 @@ _FIXTURE_ROWS: list[tuple[str, str, date, Decimal]] = [
     ("AAPL", "pe_ratio", date(2024, 5, 1), Decimal("27.8")),
 ]
 
+# Demo-only rows — written to data/precomputed/fundamentals.parquet by the
+# ``firm.cli ingest`` command, NOT to the test fixture parquet. Lets the
+# universe.tickers[0] = "AMD" demo heartbeat satisfy tool calls (PIT lookup
+# against the FIRM_REPLAY_AT=2024-03-13 clock).
+_DEMO_ROWS: list[tuple[str, str, date, Decimal]] = [
+    ("AMD", "pe_ratio", date(2024, 2, 1), Decimal("145.0")),
+    ("AMD", "gross_margin", date(2024, 2, 1), Decimal("0.46")),
+    ("AMD", "revenue_yoy_growth", date(2024, 2, 1), Decimal("-0.01")),
+    ("AMD", "debt_to_equity", date(2024, 2, 1), Decimal("0.06")),
+    ("AMD", "current_ratio", date(2024, 2, 1), Decimal("2.50")),
+]
 
-def _write_fixture_parquet(out_path: Path) -> None:
-    """Write the deterministic fixture parquet to ``out_path``."""
+
+def _write_parquet(
+    rows: list[tuple[str, str, date, Decimal]], out_path: Path
+) -> None:
+    """Write the given rows to a parquet at ``out_path``."""
     tickers: list[str] = []
     ratio_names: list[str] = []
     as_of_dates: list[date] = []
     values: list[str] = []  # store as string to preserve Decimal precision
 
-    for ticker, ratio_name, as_of, value in _FIXTURE_ROWS:
+    for ticker, ratio_name, as_of, value in rows:
         tickers.append(ticker)
         ratio_names.append(ratio_name)
         as_of_dates.append(as_of)
@@ -106,7 +120,21 @@ def _write_fixture_parquet(out_path: Path) -> None:
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(table, str(out_path))  # type: ignore[no-untyped-call]
-    print(f"Written {len(_FIXTURE_ROWS)} rows to {out_path}")
+    print(f"Written {len(rows)} rows to {out_path}")
+
+
+def _write_fixture_parquet(out_path: Path) -> None:
+    """Write the deterministic fixture parquet (tests path) to ``out_path``."""
+    _write_parquet(_FIXTURE_ROWS, out_path)
+
+
+def write_demo_parquet(out_path: Path = _REAL_PARQUET) -> None:
+    """Write fixture + demo rows to ``data/precomputed/fundamentals.parquet``.
+
+    Called from ``firm.cli ingest`` so reviewers don't need to invoke this
+    script manually. Idempotent — overwrites the parquet each time.
+    """
+    _write_parquet(_FIXTURE_ROWS + _DEMO_ROWS, out_path)
 
 
 def _write_real_parquet() -> None:

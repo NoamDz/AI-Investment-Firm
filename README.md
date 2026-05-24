@@ -30,7 +30,7 @@ A small AI-run trading desk: seven agents take turns each minute — research, t
 ```powershell
 copy .env.example .env                                                  # then set ANTHROPIC_API_KEY
 docker compose up -d qdrant                                             # vector store
-python -m firm.cli ingest                                               # one-time corpus embed (~2 min)
+python -m firm.cli ingest                                               # corpus embed + tool parquets (~2 min)
 docker compose run --rm --build firm python -m firm.cli run --loop --interval-seconds 60
 ```
 
