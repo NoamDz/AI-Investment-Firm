@@ -6,6 +6,29 @@ Multi-agent paper-trading firm. Take-home for Cato Networks — Agentic AI Engin
 [![Main CI](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/main.yml/badge.svg?branch=main)](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/main.yml)
 [![Release](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/release.yml/badge.svg)](https://github.com/NoamDz/AI-Investment-Firm/actions/workflows/release.yml)
 
+## Contents
+
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Prerequisites](#prerequisites)
+- [Quickstart](#quickstart)
+- [What was built](#what-was-built)
+  - [Portfolio + broker contract](#the-portfolio-is-real-shaped)
+  - [State survives a crash](#state-survives-a-crash)
+  - [Runs continuously during market hours](#runs-continuously-during-market-hours)
+  - [Seven agents, real collaboration](#seven-agents-real-collaboration)
+  - [Grounded citations](#every-claim-is-grounded-in-a-real-filing)
+  - [Human-in-the-loop for big trades](#human-in-the-loop-for-big-trades)
+  - [**Observability** — replay any trade from the trace](#observability--replay-any-trade-from-the-trace)
+  - [**Dashboard** + HTML report bundle](#two-report-channels--dashboard-and-bundle)
+  - [Reproducible eval](#reproducible-eval--return--process-metrics)
+  - [Guardrails](#guardrails--every-input-output-and-trade-limit)
+  - [Improving from past decisions](#improving-from-past-decisions)
+  - [Where the data comes from](#where-the-data-comes-from)
+  - [Sample run committed](#sample-run-committed)
+  - [Bonuses](#bonuses)
+- [Documentation index](#documentation-index)
+
 ## Overview
 
 A small AI-run trading desk. Seven agents take turns each minute: read the market, pick a trade, debate it, check the rules, ask a human if the trade is large, place the order with a paper broker, and write the day's report. All state lives in one SQLite file, so the desk picks up exactly where it left off after a restart.
