@@ -55,7 +55,39 @@ flowchart LR
 
 Risk is the only branch point. Everything left of `execution` is a chance to stop a bad trade.
 
-Deeper view (deployment topology, where each safety net sits): [`docs/architecture.md`](docs/architecture.md).
+Deployment topology — host + Docker, where state lives, which APIs are optional:
+
+```mermaid
+flowchart TB
+    subgraph HOST [Host]
+      INGEST([firm.cli ingest<br/>GPU embed, one-time])
+      LOOP([firm.cli run --loop])
+      DASH([streamlit run firm/dashboard.py])
+    end
+    subgraph DOCKER [docker compose]
+      QD[(Qdrant 1.11<br/>vector store)]
+      FIRM[firm container<br/>LangGraph heartbeat]
+    end
+    subgraph STATE [Shared state — host bind-mounted]
+      DB[(firm.db — SQLite<br/>decisions · positions · hitl_queue<br/>cost_ledger · audit_log · checkpoint)]
+      REP[(data/reports/&lt;DATE&gt;/<br/>daily_report.html · positions.xlsx)]
+    end
+    subgraph EXT [External APIs]
+      ANT[Anthropic<br/>Citations + LLM]
+      ALP[Alpaca paper broker<br/>optional]
+    end
+    INGEST -- chunks --> QD
+    LOOP --> FIRM
+    FIRM -- retrieve --> QD
+    FIRM -- read/write --> DB
+    FIRM -- writes --> REP
+    FIRM -- LLM calls<br/>cost router + cache --> ANT
+    FIRM -- orders --> ALP
+    DASH -- read-only --> DB
+    DASH -- read --> REP
+```
+
+`firm.db` is the single source of truth — both the dashboard and the bundle read from it, so they cannot disagree. `FIRM_LLM_MODE=cached` drops the Anthropic dependency entirely (eval + red-team run offline). Deeper view (per-node failure modes, agent contracts): [`docs/architecture.md`](docs/architecture.md).
 
 ## Prerequisites
 
@@ -166,7 +198,11 @@ That's the whole heartbeat: research retrieved chunks → re-ranked → called S
 
 ### Two report channels — dashboard and bundle
 
-- **Channel A — Streamlit dashboard.** The live, in-browser delivery of the daily report itself. Opens on **Tab 1 ("Today's Report")** showing the rendered HTML report for the selected date. **Tab 2 ("Live Desk")** is the live observability view that refreshes every 5 s while the firm is running (cash, positions, recent decisions, the human-approval queue, today's spend, reconciliation). **Tab 3 ("Trace")** takes a `decision_id` and returns the matching spans. A date selectbox at the top of the page switches between live runs under `data/reports/*` and committed sample runs under `sample_runs/*`.
+![Dashboard — Tab 1 (Today's Report) for sample run 2024-03-13](sample_runs/2024-03-13/dashboard.png)
+
+*Tab 1 of the live dashboard on the 2024-03-13 earnings-day sample. Sibling captures: [2024-08-07 (drawdown)](sample_runs/2024-08-07/dashboard.png) · [2023-11-08 (quiet)](sample_runs/2023-11-08/dashboard.png).*
+
+- **Channel A — Streamlit dashboard.** The live, in-browser delivery of the daily report itself. Opens on **Tab 1 ("Today's Report")** showing the rendered HTML report for the selected date (the screenshot above). **Tab 2 ("Live Desk")** is the live observability view that refreshes every 5 s while the firm is running (cash, positions, recent decisions, the human-approval queue, today's spend, reconciliation). **Tab 3 ("Trace")** takes a `decision_id` and returns the matching spans. A date selectbox at the top of the page switches between live runs under `data/reports/*` and committed sample runs under `sample_runs/*`.
 - **Channel B — HTML report bundle.** A single self-contained `daily_report.html` (inline CSS, no JS, no external assets — opens cleanly off a USB stick) plus `positions.xlsx` (Positions / P&L / Decisions sheets), `decisions.jsonl` (audit log), and `trace.jsonl` (OpenTelemetry stream). Frame this as the durable handoff — the email body and attachment we *would* send if SMTP were wired. Print to PDF from the browser via Ctrl-P. A legacy plain-text `daily_report.md` is still generated for back-compat but no longer counted as a channel.
 
 Why these two: real-time vs. durable, different audiences (operators vs. forwardable stakeholders). Both run on `docker compose up` with no external infra — no SMTP, no Slack workspace, no S3 bucket. Both read the same source (`firm.db` plus the reporter's per-date directory), so they cannot disagree.

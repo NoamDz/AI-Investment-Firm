@@ -19,8 +19,13 @@ Each per-date directory contains:
 Regenerate any of these with:
 
 ```bash
+# hydrate prints the FIRM_INITIAL_POSITIONS line below — set it so the
+# report's reconcile block sees the broker holding the same positions
+# as the hydrated DB (otherwise the block renders ❌ MISMATCH).
 python scripts/hydrate_sample_db.py --date YYYY-MM-DD --out /tmp/firm.db
+# e.g. for 2024-03-13: export FIRM_INITIAL_POSITIONS='{"AAPL":"100"}'
 FIRM_DB_PATH=/tmp/firm.db FIRM_REPORTS_ROOT=sample_runs \
+FIRM_INITIAL_POSITIONS='{"AAPL":"100"}' \
     python -m firm.cli report --date YYYY-MM-DD
 python scripts/build_sample_run_readme.py --date YYYY-MM-DD
 python scripts/capture_dashboard_png.py --date YYYY-MM-DD \

@@ -115,15 +115,13 @@ footer p { margin: 4px 0; }
 
 <section>
   <h2>Reconciliation</h2>
-  <pre>  Broker positions:   {}
+  <pre>  Broker positions:   { AAPL: 100, MSFT: 20 }
   Local positions:    { AAPL: 100, MSFT: 20 }
-  Position diff:      { AAPL: broker=0 local=100, MSFT: broker=0 local=20 }
+  Position diff:      none
   Broker cash:        $100,000.00
   Local cash:         $100,000.00
   Cash diff:          $0.00
-  Status:             ❌ MISMATCH [^audit-1]
-
-[^audit-1]: audit_log row 1 (event=reconcile.boot)</pre>
+  Status:             ✓ books tie to broker</pre>
 </section>
 
 </main>

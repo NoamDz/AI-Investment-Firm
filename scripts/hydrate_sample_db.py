@@ -294,6 +294,10 @@ def main(argv: list[str] | None = None) -> int:
         f"cost_ledger={counts['cost_ledger']} "
         f"positions={counts['positions']}"
     )
+    positions = _POSITIONS_BY_DATE.get(args.date, [])
+    if positions:
+        env_json = json.dumps({t: s for t, s, _ in positions}, separators=(",", ":"))
+        print(f"FIRM_INITIAL_POSITIONS={env_json}")
     return 0
 
 
